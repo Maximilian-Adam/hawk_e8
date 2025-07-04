@@ -66,7 +66,7 @@
 /*
  * Temporary buffer size for key pair generation.
  */
-#define HAWK_TMPSIZE_KEYGEN(logn)         ((26u << (logn)) + 7)
+#define HAWK_TMPSIZE_KEYGEN(logn)         ((22u << (logn)) + 7)
 
 /*
  * Temporary buffer size for signature generation.
@@ -113,9 +113,9 @@ typedef void (*hawk_rng)(void *ctx, void *dst, size_t len);
  * 1 is returned.
  *
  * The temporary buffer is provided as tmp, with size tmp_len bytes.
- * In all generality, providing at least 26*(2^logn) + 7 bytes is always
+ * In all generality, providing at least 22*(2^logn) + 7 bytes is always
  * sufficient (this is the value returned by HAWK_TMPSIZE_KEYGEN).
- * If tmp is 8-byte aligned, then 26*(2^logn) bytes are enough.
+ * If tmp is 8-byte aligned, then 22*(2^logn) bytes are enough.
  */
 int
 hawk_keygen(unsigned logn, void *priv, void *pub,

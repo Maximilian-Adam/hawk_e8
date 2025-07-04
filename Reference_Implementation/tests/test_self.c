@@ -610,9 +610,9 @@ main(void)
 	test_shake();
 	test_shake_x4();
 
-	test_multiple_sigs(8, 100, "d05fbd38bb376ebc30ed32c5752129a66b7bd443");
-	test_multiple_sigs(9, 100, "cd0c0bd8dc16ccccda4a19a7a1394d089036030d");
-	test_multiple_sigs(10, 100, "5537795eeec59376a1710fa4ec9e38d582bd0b68");
+	test_multiple_sigs(8, 100, "d859a38f775e9554eef8125ec4c7fab4f3902ac1");
+	test_multiple_sigs(9, 100, "13bab724bc2dffaa7822a9f155adb878f79c2da6");
+	test_multiple_sigs(10, 100, "f19246ade2b734f9d243f91fa8ca658262d858ff");
 
 	printf("degree      priv     pub     sig\n");
 	for (unsigned logn = 8; logn <= 10; logn ++) {
