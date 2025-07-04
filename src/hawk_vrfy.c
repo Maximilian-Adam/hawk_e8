@@ -1987,7 +1987,8 @@ decode_gr_vpart(unsigned logn, int16_t *d, const uint8_t *buf, size_t buf_len,
 	uint64_t acc = 0;
 	unsigned acc_len = 0;
 	size_t du;
-	__m128i xlim = _mm_set1_epi16((1 << (lim_bits - low)) - 1);
+	unsigned lhi = 1 << (lim_bits - low);
+	__m128i xlim = _mm_set1_epi16(lhi - 1);
 	__m128i xlow = _mm_cvtsi32_si128(low);
 	for (du = 0; du < n; du += 8) {
 		if (voff + 8 > buf_len) {
@@ -2102,7 +2103,7 @@ decode_gr_vpart(unsigned logn, int16_t *d, const uint8_t *buf, size_t buf_len,
 		acc &= ~((uint64_t)-1 << acc_len);
 		for (size_t v = 0; v < 8; v ++) {
 			while (acc == 0) {
-				if (acc_len > 15) {
+				if (acc_len >= lhi) {
 					return 0;
 				}
 				if (voff >= buf_len) {
@@ -2116,7 +2117,7 @@ decode_gr_vpart(unsigned logn, int16_t *d, const uint8_t *buf, size_t buf_len,
 #else
 			unsigned k = _tzcnt_u32((uint32_t)acc);
 #endif
-			if (k > 15) {
+			if (k >= lhi) {
 				return 0;
 			}
 			acc >>= k + 1;
@@ -2131,7 +2132,7 @@ decode_gr_vpart(unsigned logn, int16_t *d, const uint8_t *buf, size_t buf_len,
 	 */
 	while (du < n) {
 		while (acc == 0) {
-			if (acc_len > 15) {
+			if (acc_len >= lhi) {
 				return 0;
 			}
 			if (voff >= buf_len) {
@@ -2145,7 +2146,7 @@ decode_gr_vpart(unsigned logn, int16_t *d, const uint8_t *buf, size_t buf_len,
 #else
 		unsigned k = _tzcnt_u32((uint32_t)acc);
 #endif
-		if (k > 15) {
+		if (k >= lhi) {
 			return 0;
 		}
 		acc >>= k + 1;
