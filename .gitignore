@@ -54,11 +54,18 @@ dkms.conf
 # Don't show the generated files in Reference_Implementation and Optimized_Implementation
 Reference_Implementation/*.c
 Reference_Implementation/*.h
+!Reference_Implementation/e8_math.c
+!Reference_Implementation/e8_vrfy.c
+!Reference_Implementation/e8_sign.c
+!Reference_Implementation/e8_sampler.c
+!Reference_Implementation/hawk_e8_inner.h
 Optimized_Implementation/avx2/*.c
 Optimized_Implementation/avx2/*.h
 
 # Build directories
 **/build/
 **/bin/
+Reference_Implementation/e8_hist_*.csv
+Reference_Implementation/data/e8_hist_*.csv
 
 **/NIST/
