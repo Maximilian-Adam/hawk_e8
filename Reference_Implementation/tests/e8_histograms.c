@@ -12,8 +12,8 @@
 /*
  * Experimental E8 calibration logger.
  *
- * This program records CSV data for the current floating-point,
- * bounded/truncated E8 prototype.  It does not alter signer, sampler, or
+ * This program records CSV data for the current floating-point
+ * Construction-A CM E8 prototype.  It does not alter signer, sampler, or
  * verifier behavior, and its parameters are not final security claims.
  */
 
@@ -38,7 +38,7 @@ typedef struct {
 
 /*
  * Experimental calibration defaults only.  These are for CSV logging with
- * the floating-point bounded sampler and are not final E8 parameter claims.
+ * the Construction-A CM sampler and are not final E8 parameter claims.
  */
 static const hist_param PARAMS[] = {
 	{ 8,  20, 20, 2, 2, 1.25, 1.06, 2, 1000 },
@@ -368,7 +368,7 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	uint8_t sig[40 + 4 * MAXN], salt[40];
 	int16_t s0[MAXN], s1[MAXN];
 	int32_t z0[MAXN], z1[MAXN], w0[MAXN], w1[MAXN];
-	int64_t pnorm = 0, pnorm_check = 0, qnorm = 0;
+	int64_t pnorm = 0, pnorm_check = 0, qnorm = 0, direct_qnorm = 0;
 	unsigned attempts = max_attempts;
 	int accepted, norm_equal = 1;
 	shake_context sc_data;
@@ -401,11 +401,14 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 		(unsigned)sampler_bound);
 	reconstruct_w(w0, w1, logn, hpub, salt, salt_len, &sc_data, s0, s1);
 	pnorm_check = pnorm_from_apply(logn, z0, z1);
-	if (!e8_qnorm_direct(&qnorm, q00, q01, q10, q11,
-		w0, w1, logn))
+	if (!e8_qnorm_completion(&qnorm, q00, q01, w0, w1, logn)
+		|| !e8_qnorm_direct(&direct_qnorm,
+			q00, q01, q10, q11, w0, w1, logn))
 	{
 		norm_equal = 0;
-	} else if (pnorm != pnorm_check || pnorm_check != qnorm) {
+	} else if (pnorm != pnorm_check || pnorm_check != qnorm
+		|| qnorm != direct_qnorm)
+	{
 		norm_equal = 0;
 	}
 
@@ -440,10 +443,10 @@ collect(int long_mode)
 	 * signing failure or accepted-row norm mismatch.
 	 */
 	const char *pub_name = long_mode
-		? "data/e8_hist_public_long.csv" : "data/e8_hist_public.csv";
+		? "e8_hist_public_long.csv" : "e8_hist_public.csv";
 	const char *sig_name = long_mode
-		? "data/e8_hist_signatures_long.csv"
-		: "data/e8_hist_signatures.csv";
+		? "e8_hist_signatures_long.csv"
+		: "e8_hist_signatures.csv";
 	FILE *pub_fp;
 	FILE *sig_fp;
 	int status = 0;

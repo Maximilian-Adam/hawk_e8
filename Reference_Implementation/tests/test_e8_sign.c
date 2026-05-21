@@ -363,6 +363,49 @@ check_nonzero_offset_signature(unsigned logn,
 
 	compute_inverse_w(w0, w1, f, g, F, G, z0, z1, n);
 	for (size_t u = 0; u < n; u ++) {
+		if ((((uint64_t)w0[u]) & 1u) != h0b[u]
+			|| (((uint64_t)w1[u]) & 1u) != h1b[u])
+		{
+			fprintf(stderr,
+				"ERR: nonzero dummy raw w parity mismatch"
+				" logn=%u case=%u coeff=%u\n",
+				logn, caseid, (unsigned)u);
+			return 0;
+		}
+		if (w0[u] < INT32_MIN || w0[u] > INT32_MAX
+			|| w1[u] < INT32_MIN || w1[u] > INT32_MAX)
+		{
+			fprintf(stderr,
+				"ERR: nonzero dummy w out of int32 range"
+				" logn=%u case=%u coeff=%u\n",
+				logn, caseid, (unsigned)u);
+			return 0;
+		}
+		w0_32[u] = (int32_t)w0[u];
+		w1_32[u] = (int32_t)w1[u];
+	}
+	if (!e8_sym_break(w0_32, w1_32, logn)) {
+		for (size_t u = 0; u < n; u ++) {
+			if (w0_32[u] == INT32_MIN || w1_32[u] == INT32_MIN) {
+				fprintf(stderr,
+					"ERR: nonzero dummy w cannot be"
+					" negated logn=%u case=%u coeff=%u\n",
+					logn, caseid, (unsigned)u);
+				return 0;
+			}
+			w0[u] = -w0[u];
+			w1[u] = -w1[u];
+			w0_32[u] = -w0_32[u];
+			w1_32[u] = -w1_32[u];
+		}
+	}
+	if (!e8_sym_break(w0_32, w1_32, logn)) {
+		fprintf(stderr,
+			"ERR: nonzero dummy reconstructed w is not sym-broken"
+			" logn=%u case=%u\n", logn, caseid);
+		return 0;
+	}
+	for (size_t u = 0; u < n; u ++) {
 		int64_t x0 = (int64_t)h0b[u] - w0[u];
 		int64_t x1 = (int64_t)h1b[u] - w1[u];
 
@@ -371,8 +414,9 @@ check_nonzero_offset_signature(unsigned logn,
 			|| (x0 % 2) != 0 || (x1 % 2) != 0)
 		{
 			fprintf(stderr,
-				"ERR: nonzero dummy w parity/integrality mismatch"
-				" logn=%u case=%u coeff=%u\n",
+				"ERR: nonzero dummy canonical w"
+				" parity/integrality mismatch logn=%u"
+				" case=%u coeff=%u\n",
 				logn, caseid, (unsigned)u);
 			return 0;
 		}
@@ -380,7 +424,11 @@ check_nonzero_offset_signature(unsigned logn,
 		x1 /= 2;
 		if (x0 < INT16_MIN || x0 > INT16_MAX
 			|| x1 < INT16_MIN || x1 > INT16_MAX
-			|| s0[u] != (int16_t)x0 || s1[u] != (int16_t)x1)
+			|| s0[u] != (int16_t)x0 || s1[u] != (int16_t)x1
+			|| w0_32[u] != (int32_t)h0b[u]
+				- 2 * (int32_t)s0[u]
+			|| w1_32[u] != (int32_t)h1b[u]
+				- 2 * (int32_t)s1[u])
 		{
 			fprintf(stderr,
 				"ERR: decoded nonzero dummy s mismatch"
@@ -391,9 +439,6 @@ check_nonzero_offset_signature(unsigned logn,
 		if (s0[u] != 0 || s1[u] != 0) {
 			seen_nonzero = 1;
 		}
-
-		w0_32[u] = (int32_t)h0b[u] - 2 * (int32_t)s0[u];
-		w1_32[u] = (int32_t)h1b[u] - 2 * (int32_t)s1[u];
 	}
 	if (!seen_nonzero) {
 		fprintf(stderr,

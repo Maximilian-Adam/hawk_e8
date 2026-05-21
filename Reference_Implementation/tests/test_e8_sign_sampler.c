@@ -20,9 +20,9 @@ typedef struct {
 } e8_sign_param;
 
 /*
- * Prototype-only values for the experimental floating-point bounded sampler.
- * They are chosen to make this uncompressed algebraic integration test
- * reliable; they are not final parameter calibration claims.
+ * Prototype-only values for the experimental Construction-A CM sampler.  They
+ * are chosen to make this uncompressed algebraic integration test reliable;
+ * they are not final parameter calibration claims.
  */
 static const e8_sign_param PARAMS[] = {
 	{ 8,  3, 3, 1.25, 1.06, 2, 1000 },
@@ -265,9 +265,11 @@ check_sampler_trace(const e8_sign_param *param,
 	size_t salt_len = e8_salt_len(logn);
 	uint8_t salt2[40], h[256], h0b[MAXN], h1b[MAXN];
 	uint8_t t0[MAXN], t1[MAXN];
+	uint8_t neg_sig[40 + 4 * MAXN];
 	int32_t w0_32[MAXN], w1_32[MAXN];
-	int16_t s0[MAXN], s1[MAXN];
-	int64_t w0[MAXN], w1[MAXN], qnorm, check_pnorm;
+	int16_t s0[MAXN], s1[MAXN], ns0[MAXN], ns1[MAXN];
+	int64_t w0[MAXN], w1[MAXN], qnorm, cqnorm, check_pnorm;
+	int nonzero_w = 0;
 	shake_context sc_data;
 
 	if (!e8_decode_sig_uncompressed(logn, salt2, s0, s1, sig, sig_len)) {
@@ -298,15 +300,71 @@ check_sampler_trace(const e8_sign_param *param,
 
 	compute_inverse_w(w0, w1, f, g, F, G, z0, z1, n);
 	for (size_t u = 0; u < n; u ++) {
+		if (w0[u] == INT64_MIN || w1[u] == INT64_MIN) {
+			fprintf(stderr,
+				"ERR: sampled E8 w cannot be negated"
+				" logn=%u key=%u trial=%u coeff=%u\n",
+				logn, keynum, trial, (unsigned)u);
+			return 0;
+		}
+		if ((((uint64_t)w0[u]) & 1u) != h0b[u]
+			|| (((uint64_t)w1[u]) & 1u) != h1b[u]
+			|| (((uint64_t)(-w0[u])) & 1u) != h0b[u]
+			|| (((uint64_t)(-w1[u])) & 1u) != h1b[u])
+		{
+			fprintf(stderr,
+				"ERR: sampled E8 w/-w parity mismatch"
+				" logn=%u key=%u trial=%u coeff=%u\n",
+				logn, keynum, trial, (unsigned)u);
+			return 0;
+		}
+		if (w0[u] < INT32_MIN || w0[u] > INT32_MAX
+			|| w1[u] < INT32_MIN || w1[u] > INT32_MAX)
+		{
+			fprintf(stderr,
+				"ERR: sampled E8 w out of int32 range"
+				" logn=%u key=%u trial=%u coeff=%u\n",
+				logn, keynum, trial, (unsigned)u);
+			return 0;
+		}
+		w0_32[u] = (int32_t)w0[u];
+		w1_32[u] = (int32_t)w1[u];
+	}
+	if (!e8_sym_break(w0_32, w1_32, logn)) {
+		for (size_t u = 0; u < n; u ++) {
+			if (w0_32[u] == INT32_MIN || w1_32[u] == INT32_MIN) {
+				fprintf(stderr,
+					"ERR: sampled E8 int32 w cannot be"
+					" negated logn=%u key=%u trial=%u"
+					" coeff=%u\n",
+					logn, keynum, trial, (unsigned)u);
+				return 0;
+			}
+			w0[u] = -w0[u];
+			w1[u] = -w1[u];
+			w0_32[u] = -w0_32[u];
+			w1_32[u] = -w1_32[u];
+		}
+	}
+	if (!e8_sym_break(w0_32, w1_32, logn)) {
+		fprintf(stderr,
+			"ERR: sampled E8 reconstructed w is not sym-broken"
+			" logn=%u key=%u trial=%u\n", logn, keynum, trial);
+		return 0;
+	}
+	for (size_t u = 0; u < n; u ++) {
 		int64_t x0 = (int64_t)h0b[u] - w0[u];
 		int64_t x1 = (int64_t)h1b[u] - w1[u];
 
+		nonzero_w |= w0[u] != 0 || w1[u] != 0;
 		if ((((uint64_t)w0[u]) & 1u) != h0b[u]
 			|| (((uint64_t)w1[u]) & 1u) != h1b[u]
+			|| (((uint64_t)(-w0[u])) & 1u) != h0b[u]
+			|| (((uint64_t)(-w1[u])) & 1u) != h1b[u]
 			|| (x0 % 2) != 0 || (x1 % 2) != 0)
 		{
 			fprintf(stderr,
-				"ERR: sampled E8 w parity/integrality mismatch"
+				"ERR: sampled E8 canonical w integrality mismatch"
 				" logn=%u key=%u trial=%u coeff=%u\n",
 				logn, keynum, trial, (unsigned)u);
 			return 0;
@@ -323,17 +381,12 @@ check_sampler_trace(const e8_sign_param *param,
 				logn, keynum, trial, (unsigned)u);
 			return 0;
 		}
-		if (w0[u] < INT32_MIN || w0[u] > INT32_MAX
-			|| w1[u] < INT32_MIN || w1[u] > INT32_MAX)
-		{
-			fprintf(stderr,
-				"ERR: sampled E8 w out of int32 range"
-				" logn=%u key=%u trial=%u coeff=%u\n",
-				logn, keynum, trial, (unsigned)u);
-			return 0;
-		}
-		w0_32[u] = (int32_t)w0[u];
-		w1_32[u] = (int32_t)w1[u];
+	}
+	if (!nonzero_w) {
+		fprintf(stderr,
+			"ERR: sampled E8 signature had zero reconstructed w"
+			" logn=%u key=%u trial=%u\n", logn, keynum, trial);
+		return 0;
 	}
 
 	check_pnorm = pnorm_from_apply(logn, z0, z1);
@@ -354,6 +407,50 @@ check_sampler_trace(const e8_sign_param *param,
 	if (qnorm != pnorm) {
 		fprintf(stderr,
 			"ERR: sampled E8 norm equality mismatch"
+			" logn=%u key=%u trial=%u\n", logn, keynum, trial);
+		return 0;
+	}
+	if (!e8_qnorm_completion(&cqnorm, q00, q01, w0_32, w1_32, logn)
+		|| cqnorm != qnorm)
+	{
+		fprintf(stderr,
+			"ERR: sampled E8 completion norm mismatch"
+			" logn=%u key=%u trial=%u\n", logn, keynum, trial);
+		return 0;
+	}
+
+	for (size_t u = 0; u < n; u ++) {
+		int64_t x0 = (int64_t)h0b[u] - s0[u];
+		int64_t x1 = (int64_t)h1b[u] - s1[u];
+
+		if (x0 < INT16_MIN || x0 > INT16_MAX
+			|| x1 < INT16_MIN || x1 > INT16_MAX)
+		{
+			fprintf(stderr,
+				"ERR: sampled E8 negated representative"
+				" is outside test codec range logn=%u"
+				" key=%u trial=%u coeff=%u\n",
+				logn, keynum, trial, (unsigned)u);
+			return 0;
+		}
+		ns0[u] = (int16_t)x0;
+		ns1[u] = (int16_t)x1;
+	}
+	if (!e8_encode_sig_uncompressed(logn,
+		neg_sig, sig_len, salt2, ns0, ns1))
+	{
+		fprintf(stderr,
+			"ERR: sampled E8 negated signature encode failed"
+			" logn=%u key=%u trial=%u\n", logn, keynum, trial);
+		return 0;
+	}
+	make_message_context(&sc_data, logn, keynum, trial, 0);
+	if (e8_verify_uncompressed_with_sigma(logn,
+		neg_sig, sig_len, &sc_data, hpub, (size_t)1 << (logn - 4),
+		q00, q01, q10, q11, param->sigma_verify))
+	{
+		fprintf(stderr,
+			"ERR: sampled E8 verifier accepted -w representative"
 			" logn=%u key=%u trial=%u\n", logn, keynum, trial);
 		return 0;
 	}
@@ -425,6 +522,7 @@ test_sampler_signing_logn(const e8_sign_param *param, int sampler_bound)
 		for (unsigned trial = 0; trial < param->sign_trials; trial ++) {
 			shake_context sc_data;
 			int64_t pnorm;
+			int64_t threshold;
 			unsigned attempts;
 
 			make_salt(salt, salt_len, logn, keynum, trial);
@@ -447,6 +545,16 @@ test_sampler_signing_logn(const e8_sign_param *param, int sampler_bound)
 				" pnorm=%lld\n",
 				keynum, trial, sampler_bound, attempts,
 				(long long)pnorm);
+			if (!e8_verify_bound_from_sigma(logn,
+				param->sigma_verify, &threshold)
+				|| pnorm > threshold)
+			{
+				fprintf(stderr,
+					"ERR: sampled E8 signature exceeded"
+					" verification bound logn=%u key=%u"
+					" trial=%u\n", logn, keynum, trial);
+				return 0;
+			}
 			sig_count ++;
 			total_attempts += attempts;
 			if (attempts > max_seen) {
@@ -454,8 +562,9 @@ test_sampler_signing_logn(const e8_sign_param *param, int sampler_bound)
 			}
 
 			make_message_context(&sc_data, logn, keynum, trial, 0);
-			if (!e8_verify_uncompressed(logn, sig, sig_len, &sc_data,
-				hpub, hpub_len, q00, q01, q10, q11))
+			if (!e8_verify_uncompressed_with_sigma(logn,
+				sig, sig_len, &sc_data, hpub, hpub_len,
+				q00, q01, q10, q11, param->sigma_verify))
 			{
 				fprintf(stderr,
 					"ERR: sampled E8 signature rejected"
@@ -471,8 +580,9 @@ test_sampler_signing_logn(const e8_sign_param *param, int sampler_bound)
 			}
 
 			make_message_context(&sc_data, logn, keynum, trial, 1);
-			if (e8_verify_uncompressed(logn, sig, sig_len, &sc_data,
-				hpub, hpub_len, q00, q01, q10, q11))
+			if (e8_verify_uncompressed_with_sigma(logn,
+				sig, sig_len, &sc_data, hpub, hpub_len,
+				q00, q01, q10, q11, param->sigma_verify))
 			{
 				fprintf(stderr,
 					"ERR: sampled E8 tampered message accepted"
@@ -485,8 +595,9 @@ test_sampler_signing_logn(const e8_sign_param *param, int sampler_bound)
 			bad[salt_len + 0] = 0xFF;
 			bad[salt_len + 1] = 0x7F;
 			make_message_context(&sc_data, logn, keynum, trial, 0);
-			if (e8_verify_uncompressed(logn, bad, sig_len, &sc_data,
-				hpub, hpub_len, q00, q01, q10, q11))
+			if (e8_verify_uncompressed_with_sigma(logn,
+				bad, sig_len, &sc_data, hpub, hpub_len,
+				q00, q01, q10, q11, param->sigma_verify))
 			{
 				fprintf(stderr,
 					"ERR: sampled E8 tampered signature accepted"

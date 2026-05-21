@@ -65,8 +65,9 @@ Core experimental files:
 
 - `src/hawk_e8_inner.h`: gated internal E8 declarations.
 - `src/e8_math.c`: `P_n`, `S_n`, `Delta_n`, and `Q_E8` helpers.
-- `src/e8_vrfy.c`: uncompressed signature codec and direct E8 norm verifier.
-- `src/e8_sampler.c`: standalone floating-point bounded E8 block sampler.
+- `src/e8_vrfy.c`: uncompressed signature codec, sign-based sym-break, and E8 completion-norm verifier
+- `src/e8_sampler.c`: standalone E8 block samplers, including the
+  coset-matched Construction-A CM sampler and the bounded baseline.
 - `src/e8_sign.c`: dummy E8 signers and sampler-backed uncompressed signer.
 
 The corresponding files under `Reference_Implementation/` are kept in sync for
@@ -111,20 +112,38 @@ B^{-1} = [ G  -F ]
          [ -g  f ]
 ```
 
+Before `s` is encoded, the uncompressed E8 signer applies the same simple
+sign-based symmetry break style used by HAWK signatures: among `w` and `-w`,
+scan the coefficients of `w1` from index `0` upward, then `w0` as fallback,
+and keep the representative whose first non-zero coefficient is positive.  The
+all-zero vector is accepted.  Since `-w = w mod 2`, this does not change the
+integrality condition for `s = (h - w) / 2`.
+
 The verifier reconstructs:
 
 ```text
 w = h - 2s
 ```
 
-and checks the direct expanded norm:
+It first enforces the same sign-based symmetry break, then checks the
+completion-of-squares norm:
 
 ```text
-<w, Q_E8 w> <= 8n sigma_verify_E8^2
+n ||w||^2_QE8 = Tr(q00 e e^* + Delta_n d w1^*)
+d = w1 / q00
+e = w0 + q01 d
 ```
 
-This is deliberately separate from ordinary HAWK verification and does not use
-the ordinary determinant-one completion-of-squares formula.
+This is deliberately separate from ordinary HAWK verification. The E8 path uses
+the `Delta_n`-weighted formula above, not the ordinary determinant-one
+completion-of-squares formula. The current reference code also cross-checks
+accepted signatures against the expanded direct norm while this path is still
+experimental.
+
+This is not full public-orbit canonicalisation for the E8 form.  The
+implementation does not apply rotations, `omega_E8_Q`, or a full `G_E8,Q`
+orbit rule here; it only chooses a deterministic sign representative at the
+signature level.
 
 ## Signature Format
 
@@ -172,16 +191,62 @@ Each block sample satisfies:
 z_block in 2Z^8 + tau_r
 ```
 
-The current sampler enumerates bounded candidates for each block, computes
-`||P z_block||^2`, assigns floating-point weights, and samples from the
-resulting truncated distribution. It returns both `z0,z1` and:
+The default sampler-backed signer now calls:
+
+```text
+e8_sample_z_construction_a_cm
+```
+
+This sampler treats `tau_r` as an internal `P`-coordinate label. It returns
+the HAWK-E8-CM coordinate vector `z_block`, not merely an abstract E8-side
+vector. The measured E8-side vector is:
+
+```text
+x_block = P z_block
+```
+
+and the target weight is:
+
+```text
+exp(-||P z_block||^2 / (2 sigma_sign^2)).
+```
+
+The implementation is now a direct coset-matched Construction-A sampler.  It
+decomposes the exact HAWK-E8-CM coset
+
+```text
+C_tau = 2M + P tau_r = P(2Z^8 + tau_r)
+```
+
+into 16 RM(1,3)-labelled product-lattice components before sampling.  The
+Gaussian mass of each component is computed with the E8-side norm
+`||x_block||^2`; one component is selected by that mass, eight shifted
+one-dimensional integer Gaussian coordinates are sampled inside the selected
+product lattice, and the resulting E8-side point is converted back with a
+checked `P^{-1}` map.  Thus RM(1,3) code data drives component selection and
+product-lattice sampling; it is not post-sampling bookkeeping.
+
+The sampler returns both `z0,z1` and:
 
 ```text
 norm2 = ||P_n z||^2
 ```
 
-This sampler is experimental, floating-point, bounded/truncated,
-data-dependent, and non-constant-time. It is not suitable for deployment.
+The old bounded enumerator remains available only as an explicitly named
+experimental baseline:
+
+```text
+e8_sample_block_bounded_float
+e8_sample_z_bounded_float
+```
+
+The compatibility names `e8_sample_block_float` and `e8_sample_z_float` still
+refer to that bounded baseline for older tests and diagnostics.
+
+The CM sampler uses floating-point one-dimensional conditional CDFs with a
+large finite tail cutoff for the current research prototype. All sampler paths
+are experimental, floating-point, data-dependent, and non-constant-time. They
+are not suitable for deployment.
 
 ## Signer Separation
 
@@ -196,20 +261,58 @@ There are two intentionally separate E8 signing paths:
 - Sampler-backed signer in `e8_sign.c`
   - `e8_sign_sampler_uncompressed`
   - `e8_sign_sampler_trace_uncompressed`
-  - These call the standalone floating-point bounded sampler.
+  - These call the standalone coset-matched Construction-A CM sampler.
   - The trace variant exists for tests and histogram logging.
 
 Neither path is connected to ordinary HAWK signing.
 
+## Construction-A CM Adaptation Note
+
+The Sage prototype samples an abstract Construction-A E8 coset by selecting
+RM(1,3) code data and then sampling product-lattice coordinates. The C
+implementation does not expose that abstract E8 vector as the HAWK sample.
+Instead, for each HAWK-E8-CM block it keeps the exact block contract:
+
+```text
+C_tau = 2M + P tau = P(2Z^8 + tau).
+```
+
+For each block, write `z_block = tau + 2y`.  The lift `y mod 2` is decomposed
+into the 16 cosets of the Construction-A lattice `RM(1,3)+2Z^8`.  For a chosen
+representative `r`, the corresponding E8-side component is
+
+```text
+P tau + 2P r + 2P(RM(1,3)+2Z^8).
+```
+
+In the implemented coordinate bridge, the kernel
+`2P(RM(1,3)+2Z^8)` has an explicit orthogonal product basis with squared
+length `32` in each coordinate.  This is the product lattice sampled by the
+eight one-dimensional shifted discrete Gaussian samplers.  After reconstruction
+the code checks `x_block = P z_block`, `z_block = tau mod 2`, and
+`norm2 = ||x_block||^2 = ||P z_block||^2`.
+
 ## Current Prototype Parameters
 
-The verifier uses the report's starting `sigma_verify_E8` values:
+The verifier uses these starting `sigma_verify_E8` values:
 
 ```text
 n=256:  sigma_verify_E8 = 1.06
 n=512:  sigma_verify_E8 = 1.42
 n=1024: sigma_verify_E8 = 1.57
 ```
+
+Verifier thresholds are computed through the shared helper
+`e8_verify_bound_from_sigma`:
+
+```text
+bound = floor(8.0 * n * sigma_verify_E8 * sigma_verify_E8)
+```
+
+`e8_verify_uncompressed` uses the default fixed values above.
+`e8_verify_uncompressed_with_sigma` is available for experimental tests that
+pass an explicit `sigma_verify`, so the signer restart threshold and verifier
+threshold can be kept identical.
 
 The current sampler-backed tests and histogram defaults use:
 
@@ -222,6 +325,24 @@ n=1024: sigma_sign = 1.30, sigma_verify = 1.57, sampler_bound = 2
 `max_attempts` defaults to `1000` in the sampler-backed tests and histogram
 driver. These are prototype integration and calibration values only. They are
 not final parameter claims.
+
+`sampler_bound` is retained in the existing test/histogram interfaces for the
+bounded baseline and for backward-compatible CSV columns. The default
+sampler-backed signer uses the CM sampler above and does not use this value to
+truncate the block support.
+
+The C API uses the `sigma` convention:
+
+```text
+exp(-norm2 / (2 sigma^2)).
+```
+
+When comparing with Sage code written in the lattice-theory `rho_s`
+convention, use:
+
+```text
+s = sqrt(2*pi) * sigma.
+```
 
 The histogram target supports:
 
@@ -265,9 +386,9 @@ Current E8 test coverage is split across:
 ```text
 test_e8_math          P_n/S_n consistency and Delta_n
 test_e8_public        Q_E8 public form algebra
-test_e8_verify        uncompressed verifier and direct norm checks
+test_e8_verify        uncompressed verifier, completion norm, and direct norm checks
 test_e8_sign          dummy signing algebra and encoding
-test_e8_sampler       standalone block sampler support and norm checks
+test_e8_sampler       standalone block sampler support, CM cosets, and norms
 test_e8_sign_sampler  sampler-backed uncompressed sign/verify
 ```
 
@@ -280,8 +401,8 @@ make -C Reference_Implementation e8-histograms
 Outputs:
 
 ```text
-Reference_Implementation/data/e8_hist_public.csv
-Reference_Implementation/data/e8_hist_signatures.csv
+Reference_Implementation/e8_hist_public.csv
+Reference_Implementation/e8_hist_signatures.csv
 ```
 
 Generate long-mode logs with a bound sweep:
@@ -290,13 +411,17 @@ Generate long-mode logs with a bound sweep:
 make -C Reference_Implementation e8-histograms-long
 ```
 
-Long mode sweeps `sampler_bound` over `{2,4,6,8}` unless `E8_HIST_BOUND` is
-set.
+Long mode still sweeps the retained `sampler_bound` CSV column over
+`{2,4,6,8}` unless `E8_HIST_BOUND` is set. With the default CM sampler this is
+metadata for compatibility with earlier bounded-sampler logs; it does not
+truncate the CM sampler.
 
 ## Known Limitations
 
 - Floating-point sampler.
-- Bounded/truncated sampler support.
+- The CM sampler currently uses floating-point finite-tail one-dimensional
+  conditional CDFs.
+- The previous bounded/truncated sampler remains only as a baseline.
 - Data-dependent, non-constant-time sampling and signing paths.
 - No AVX2 E8 implementation.
 - No compressed E8 public key or signature format.
@@ -306,6 +431,6 @@ set.
 - No side-channel hardening.
 - No production E8 key format. Tests use expanded `f,g,F,G` from
   `Hawk_keygen`.
-- The direct expanded public form is used for verification; compact
-  reconstruction from `qtilde00,qtilde01` is not implemented.
-
+- The verifier uses the E8 completion-of-squares norm with an expanded direct
+  norm cross-check on accepted signatures; compact public-key reconstruction
+  from `qtilde00,qtilde01` is not implemented.

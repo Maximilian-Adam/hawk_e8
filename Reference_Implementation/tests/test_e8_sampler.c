@@ -1,4 +1,6 @@
 #include <stdint.h>
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -9,6 +11,18 @@
 #define SAMPLE_SIGMA     1.25
 #define BLOCK_SAMPLES    4
 #define FULL_SAMPLES     2
+#define CM_BLOCK_SAMPLES 8
+
+static const int32_t CA_PRODUCT_BASIS[8][8] = {
+	{ -4,  0,  0,  0,  0,  0,  0, -4 },
+	{ -4,  0,  0,  0,  0,  0,  0,  4 },
+	{  0, -4,  0,  0, -4,  0,  0,  0 },
+	{  0, -4,  0,  0,  4,  0,  0,  0 },
+	{  0,  0, -4,  0,  0, -4,  0,  0 },
+	{  0,  0, -4,  0,  0,  4,  0,  0 },
+	{  0,  0,  0, -4,  0,  0, -4,  0 },
+	{  0,  0,  0, -4,  0,  0,  4,  0 }
+};
 
 static uint64_t
 rng_next_u64(uint64_t *state)
@@ -41,6 +55,33 @@ make_random_bits(uint8_t *t0, uint8_t *t1, size_t n, uint64_t *rng_state)
 	}
 }
 
+static uint8_t
+test_component_rep(uint8_t component)
+{
+	uint8_t b1 = (uint8_t)((component >> 1) & 1u);
+	uint8_t b2 = (uint8_t)((component >> 2) & 1u);
+	uint8_t b4 = (uint8_t)((component >> 3) & 1u);
+	uint8_t b0 = (uint8_t)((component & 1u) ^ b1 ^ b2 ^ b4);
+
+	return (uint8_t)(b0 | (b1 << 1) | (b2 << 2) | (b4 << 4));
+}
+
+static uint8_t
+lift_parity_from_z(uint8_t tau, const int32_t *zblk)
+{
+	uint8_t p = 0;
+
+	for (unsigned u = 0; u < 8; u ++) {
+		int32_t d = zblk[u] - (int32_t)((tau >> u) & 1u);
+
+		if ((d & 1) != 0) {
+			return 0;
+		}
+		p |= (uint8_t)((((uint32_t)(d / 2)) & 1u) << u);
+	}
+	return p;
+}
+
 static int
 check_block_parity(const int32_t *zblk, uint8_t tau,
 	const char *label, unsigned logn, unsigned id)
@@ -51,6 +92,45 @@ check_block_parity(const int32_t *zblk, uint8_t tau,
 				"ERR: %s block parity mismatch"
 				" logn=%u id=%u coord=%u\n",
 				label, logn, id, u);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static void
+make_tau_block(int32_t *taublk, uint8_t tau)
+{
+	for (unsigned u = 0; u < 8; u ++) {
+		taublk[u] = (int32_t)((tau >> u) & 1u);
+	}
+}
+
+static int
+check_block_coset_membership(const int32_t *zblk, uint8_t tau,
+	unsigned id)
+{
+	int32_t taublk[8], xblk[8], xtau[8], yblk[8], py[8];
+
+	make_tau_block(taublk, tau);
+	e8_block_apply_P(xblk, zblk);
+	e8_block_apply_P(xtau, taublk);
+	for (unsigned u = 0; u < 8; u ++) {
+		int32_t d = zblk[u] - taublk[u];
+		if ((d & 1) != 0) {
+			fprintf(stderr,
+				"ERR: CM block non-integral lift id=%u coord=%u\n",
+				id, u);
+			return 0;
+		}
+		yblk[u] = d / 2;
+	}
+	e8_block_apply_P(py, yblk);
+	for (unsigned u = 0; u < 8; u ++) {
+		if (xblk[u] - xtau[u] != 2 * py[u]) {
+			fprintf(stderr,
+				"ERR: CM block 2M membership failed"
+				" id=%u coord=%u\n", id, u);
 			return 0;
 		}
 	}
@@ -70,6 +150,61 @@ full_norm_from_apply(unsigned logn, const int32_t *z0, const int32_t *z1)
 			+ (int64_t)pz1[u] * pz1[u];
 	}
 	return norm2;
+}
+
+static int
+test_sigma_convention(void)
+{
+	double sigma = 1.25;
+	double s = e8_sigma_to_rho_s(sigma);
+	double norm2 = 12.0;
+	double c_weight = exp(-norm2 / (2.0 * sigma * sigma));
+	double rho_weight = exp(-3.141592653589793238462643383279502884
+		* norm2 / (s * s));
+
+	if (fabs(c_weight - rho_weight) > 1e-14) {
+		fprintf(stderr, "ERR: sigma/rho_s convention mismatch\n");
+		return 0;
+	}
+	return 1;
+}
+
+static int
+test_rm13_table(void)
+{
+	for (unsigned u = 0; u < 16; u ++) {
+		uint8_t cu = e8_rm13_codeword(u);
+
+		if (e8_rm13_syndrome(cu) != 0) {
+			fprintf(stderr,
+				"ERR: RM(1,3) codeword has nonzero syndrome"
+				" index=%u\n", u);
+			return 0;
+		}
+		for (unsigned v = u + 1; v < 16; v ++) {
+			if (cu == e8_rm13_codeword(v)) {
+				fprintf(stderr,
+					"ERR: RM(1,3) duplicate codeword"
+					" indexes=%u,%u\n", u, v);
+				return 0;
+			}
+		}
+		for (unsigned v = 0; v < 16; v ++) {
+			uint8_t x = (uint8_t)(cu ^ e8_rm13_codeword(v));
+			int found = 0;
+
+			for (unsigned w = 0; w < 16; w ++) {
+				found |= e8_rm13_codeword(w) == x;
+			}
+			if (!found) {
+				fprintf(stderr,
+					"ERR: RM(1,3) table not closed"
+					" indexes=%u,%u\n", u, v);
+				return 0;
+			}
+		}
+	}
+	return 1;
 }
 
 static int
@@ -93,6 +228,91 @@ test_tau_extraction(unsigned logn)
 					logn, (unsigned)r, u);
 				return 0;
 			}
+		}
+	}
+	return 1;
+}
+
+static int
+test_construction_a_trace_path(void)
+{
+	uint64_t rng_state = UINT64_C(0xE8CA7ACE00000000);
+	uint8_t taus[] = { 0x00, 0x01, 0x5A, 0xA5, 0xFF };
+
+	for (unsigned t = 0; t < sizeof taus / sizeof taus[0]; t ++) {
+		uint8_t tau = taus[t];
+		int32_t zblk[8], check_z[8], pz[8], xrec[8];
+		int32_t taublk[8], repblk[8], offset[8], prep[8];
+		uint64_t norm2;
+		e8_sampler_stats stats;
+		e8_ca_sample_trace trace;
+
+		memset(&stats, 0, sizeof stats);
+		memset(&trace, 0, sizeof trace);
+		if (!e8_sample_block_construction_a_cm_trace(zblk, tau,
+			SAMPLE_SIGMA, test_rng, &rng_state,
+			&norm2, &stats, &trace))
+		{
+			fprintf(stderr, "ERR: CM trace sampler failed tau=%u\n",
+				tau);
+			return 0;
+		}
+		if (trace.component >= 16
+			|| trace.component_codeword
+				!= e8_rm13_codeword(trace.component)
+			|| e8_rm13_syndrome(lift_parity_from_z(tau, zblk))
+				!= trace.component)
+		{
+			fprintf(stderr,
+				"ERR: CM trace component mismatch tau=%u\n",
+				tau);
+			return 0;
+		}
+		if (stats.blocks != 1 || stats.one_dim_samples != 8
+			|| stats.construction_a_cosets[trace.component] != 1)
+		{
+			fprintf(stderr,
+				"ERR: CM trace stats do not show product path\n");
+			return 0;
+		}
+		e8_block_apply_P(pz, zblk);
+		if (memcmp(trace.zblk, zblk, sizeof zblk) != 0
+			|| memcmp(trace.xblk, pz, sizeof pz) != 0
+			|| !e8_block_solve_P_checked(check_z,
+				trace.xblk, tau)
+			|| memcmp(check_z, zblk, sizeof zblk) != 0)
+		{
+			fprintf(stderr,
+				"ERR: CM trace x/z bridge mismatch tau=%u\n",
+				tau);
+			return 0;
+		}
+
+		make_tau_block(taublk, tau);
+		make_tau_block(repblk, test_component_rep(trace.component));
+		e8_block_apply_P(offset, taublk);
+		e8_block_apply_P(prep, repblk);
+		for (unsigned u = 0; u < 8; u ++) {
+			int64_t x = offset[u] + 2 * prep[u];
+
+			for (unsigned v = 0; v < 8; v ++) {
+				x += (int64_t)CA_PRODUCT_BASIS[v][u]
+					* trace.product_coords[v];
+			}
+			if (x < INT32_MIN || x > INT32_MAX) {
+				fprintf(stderr,
+					"ERR: CM trace reconstruction overflow\n");
+				return 0;
+			}
+			xrec[u] = (int32_t)x;
+		}
+		if (memcmp(xrec, trace.xblk, sizeof xrec) != 0
+			|| norm2 != (uint64_t)e8_block_norm2(zblk))
+		{
+			fprintf(stderr,
+				"ERR: CM trace product reconstruction failed"
+				" tau=%u\n", tau);
+			return 0;
 		}
 	}
 	return 1;
@@ -155,7 +375,7 @@ test_block_norm_against_full(unsigned logn,
 }
 
 static int
-test_all_tau_block_support(void)
+test_all_tau_block_support_bounded(void)
 {
 	uint64_t rng_state = UINT64_C(0xE8B10C0000000000);
 
@@ -169,7 +389,7 @@ test_all_tau_block_support(void)
 				test_rng, &rng_state))
 			{
 				fprintf(stderr,
-					"ERR: E8 block sampler failed"
+					"ERR: bounded E8 block sampler failed"
 					" tau=%u sample=%u\n", tau, sample);
 				return 0;
 			}
@@ -187,7 +407,61 @@ test_all_tau_block_support(void)
 }
 
 static int
-test_full_support_and_norm(unsigned logn)
+test_all_tau_block_support_cm(void)
+{
+	uint64_t rng_state = UINT64_C(0xE8CA000000000000);
+	e8_sampler_stats stats;
+
+	memset(&stats, 0, sizeof stats);
+	for (unsigned tau = 0; tau < 256; tau ++) {
+		for (unsigned sample = 0; sample < CM_BLOCK_SAMPLES; sample ++) {
+			int32_t zblk[8], xblk[8];
+			uint64_t norm2;
+			int64_t check_norm = 0;
+			unsigned id = tau * CM_BLOCK_SAMPLES + sample;
+
+			if (!e8_sample_block_construction_a_cm(zblk,
+				(uint8_t)tau, SAMPLE_SIGMA,
+				test_rng, &rng_state, &norm2, &stats))
+			{
+				fprintf(stderr,
+					"ERR: CM E8 block sampler failed"
+					" tau=%u sample=%u\n", tau, sample);
+				return 0;
+			}
+			if (!check_block_parity(zblk, (uint8_t)tau,
+				"CM sampled", 8, id)
+				|| !check_block_coset_membership(zblk,
+					(uint8_t)tau, id))
+			{
+				return 0;
+			}
+			e8_block_apply_P(xblk, zblk);
+			for (unsigned u = 0; u < 8; u ++) {
+				check_norm += (int64_t)xblk[u] * xblk[u];
+			}
+			if (norm2 != (uint64_t)check_norm
+				|| norm2 != (uint64_t)e8_block_norm2(zblk))
+			{
+				fprintf(stderr,
+					"ERR: CM E8 block norm mismatch id=%u\n",
+					id);
+				return 0;
+			}
+			if (!test_block_norm_against_full(8, zblk, id)) {
+				return 0;
+			}
+		}
+	}
+	if (stats.blocks != 256u * CM_BLOCK_SAMPLES) {
+		fprintf(stderr, "ERR: CM E8 sampler stats block mismatch\n");
+		return 0;
+	}
+	return 1;
+}
+
+static int
+test_full_support_and_norm_bounded(unsigned logn)
 {
 	size_t n = (size_t)1 << logn;
 	uint64_t rng_state = UINT64_C(0xE8F0110000000000) + logn;
@@ -202,7 +476,7 @@ test_full_support_and_norm(unsigned logn)
 			SAMPLE_SIGMA, SAMPLE_BOUND, test_rng, &rng_state))
 		{
 			fprintf(stderr,
-				"ERR: E8 full sampler failed"
+				"ERR: bounded E8 full sampler failed"
 				" logn=%u sample=%u\n", logn, sample);
 			return 0;
 		}
@@ -229,22 +503,77 @@ test_full_support_and_norm(unsigned logn)
 }
 
 static int
+test_full_support_and_norm_cm(unsigned logn)
+{
+	size_t n = (size_t)1 << logn;
+	uint64_t rng_state = UINT64_C(0xE8CAFC0000000000) + logn;
+	static uint8_t t0[MAXN], t1[MAXN];
+	static int32_t z0[MAXN], z1[MAXN];
+	e8_sampler_stats stats;
+
+	memset(&stats, 0, sizeof stats);
+	for (unsigned sample = 0; sample < FULL_SAMPLES; sample ++) {
+		uint64_t norm2;
+		int64_t check_norm;
+
+		make_random_bits(t0, t1, n, &rng_state);
+		if (!e8_sample_z_construction_a_cm(z0, z1, &norm2,
+			t0, t1, logn, SAMPLE_SIGMA,
+			test_rng, &rng_state, &stats))
+		{
+			fprintf(stderr,
+				"ERR: CM E8 full sampler failed"
+				" logn=%u sample=%u\n", logn, sample);
+			return 0;
+		}
+		for (size_t u = 0; u < n; u ++) {
+			if ((((uint32_t)z0[u]) & 1u) != t0[u]
+				|| (((uint32_t)z1[u]) & 1u) != t1[u])
+			{
+				fprintf(stderr,
+					"ERR: CM E8 full sampler coset mismatch"
+					" logn=%u sample=%u coeff=%u\n",
+					logn, sample, (unsigned)u);
+				return 0;
+			}
+		}
+		check_norm = full_norm_from_apply(logn, z0, z1);
+		if (norm2 != (uint64_t)check_norm) {
+			fprintf(stderr,
+				"ERR: CM E8 full sampler norm mismatch"
+				" logn=%u sample=%u\n", logn, sample);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int
 test_logn(unsigned logn)
 {
-	if (!test_tau_extraction(logn) || !test_block_roundtrip(logn)) {
+	if (!test_sigma_convention()
+		|| !test_tau_extraction(logn) || !test_block_roundtrip(logn))
+	{
 		return 0;
 	}
-	if (logn == 8 && !test_all_tau_block_support()) {
+	if (logn == 8
+		&& (!test_rm13_table()
+			|| !test_construction_a_trace_path()
+			|| !test_all_tau_block_support_bounded()
+			|| !test_all_tau_block_support_cm()))
+	{
 		return 0;
 	}
-	return test_full_support_and_norm(logn);
+	return test_full_support_and_norm_bounded(logn)
+		&& test_full_support_and_norm_cm(logn);
 }
 
 int
 main(void)
 {
 	for (unsigned logn = 8; logn <= 10; logn ++) {
-		printf("E8 floating sampler n=%u: ", 1u << logn);
+		printf("E8 floating/Construction-A-CM sampler n=%u: ",
+			1u << logn);
 		fflush(stdout);
 		if (!test_logn(logn)) {
 			return 1;

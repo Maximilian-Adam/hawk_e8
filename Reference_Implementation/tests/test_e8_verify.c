@@ -21,6 +21,83 @@ next_small(uint64_t *state)
 	return (int32_t)(rng_next_u64(state) % 7u) - 3;
 }
 
+static int
+test_sym_break_rule(unsigned logn)
+{
+	size_t n = (size_t)1 << logn;
+	static int32_t w0[MAXN], w1[MAXN], nw0[MAXN], nw1[MAXN];
+	uint64_t rng_state = UINT64_C(0xE856B4EA00000000) + logn;
+
+	memset(w0, 0, n * sizeof *w0);
+	memset(w1, 0, n * sizeof *w1);
+	memset(nw0, 0, n * sizeof *nw0);
+	memset(nw1, 0, n * sizeof *nw1);
+	if (!e8_sym_break(w0, w1, logn)
+		|| !e8_sym_break(nw0, nw1, logn))
+	{
+		fprintf(stderr,
+			"ERR: E8 sym-break rejected zero logn=%u\n", logn);
+		return 0;
+	}
+
+	w1[0] = 2;
+	if (!e8_sym_break(w0, w1, logn)) {
+		fprintf(stderr,
+			"ERR: E8 sym-break rejected positive w1 first coeff\n");
+		return 0;
+	}
+	w1[0] = -2;
+	w1[1] = 3;
+	if (e8_sym_break(w0, w1, logn)) {
+		fprintf(stderr,
+			"ERR: E8 sym-break ignored negative w1 first coeff\n");
+		return 0;
+	}
+
+	memset(w1, 0, n * sizeof *w1);
+	w0[0] = 1;
+	if (!e8_sym_break(w0, w1, logn)) {
+		fprintf(stderr,
+			"ERR: E8 sym-break rejected positive w0 fallback\n");
+		return 0;
+	}
+	w0[0] = -1;
+	w0[1] = 2;
+	if (e8_sym_break(w0, w1, logn)) {
+		fprintf(stderr,
+			"ERR: E8 sym-break ignored negative w0 fallback\n");
+		return 0;
+	}
+
+	for (unsigned trial = 0; trial < RANDOM_NORM_TRIALS; trial ++) {
+		int nonzero = 0;
+
+		for (size_t u = 0; u < n; u ++) {
+			w0[u] = next_small(&rng_state);
+			w1[u] = next_small(&rng_state);
+			nonzero |= w0[u] != 0 || w1[u] != 0;
+		}
+		if (!nonzero) {
+			w0[0] = 1;
+		}
+		for (size_t u = 0; u < n; u ++) {
+			nw0[u] = -w0[u];
+			nw1[u] = -w1[u];
+		}
+		int a = e8_sym_break(w0, w1, logn);
+		int b = e8_sym_break(nw0, nw1, logn);
+		if ((a ? 1 : 0) + (b ? 1 : 0) != 1) {
+			fprintf(stderr,
+				"ERR: E8 sym-break did not choose exactly"
+				" one sign logn=%u trial=%u\n",
+				logn, trial);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
 static void
 make_message_context(shake_context *sc_data, unsigned logn)
 {
@@ -240,6 +317,93 @@ test_direct_norm(unsigned logn,
 }
 
 static int
+check_completion_norm(unsigned logn,
+	const int32_t *q00, const int32_t *q01,
+	const int32_t *w0, const int32_t *w1, int64_t expected)
+{
+	int64_t norm;
+
+	if (!e8_qnorm_completion(&norm, q00, q01, w0, w1, logn)
+		|| norm != expected)
+	{
+		fprintf(stderr,
+			"ERR: E8 completion qnorm mismatch logn=%u\n",
+			logn);
+		return 0;
+	}
+	return 1;
+}
+
+static int
+test_completion_norm(unsigned logn,
+	const int32_t *q00, const int32_t *q01,
+	const int32_t *q10, const int32_t *q11)
+{
+	size_t n = (size_t)1 << logn;
+	static int32_t w0[MAXN], w1[MAXN];
+	int64_t norm;
+	uint64_t rng_state = UINT64_C(0xE8C05A0000000000) + logn;
+
+	memset(w0, 0, n * sizeof *w0);
+	memset(w1, 0, n * sizeof *w1);
+	w0[0] = 1;
+	if (!e8_qnorm_direct(&norm, q00, q01, q10, q11, w0, w1, logn)
+		|| !check_completion_norm(logn, q00, q01, w0, w1, norm))
+	{
+		return 0;
+	}
+
+	memset(w0, 0, n * sizeof *w0);
+	memset(w1, 0, n * sizeof *w1);
+	w1[0] = 1;
+	if (!e8_qnorm_direct(&norm, q00, q01, q10, q11, w0, w1, logn)
+		|| !check_completion_norm(logn, q00, q01, w0, w1, norm))
+	{
+		return 0;
+	}
+
+	for (unsigned trial = 0; trial < RANDOM_NORM_TRIALS; trial ++) {
+		for (size_t u = 0; u < n; u ++) {
+			w0[u] = next_small(&rng_state);
+			w1[u] = next_small(&rng_state);
+		}
+		if (!e8_qnorm_direct(&norm, q00, q01, q10, q11,
+			w0, w1, logn)
+			|| !check_completion_norm(logn, q00, q01,
+				w0, w1, norm))
+		{
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+static int
+test_verify_bound_helper(unsigned logn)
+{
+	static const int64_t EXPECTED[] = { 2301, 8259, 20192 };
+	double sigma_verify;
+	int64_t bound;
+
+	if (!e8_sigma_verify_default(logn, &sigma_verify)
+		|| !e8_verify_bound_from_sigma(logn, sigma_verify, &bound)
+		|| bound != EXPECTED[logn - 8])
+	{
+		fprintf(stderr,
+			"ERR: E8 verify bound helper mismatch logn=%u\n",
+			logn);
+		return 0;
+	}
+	if (e8_verify_bound_from_sigma(logn, 0.0, &bound)) {
+		fprintf(stderr,
+			"ERR: E8 verify bound helper accepted sigma=0\n");
+		return 0;
+	}
+	return 1;
+}
+
+static int
 test_verify_logn(unsigned logn)
 {
 	size_t sig_len = e8_sig_uncompressed_size(logn);
@@ -254,7 +418,10 @@ test_verify_logn(unsigned logn)
 	}
 
 	if (!test_uncompressed_codec(logn)
+		|| !test_sym_break_rule(logn)
 		|| !test_direct_norm(logn, q00, q01, q10, q11)
+		|| !test_completion_norm(logn, q00, q01, q10, q11)
+		|| !test_verify_bound_helper(logn)
 		|| !find_valid_synthetic_sig(logn, sig, sig_len,
 			q00, q01, q10, q11, hpub, hpub_len))
 	{
