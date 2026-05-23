@@ -65,7 +65,8 @@ Core experimental files:
 
 - `src/hawk_e8_inner.h`: gated internal E8 declarations.
 - `src/e8_math.c`: `P_n`, `S_n`, `Delta_n`, and `Q_E8` helpers.
-- `src/e8_vrfy.c`: uncompressed signature codec, sign-based sym-break, and E8 completion-norm verifier
+- `src/e8_vrfy.c`: uncompressed signature codec, sign-based sym-break, and
+  E8 completion-norm verifier.
 - `src/e8_sampler.c`: standalone E8 block samplers, including the
   coset-matched Construction-A CM sampler and the bounded baseline.
 - `src/e8_sign.c`: dummy E8 signers and sampler-backed uncompressed signer.
@@ -136,9 +137,9 @@ e = w0 + q01 d
 
 This is deliberately separate from ordinary HAWK verification. The E8 path uses
 the `Delta_n`-weighted formula above, not the ordinary determinant-one
-completion-of-squares formula. The current reference code also cross-checks
-accepted signatures against the expanded direct norm while this path is still
-experimental.
+completion-of-squares formula. The verifier does not run the expanded direct
+`Q_E8` norm check; that slower equivalence check is kept in tests while this
+path is still experimental.
 
 This is not full public-orbit canonicalisation for the E8 form.  The
 implementation does not apply rotations, `omega_E8_Q`, or a full `G_E8,Q`
@@ -347,9 +348,15 @@ s = sqrt(2*pi) * sigma.
 The histogram target supports:
 
 ```text
+E8_HIST_KEYS=<positive integer>
+E8_HIST_TRIALS=<positive integer>
 E8_HIST_BOUND=<positive integer>
 E8_HIST_MAX_ATTEMPTS=<positive integer>
 ```
+
+In short mode, `E8_HIST_KEYS` and `E8_HIST_TRIALS` apply uniformly to every
+listed `logn`; the defaults are 3 keys and 5 trials per key per `logn`, so the
+short correctness CSVs do not silently use fewer keys at larger dimensions.
 
 The sampler-backed signing test supports:
 
@@ -405,16 +412,74 @@ Reference_Implementation/e8_hist_public.csv
 Reference_Implementation/e8_hist_signatures.csv
 ```
 
-Generate long-mode logs with a bound sweep:
+The signature CSV keeps the sampler/norm fields used for calibration
+(`pnorm`, `qnorm`, `norm_equal`, attempts, rejected attempts, and coefficient
+ranges) and appends correctness-result and timing fields:
 
-```sh
-make -C Reference_Implementation e8-histograms-long
+```text
+test_type, expected_verify, verify_success, norm_margin, verify_bound
+coset_check_success, piM_matches_t, ambient_mod2_matches_t
+target_t_weight, piM_t_weight, ambient_t_weight
+coset_error_count, ambient_error_count
+cycles_keygen, cycles_public_form, cycles_sample_total, cycles_sample_last
+cycles_sign_total, cycles_verify
+wall_ns_keygen, wall_ns_public_form, wall_ns_sample_total
+wall_ns_sample_last, wall_ns_sign_total, wall_ns_verify
 ```
 
-Long mode still sweeps the retained `sampler_bound` CSV column over
-`{2,4,6,8}` unless `E8_HIST_BOUND` is set. With the default CM sampler this is
-metadata for compatibility with earlier bounded-sampler logs; it does not
-truncate the CM sampler.
+The coset diagnostics distinguish the HAWK-E8-CM quotient check
+`pi_M(P_n z) = z mod 2 = t` from the non-canonical ambient diagnostic
+`P_n z mod 2`.  The internal quotient check is the mathematical signing
+interface; ambient coefficientwise reduction is reported for debugging only.
+
+For each generated sampled signature it writes one `valid_signature` row and
+six negative verification rows: `tamper_message`, `tamper_s0`, `tamper_s1`,
+`tamper_salt`, `tamper_hpub`, and `tamper_public_form`.
+Cycle counts use x86-64 timestamp counters when available and are zero on
+unsupported platforms; wall-clock timings use `CLOCK_MONOTONIC_RAW` where
+available.  Tamper rows reuse the corresponding valid signature's
+keygen/public-form/sign/sample timings and measure verifier time separately.
+
+Generate sampler-isolated timing rows:
+
+```sh
+make -C Reference_Implementation sampler-bench
+```
+
+This benchmark is separate from signing and verification.  It emits
+`hawk_sampler` rows from the ordinary HAWK signing sampler and `e8_sampler`
+rows from `e8_sample_block_construction_a_cm`.  The HAWK sampler produces a
+full `2n` scalar batch internally, so its per-block column is the batch timing
+amortized to one eight-scalar unit; the E8 row times one Construction-A CM
+block sample directly.  `E8_SAMPLER_BENCH_TRIALS` controls the number of
+trials per `logn`, and the target writes
+`Reference_Implementation/e8_sampler_bench.csv`.
+
+Generate aggregate rejection and norm statistics for valid signing only:
+
+```sh
+make -C Reference_Implementation e8-rejection-summary
+```
+
+This writes `Reference_Implementation/e8_rejection_summary.csv` with one row
+per `(logn, key_index)`.  It does not emit tamper rows and does not write one
+row per signature.  The harness is a diagnostic experiment for rejection,
+norm, coset, and timing summaries; it is not a security claim or final
+parameter calibration.
+
+The rejection summary target supports:
+
+```text
+E8_REJECTION_KEYS=<positive integer>
+E8_REJECTION_TRIALS=<positive integer>
+E8_REJECTION_LOGN=8|9|10
+```
+
+For example:
+
+```sh
+E8_REJECTION_LOGN=10 E8_REJECTION_TRIALS=10000 E8_REJECTION_KEYS=5 make -C Reference_Implementation e8-rejection-summary
+```
 
 ## Known Limitations
 
@@ -431,6 +496,6 @@ truncate the CM sampler.
 - No side-channel hardening.
 - No production E8 key format. Tests use expanded `f,g,F,G` from
   `Hawk_keygen`.
-- The verifier uses the E8 completion-of-squares norm with an expanded direct
-  norm cross-check on accepted signatures; compact public-key reconstruction
-  from `qtilde00,qtilde01` is not implemented.
+- The verifier uses the E8 completion-of-squares norm. Tests still compare it
+  with the expanded direct norm; compact public-key reconstruction from
+  `qtilde00,qtilde01` is not implemented.

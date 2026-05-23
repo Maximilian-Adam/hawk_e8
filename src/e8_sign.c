@@ -1,11 +1,87 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "hawk_e8_inner.h"
 
 #if HAWK_ENABLE_E8_EXPERIMENTAL
 
 #include <assert.h>
 #include <limits.h>
+#include <time.h>
+#if defined(__x86_64__)
+#include <x86intrin.h>
+#endif
 
 #define E8_MAXN   1024
+
+static uint64_t
+trace_wall_ns(void)
+{
+	struct timespec ts;
+
+#if defined(CLOCK_MONOTONIC_RAW)
+	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
+		return 0;
+	}
+#else
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		return 0;
+	}
+#endif
+	return (uint64_t)ts.tv_sec * UINT64_C(1000000000)
+		+ (uint64_t)ts.tv_nsec;
+}
+
+static uint64_t
+trace_cycles_start(void)
+{
+#if defined(__x86_64__)
+	_mm_lfence();
+	return __rdtsc();
+#else
+	return 0;
+#endif
+}
+
+static uint64_t
+trace_cycles_end(void)
+{
+#if defined(__x86_64__)
+	unsigned int aux;
+	uint64_t x;
+
+	x = __rdtscp(&aux);
+	_mm_lfence();
+	return x;
+#else
+	return 0;
+#endif
+}
+
+static uint64_t
+trace_cycles_delta(uint64_t t0, uint64_t t1)
+{
+	if (t0 == 0 && t1 == 0) {
+		return 0;
+	}
+	if (t1 <= t0) {
+		return 1;
+	}
+	return t1 - t0;
+}
+
+static uint64_t
+trace_wall_delta(uint64_t t0, uint64_t t1)
+{
+	if (t0 == 0 && t1 == 0) {
+		return 0;
+	}
+	if (t1 <= t0) {
+		return 1;
+	}
+	return t1 - t0;
+}
 
 static unsigned
 get_bit(const uint8_t *buf, size_t u)
@@ -343,7 +419,7 @@ e8_sign_dummy_uncompressed(unsigned logn,
 
 /* see hawk_e8_inner.h */
 int
-e8_sign_sampler_trace_uncompressed(unsigned logn,
+e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 	void *sig, size_t sig_len, const shake_context *sc_data,
 	const void *hpub, size_t hpub_len,
 	const int8_t *f, const int8_t *g,
@@ -351,7 +427,8 @@ e8_sign_sampler_trace_uncompressed(unsigned logn,
 	double sigma_sign, double sigma_verify, int sampler_bound,
 	unsigned max_attempts, hawk_rng rng, void *rng_context,
 	int32_t *trace_z0, int32_t *trace_z1,
-	int64_t *trace_pnorm, unsigned *trace_attempts)
+	int64_t *trace_pnorm, unsigned *trace_attempts,
+	e8_sign_trace_timing *trace_timing)
 {
 	size_t salt_len = e8_salt_len(logn);
 	uint8_t h[256], h0b[E8_MAXN], h1b[E8_MAXN];
@@ -359,6 +436,10 @@ e8_sign_sampler_trace_uncompressed(unsigned logn,
 	int32_t z0[E8_MAXN], z1[E8_MAXN];
 	int16_t s0[E8_MAXN], s1[E8_MAXN];
 	int64_t threshold;
+
+	if (trace_timing != NULL) {
+		memset(trace_timing, 0, sizeof *trace_timing);
+	}
 
 	/*
 	 * Experimental HAWK-E8-CM sampler path.  This calls the
@@ -389,13 +470,29 @@ e8_sign_sampler_trace_uncompressed(unsigned logn,
 	compute_t_mod2(t0, t1, f, g, F, G, h0b, h1b, n);
 
 	for (unsigned attempt = 0; attempt < max_attempts; attempt ++) {
+		uint64_t sample_c0, sample_c1, sample_w0, sample_w1;
 		uint64_t pnorm_u;
 		int64_t pnorm;
 		int sr;
 
-		if (!e8_sample_z_construction_a_cm(z0, z1, &pnorm_u,
-			t0, t1, logn, sigma_sign, rng, rng_context, NULL))
-		{
+		sample_c0 = trace_cycles_start();
+		sample_w0 = trace_wall_ns();
+		int sample_ok = e8_sample_z_construction_a_cm(z0, z1, &pnorm_u,
+			t0, t1, logn, sigma_sign, rng, rng_context, NULL);
+		sample_w1 = trace_wall_ns();
+		sample_c1 = trace_cycles_end();
+		if (trace_timing != NULL) {
+			uint64_t sample_cycles =
+				trace_cycles_delta(sample_c0, sample_c1);
+			uint64_t sample_wall =
+				trace_wall_delta(sample_w0, sample_w1);
+
+			trace_timing->cycles_sample_total += sample_cycles;
+			trace_timing->cycles_sample_last = sample_cycles;
+			trace_timing->wall_ns_sample_total += sample_wall;
+			trace_timing->wall_ns_sample_last = sample_wall;
+		}
+		if (!sample_ok) {
 			return 0;
 		}
 		if (pnorm_u > (uint64_t)INT64_MAX) {
@@ -434,6 +531,25 @@ e8_sign_sampler_trace_uncompressed(unsigned logn,
 		*trace_attempts = max_attempts;
 	}
 	return 0;
+}
+
+/* see hawk_e8_inner.h */
+int
+e8_sign_sampler_trace_uncompressed(unsigned logn,
+	void *sig, size_t sig_len, const shake_context *sc_data,
+	const void *hpub, size_t hpub_len,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G, const uint8_t *salt,
+	double sigma_sign, double sigma_verify, int sampler_bound,
+	unsigned max_attempts, hawk_rng rng, void *rng_context,
+	int32_t *trace_z0, int32_t *trace_z1,
+	int64_t *trace_pnorm, unsigned *trace_attempts)
+{
+	return e8_sign_sampler_trace_timed_uncompressed(logn,
+		sig, sig_len, sc_data, hpub, hpub_len,
+		f, g, F, G, salt, sigma_sign, sigma_verify, sampler_bound,
+		max_attempts, rng, rng_context, trace_z0, trace_z1,
+		trace_pnorm, trace_attempts, NULL);
 }
 
 /* see hawk_e8_inner.h */

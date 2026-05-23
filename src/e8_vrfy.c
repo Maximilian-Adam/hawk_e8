@@ -518,6 +518,9 @@ verify_uncompressed_with_bound(unsigned logn,
 	int16_t s0[E8_MAXN], s1[E8_MAXN];
 	int32_t w0[E8_MAXN], w1[E8_MAXN];
 
+	(void)q10;
+	(void)q11;
+
 	if (!e8_param_salt_len(logn, &salt_len)
 		|| hpub_len != ((size_t)1 << (logn - 4)))
 	{
@@ -543,16 +546,6 @@ verify_uncompressed_with_bound(unsigned logn,
 
 	if (!e8_qnorm_completion(&norm, q00, q01, w0, w1, logn)) {
 		return 0;
-	}
-	if (norm <= bound) {
-		int64_t direct_norm;
-
-		if (!e8_qnorm_direct(&direct_norm,
-			q00, q01, q10, q11, w0, w1, logn)
-			|| direct_norm != norm)
-		{
-			return 0;
-		}
 	}
 	return norm <= bound;
 }

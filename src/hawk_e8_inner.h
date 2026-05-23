@@ -36,6 +36,7 @@
 #define e8_sign_dummy_offset_uncompressed  Zh(e8_sign_dummy_offset_uncompressed)
 #define e8_sign_sampler_uncompressed  Zh(e8_sign_sampler_uncompressed)
 #define e8_sign_sampler_trace_uncompressed  Zh(e8_sign_sampler_trace_uncompressed)
+#define e8_sign_sampler_trace_timed_uncompressed  Zh(e8_sign_sampler_trace_timed_uncompressed)
 #define e8_extract_tau  Zh(e8_extract_tau)
 #define e8_write_block  Zh(e8_write_block)
 #define e8_read_block  Zh(e8_read_block)
@@ -68,6 +69,13 @@ typedef struct {
 	int32_t xblk[8];
 	int32_t zblk[8];
 } e8_ca_sample_trace;
+
+typedef struct {
+	uint64_t cycles_sample_total;
+	uint64_t cycles_sample_last;
+	uint64_t wall_ns_sample_total;
+	uint64_t wall_ns_sample_last;
+} e8_sign_trace_timing;
 
 void e8_apply_P(int32_t *out0, int32_t *out1,
 	const int32_t *z0, const int32_t *z1, unsigned logn);
@@ -166,6 +174,17 @@ int e8_sign_sampler_trace_uncompressed(unsigned logn,
 	unsigned max_attempts, hawk_rng rng, void *rng_context,
 	int32_t *trace_z0, int32_t *trace_z1,
 	int64_t *trace_pnorm, unsigned *trace_attempts);
+
+int e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
+	void *sig, size_t sig_len, const shake_context *sc_data,
+	const void *hpub, size_t hpub_len,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G, const uint8_t *salt,
+	double sigma_sign, double sigma_verify, int sampler_bound,
+	unsigned max_attempts, hawk_rng rng, void *rng_context,
+	int32_t *trace_z0, int32_t *trace_z1,
+	int64_t *trace_pnorm, unsigned *trace_attempts,
+	e8_sign_trace_timing *trace_timing);
 
 /*
  * Experimental E8 sampler helpers.  These are floating-point,
