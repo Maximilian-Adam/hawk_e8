@@ -22,11 +22,23 @@
  */
 #include "../hawk_sign.c"
 
+/*
+ * The sampler benchmark target intentionally links only the ordinary Hawk
+ * objects plus e8_math/e8_sampler.  Include the experimental E8 verifier and
+ * signer here so this standalone benchmark can also time the end-to-end
+ * HAWK-E8-CM signing path without changing the reference Makefile.
+ */
+#define get_bit e8_vrfy_bench_get_bit
+#define hash_to_h e8_vrfy_bench_hash_to_h
+#include "../e8_vrfy.c"
+#undef get_bit
+#undef hash_to_h
+#include "../e8_sign.c"
+
 #define MAXN                         1024
 #define E8_BLOCK_DIM                 8
 #define DEFAULT_BENCH_TRIALS         16
 #define MAX_BENCH_TRIALS             1000000
-#define E8_EXTERNAL_ATTEMPT_LIMIT    16
 
 typedef struct {
 	uint64_t state;
@@ -167,6 +179,23 @@ make_tau(unsigned logn, unsigned trial_index, unsigned block_index)
 		+ 19u * logn + 11u * block_index);
 }
 
+static void
+fill_e8_parities(uint8_t *t0, uint8_t *t1,
+	unsigned logn, unsigned trial_index)
+{
+	size_t n = (size_t)1 << logn;
+	size_t k = n >> 2;
+
+	for (size_t r = 0; r < k; r ++) {
+		uint8_t tau = make_tau(logn, trial_index, (unsigned)r);
+
+		for (unsigned u = 0; u < 4; u ++) {
+			t0[r + u * k] = (uint8_t)((tau >> u) & 1u);
+			t1[r + u * k] = (uint8_t)((tau >> (u + 4)) & 1u);
+		}
+	}
+}
+
 static double
 hawk_sigma_sign(unsigned logn)
 {
@@ -184,6 +213,16 @@ e8_sigma_sign(unsigned logn)
 	case 8: return 1.25;
 	case 9: return 1.28;
 	default: return 1.30;
+	}
+}
+
+static double
+e8_sigma_verify_sign(unsigned logn)
+{
+	switch (logn) {
+	case 8: return 1.06;
+	case 9: return 1.42;
+	default: return 1.57;
 	}
 }
 
@@ -224,26 +263,27 @@ hawk_block_norm(const int8_t *x, unsigned block_index)
 static void
 write_header(void)
 {
-	printf("sampler_type,logn,n,block_index,trial_index,sigma,"
+	printf("sampler_type,scope,logn,n,block_index,trial_index,sigma,"
 		"coset_label,accepted,attempts,cycles_total,"
-		"cycles_per_accepted_block,wall_ns_total,"
-		"wall_ns_per_accepted_block,norm,notes\n");
+		"cycles_per_unit,wall_ns_total,"
+		"wall_ns_per_unit,norm,notes\n");
 }
 
 static void
-write_row(const char *sampler_type, unsigned logn, unsigned block_index,
-	unsigned trial_index, double sigma, uint8_t tau, int accepted,
-	unsigned attempts, uint64_t cycles_total,
+write_row(const char *sampler_type, const char *scope,
+	unsigned logn, unsigned block_index, unsigned trial_index,
+	double sigma, uint8_t tau, int accepted, unsigned attempts,
+	uint64_t cycles_total,
 	uint64_t cycles_per_accepted_block, uint64_t wall_ns_total,
 	uint64_t wall_ns_per_accepted_block, uint64_t norm,
 	const char *notes)
 {
 	size_t n = (size_t)1 << logn;
 
-	printf("%s,%u,%u,%u,%u,%.17g,%u,%d,%u,"
+	printf("%s,%s,%u,%u,%u,%u,%.17g,%u,%d,%u,"
 		"%llu,%llu,%llu,%llu,%llu,%s\n",
-		sampler_type, logn, (unsigned)n, block_index, trial_index,
-		sigma, (unsigned)tau, accepted, attempts,
+		sampler_type, scope, logn, (unsigned)n, block_index,
+		trial_index, sigma, (unsigned)tau, accepted, attempts,
 		(unsigned long long)cycles_total,
 		(unsigned long long)cycles_per_accepted_block,
 		(unsigned long long)wall_ns_total,
@@ -279,7 +319,8 @@ bench_hawk_sampler(unsigned logn, unsigned trial_index)
 	wall_ns_total = bench_wall_delta(w0, w1);
 	norm = hawk_block_norm(x, block_index);
 
-	write_row("hawk_sampler", logn, block_index, trial_index,
+	write_row("hawk_sampler", "amortized_block", logn, block_index,
+		trial_index,
 		hawk_sigma_sign(logn), tau, 1, 1, cycles_total,
 		bench_per_unit(cycles_total, block_units), wall_ns_total,
 		bench_per_unit(wall_ns_total, block_units), norm,
@@ -287,45 +328,204 @@ bench_hawk_sampler(unsigned logn, unsigned trial_index)
 }
 
 static void
-bench_e8_sampler(unsigned logn, unsigned trial_index)
+bench_e8_sampler_full(unsigned logn, unsigned trial_index,
+	int warm_cache, const char *sampler_type, const char *notes)
 {
 	size_t n = (size_t)1 << logn;
 	unsigned block_units = (unsigned)(n >> 2);
 	unsigned block_index = trial_index % block_units;
 	uint8_t tau = make_tau(logn, trial_index, block_index);
-	int32_t zblk[E8_BLOCK_DIM];
+	uint8_t t0[MAXN], t1[MAXN];
+	int32_t z0[MAXN], z1[MAXN];
 	uint64_t norm = 0;
 	e8_sampler_stats stats;
 	bench_rng_state rng;
 	uint64_t c0, c1, w0, w1, cycles_total, wall_ns_total;
-	unsigned attempts = 0;
-	int accepted = 0;
+	int accepted;
 
 	memset(&stats, 0, sizeof stats);
-	memset(zblk, 0, sizeof zblk);
+	memset(z0, 0, sizeof z0);
+	memset(z1, 0, sizeof z1);
+	fill_e8_parities(t0, t1, logn, trial_index);
 	bench_rng_init(&rng, 1, logn, trial_index);
+	if (warm_cache && !e8_sampler_warm_cache(e8_sigma_sign(logn))) {
+		write_row(sampler_type, "amortized_block", logn, block_index,
+			trial_index, e8_sigma_sign(logn), tau, 0, 0,
+			0, 0, 0, 0, 0, "cache_warmup_failed");
+		return;
+	}
 
 	c0 = bench_cycles_start();
 	w0 = bench_wall_ns();
-	while (attempts < E8_EXTERNAL_ATTEMPT_LIMIT) {
-		attempts ++;
-		if (e8_sample_block_construction_a_cm(zblk, tau,
-			e8_sigma_sign(logn), bench_rng, &rng, &norm, &stats))
-		{
-			accepted = 1;
-			break;
-		}
-	}
+	accepted = e8_sample_z_construction_a_cm(z0, z1, &norm,
+		t0, t1, logn, e8_sigma_sign(logn), bench_rng, &rng,
+		&stats);
 	w1 = bench_wall_ns();
 	c1 = bench_cycles_end();
 
 	cycles_total = bench_cycles_delta(c0, c1);
 	wall_ns_total = bench_wall_delta(w0, w1);
-	write_row("e8_sampler", logn, block_index, trial_index,
-		e8_sigma_sign(logn), tau, accepted, attempts, cycles_total,
+	write_row(sampler_type, "amortized_block", logn, block_index,
+		trial_index, e8_sigma_sign(logn), tau, accepted, 1,
+		cycles_total, accepted ? bench_per_unit(cycles_total,
+			block_units) : 0, wall_ns_total,
+		accepted ? bench_per_unit(wall_ns_total, block_units) : 0,
+		accepted ? norm : 0, notes);
+}
+
+static void
+bench_make_hawk_message_context(shake_context *sc_data,
+	unsigned logn, unsigned trial_index)
+{
+	static const char prefix[] = "ordinary hawk signing bench";
+	uint8_t buf[2];
+
+	buf[0] = (uint8_t)logn;
+	buf[1] = (uint8_t)trial_index;
+	hawk_sign_start(sc_data);
+	shake_inject(sc_data, prefix, sizeof prefix - 1);
+	shake_inject(sc_data, buf, sizeof buf);
+}
+
+static void
+bench_hawk_sign(unsigned logn, unsigned trial_index)
+{
+	uint8_t priv[HAWK_PRIVKEY_SIZE(10)];
+	uint8_t pub[HAWK_PUBKEY_SIZE(10)];
+	uint8_t sig[HAWK_SIG_SIZE(10)];
+	uint8_t tmp_keygen[HAWK_TMPSIZE_KEYGEN(10)];
+	uint8_t tmp_sign[HAWK_TMPSIZE_SIGN(10)];
+	shake_context sc_data;
+	bench_rng_state key_rng, sign_rng;
+	uint64_t c0, c1, w0, w1, cycles_total, wall_ns_total;
+	int accepted;
+
+	bench_rng_init(&key_rng, 5, logn, trial_index);
+	bench_rng_init(&sign_rng, 6, logn, trial_index);
+	bench_make_hawk_message_context(&sc_data, logn, trial_index);
+	memset(sig, 0, sizeof sig);
+
+	if (!hawk_keygen(logn, priv, pub, bench_rng, &key_rng,
+		tmp_keygen, HAWK_TMPSIZE_KEYGEN(logn)))
+	{
+		write_row("hawk_sign", "signature", logn, 0, trial_index,
+			hawk_sigma_sign(logn), 0, 0, 0,
+			0, 0, 0, 0, 0, "keygen_setup_failed");
+		return;
+	}
+
+	c0 = bench_cycles_start();
+	w0 = bench_wall_ns();
+	accepted = hawk_sign_finish(logn, bench_rng, &sign_rng,
+		sig, &sc_data, priv, tmp_sign, HAWK_TMPSIZE_SIGN(logn));
+	w1 = bench_wall_ns();
+	c1 = bench_cycles_end();
+
+	cycles_total = bench_cycles_delta(c0, c1);
+	wall_ns_total = bench_wall_delta(w0, w1);
+	write_row("hawk_sign", "signature", logn, 0, trial_index,
+		hawk_sigma_sign(logn), 0, accepted, 1, cycles_total,
 		accepted ? cycles_total : 0, wall_ns_total,
-		accepted ? wall_ns_total : 0, accepted ? norm : 0,
-		"construction_a_cm_block_sampler");
+		accepted ? wall_ns_total : 0, 0,
+		"ordinary_hawk_sign_finish_encoded_private_key");
+}
+
+static void
+bench_make_message_context(shake_context *sc_data,
+	unsigned logn, unsigned trial_index)
+{
+	static const char prefix[] = "experimental e8 sampler bench";
+	uint8_t buf[2];
+
+	buf[0] = (uint8_t)logn;
+	buf[1] = (uint8_t)trial_index;
+	shake_init(sc_data, 256);
+	shake_inject(sc_data, prefix, sizeof prefix - 1);
+	shake_inject(sc_data, buf, sizeof buf);
+}
+
+static void
+bench_make_hpub(uint8_t *hpub, size_t hpub_len,
+	unsigned logn, unsigned trial_index)
+{
+	for (size_t u = 0; u < hpub_len; u ++) {
+		hpub[u] = (uint8_t)(0x63u + 17u * u
+			+ 11u * trial_index + 5u * logn);
+	}
+}
+
+static void
+bench_make_salt(uint8_t *salt, size_t salt_len,
+	unsigned logn, unsigned trial_index)
+{
+	for (size_t u = 0; u < salt_len; u ++) {
+		salt[u] = (uint8_t)(0xB5u + 29u * u
+			+ trial_index + 3u * logn);
+	}
+}
+
+static int
+bench_make_basis(unsigned logn,
+	int8_t *f, int8_t *g, int8_t *F, int8_t *G,
+	bench_rng_state *rng)
+{
+	uint8_t tmp[HAWK_TMPSIZE_KEYGEN(10)];
+	uint8_t seed[40];
+
+	return Hawk_keygen(logn, f, g, F, G, NULL, NULL, NULL, seed,
+		bench_rng, rng, tmp, sizeof tmp) == 0;
+}
+
+static void
+bench_e8_sign_sampler(unsigned logn, unsigned trial_index)
+{
+	size_t sig_len = e8_sig_uncompressed_size(logn);
+	size_t salt_len = e8_salt_len(logn);
+	size_t hpub_len = (size_t)1 << (logn - 4);
+	int8_t f[MAXN], g[MAXN], F[MAXN], G[MAXN];
+	uint8_t hpub[64], salt[40], sig[40 + 4 * MAXN];
+	shake_context sc_data;
+	bench_rng_state key_rng, sign_rng;
+	e8_sign_trace_timing timing;
+	uint64_t c0, c1, w0, w1, cycles_total, wall_ns_total;
+	int64_t pnorm = 0;
+	unsigned attempts = 0;
+	int accepted;
+
+	bench_rng_init(&key_rng, 3, logn, trial_index);
+	bench_rng_init(&sign_rng, 4, logn, trial_index);
+	memset(&timing, 0, sizeof timing);
+	memset(sig, 0, sizeof sig);
+	bench_make_message_context(&sc_data, logn, trial_index);
+	bench_make_hpub(hpub, hpub_len, logn, trial_index);
+	bench_make_salt(salt, salt_len, logn, trial_index);
+
+	if (!bench_make_basis(logn, f, g, F, G, &key_rng)
+		|| !e8_sampler_warm_cache(e8_sigma_sign(logn)))
+	{
+		write_row("e8_sign_sampler_cached", "signature", logn, 0,
+			trial_index, e8_sigma_sign(logn), 0, 0, 0,
+			0, 0, 0, 0, 0, "setup_failed");
+		return;
+	}
+
+	c0 = bench_cycles_start();
+	w0 = bench_wall_ns();
+	accepted = e8_sign_sampler_trace_timed_uncompressed(logn,
+		sig, sig_len, &sc_data, hpub, hpub_len, f, g, F, G, salt,
+		e8_sigma_sign(logn), e8_sigma_verify_sign(logn), 2, 1000,
+		bench_rng, &sign_rng, NULL, NULL, &pnorm, &attempts,
+		&timing);
+	w1 = bench_wall_ns();
+	c1 = bench_cycles_end();
+
+	cycles_total = bench_cycles_delta(c0, c1);
+	wall_ns_total = bench_wall_delta(w0, w1);
+	write_row("e8_sign_sampler_cached", "signature", logn, 0,
+		trial_index, e8_sigma_sign(logn), 0, accepted, attempts,
+		cycles_total, accepted ? cycles_total : 0, wall_ns_total,
+		accepted ? wall_ns_total : 0, accepted ? (uint64_t)pnorm : 0,
+		"end_to_end_signing_warm_cache");
 }
 
 int
@@ -338,11 +538,18 @@ main(void)
 	}
 	write_header();
 	for (unsigned logn = 8; logn <= 10; logn ++) {
+		bench_e8_sampler_full(logn, 0, 0,
+			"e8_sampler_cached_cold_full",
+			"construction_a_cm_full_dimension_sampler_includes_lazy_cache_warmup");
 		for (unsigned trial_index = 0;
 			trial_index < trials; trial_index ++)
 		{
 			bench_hawk_sampler(logn, trial_index);
-			bench_e8_sampler(logn, trial_index);
+			bench_e8_sampler_full(logn, trial_index, 1,
+				"e8_sampler_cached_warm_block",
+				"construction_a_cm_cached_full_dimension_sampler_amortized_to_e8_block");
+			bench_hawk_sign(logn, trial_index);
+			bench_e8_sign_sampler(logn, trial_index);
 		}
 	}
 	return 0;

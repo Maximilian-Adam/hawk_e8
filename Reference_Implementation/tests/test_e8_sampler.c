@@ -170,6 +170,97 @@ test_sigma_convention(void)
 }
 
 static int
+mass_close(double a, double b, double rel_tol, double abs_tol)
+{
+	double scale = fmax(fabs(a), fabs(b));
+
+	return fabs(a - b) <= abs_tol + rel_tol * scale;
+}
+
+static int
+test_cache_1d_masses(void)
+{
+	static const double sigmas[] = { 1.25, 1.28, 1.30 };
+	static const int64_t centers_num32[] = {
+		-96, -65, -33, -17, -8, -1, 0,
+		1, 7, 8, 17, 33, 64, 96
+	};
+
+	for (size_t si = 0; si < sizeof sigmas / sizeof sigmas[0]; si ++) {
+		if (!e8_sampler_warm_cache(sigmas[si])) {
+			fprintf(stderr,
+				"ERR: E8 sampler cache warm-up failed"
+				" sigma=%.17g\n", sigmas[si]);
+			return 0;
+		}
+		for (size_t ci = 0;
+			ci < sizeof centers_num32 / sizeof centers_num32[0];
+			ci ++)
+		{
+			double reference, cached;
+
+			if (!e8_sampler_cache_compare_1d_mass(sigmas[si],
+				centers_num32[ci], &reference, &cached))
+			{
+				fprintf(stderr,
+					"ERR: E8 sampler cache 1D mass"
+					" comparison failed sigma=%.17g"
+					" center_num32=%lld\n",
+					sigmas[si],
+					(long long)centers_num32[ci]);
+				return 0;
+			}
+			if (!mass_close(reference, cached, 1e-14, 1e-15)) {
+				fprintf(stderr,
+					"ERR: E8 sampler cache 1D mass mismatch"
+					" sigma=%.17g center_num32=%lld"
+					" reference=%.17g cached=%.17g\n",
+					sigmas[si],
+					(long long)centers_num32[ci],
+					reference, cached);
+				return 0;
+			}
+		}
+	}
+	return 1;
+}
+
+static int
+test_cache_component_masses(void)
+{
+	if (!e8_sampler_warm_cache(SAMPLE_SIGMA)) {
+		fprintf(stderr, "ERR: E8 sampler cache warm-up failed\n");
+		return 0;
+	}
+
+	for (unsigned tau = 0; tau < 256; tau ++) {
+		for (unsigned component = 0; component < 16; component ++) {
+			double reference, cached;
+
+			if (!e8_sampler_cache_compare_component_mass(
+				(uint8_t)tau, (uint8_t)component,
+				SAMPLE_SIGMA, &reference, &cached))
+			{
+				fprintf(stderr,
+					"ERR: E8 sampler cache component"
+					" comparison failed tau=%u component=%u\n",
+					tau, component);
+				return 0;
+			}
+			if (!mass_close(reference, cached, 1e-12, 1e-15)) {
+				fprintf(stderr,
+					"ERR: E8 sampler cache component"
+					" mass mismatch tau=%u component=%u"
+					" reference=%.17g cached=%.17g\n",
+					tau, component, reference, cached);
+				return 0;
+			}
+		}
+	}
+	return 1;
+}
+
+static int
 test_rm13_table(void)
 {
 	for (unsigned u = 0; u < 16; u ++) {
@@ -412,6 +503,10 @@ test_all_tau_block_support_cm(void)
 	uint64_t rng_state = UINT64_C(0xE8CA000000000000);
 	e8_sampler_stats stats;
 
+	if (!e8_sampler_warm_cache(SAMPLE_SIGMA)) {
+		fprintf(stderr, "ERR: CM E8 cache warm-up failed\n");
+		return 0;
+	}
 	memset(&stats, 0, sizeof stats);
 	for (unsigned tau = 0; tau < 256; tau ++) {
 		for (unsigned sample = 0; sample < CM_BLOCK_SAMPLES; sample ++) {
@@ -558,6 +653,8 @@ test_logn(unsigned logn)
 	}
 	if (logn == 8
 		&& (!test_rm13_table()
+			|| !test_cache_1d_masses()
+			|| !test_cache_component_masses()
 			|| !test_construction_a_trace_path()
 			|| !test_all_tau_block_support_bounded()
 			|| !test_all_tau_block_support_cm()))

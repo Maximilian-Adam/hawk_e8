@@ -9,6 +9,10 @@
 
 #if HAWK_ENABLE_E8_EXPERIMENTAL
 
+#ifndef HAWK_E8_DEBUG_CHECKS
+#define HAWK_E8_DEBUG_CHECKS   1
+#endif
+
 /*
  * Experimental E8 helper API.
  *
@@ -53,6 +57,9 @@
 #define e8_sample_block_construction_a_cm  Zh(e8_sample_block_construction_a_cm)
 #define e8_sample_block_construction_a_cm_trace  Zh(e8_sample_block_construction_a_cm_trace)
 #define e8_sample_z_construction_a_cm  Zh(e8_sample_z_construction_a_cm)
+#define e8_sampler_warm_cache  Zh(e8_sampler_warm_cache)
+#define e8_sampler_cache_compare_1d_mass  Zh(e8_sampler_cache_compare_1d_mass)
+#define e8_sampler_cache_compare_component_mass  Zh(e8_sampler_cache_compare_component_mass)
 
 typedef struct {
 	uint64_t blocks;
@@ -237,7 +244,14 @@ int e8_sample_z_float(int32_t *z0, int32_t *z1, int64_t *norm2,
  * Coset-matched Construction-A HAWK-E8-CM sampler.  The input tau is the
  * internal P-coordinate coset label; the returned zblk always satisfies
  * zblk[i] = bit_i(tau) mod 2, and norm2 is ||P zblk||^2.
+ *
+ * The default sampler uses a runtime cache of one-dimensional shifted
+ * Gaussian tables and tau/component selection masses.  It remains an
+ * experimental, floating-point, data-dependent research sampler; the cache
+ * is an optimisation only and is not constant-time hardened.
  */
+int e8_sampler_warm_cache(double sigma_sign);
+
 int e8_sample_block_construction_a_cm(int32_t *zblk, uint8_t tau,
 	double sigma_sign, hawk_rng rng, void *rng_context,
 	uint64_t *norm2_out, e8_sampler_stats *stats);
@@ -251,6 +265,17 @@ int e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
 	unsigned logn, double sigma_sign, hawk_rng rng, void *rng_context,
 	e8_sampler_stats *stats);
+
+/*
+ * Test hooks for cache equivalence against the direct reference mass
+ * computation. Centers use the exact numerator over denominator 32.
+ */
+int e8_sampler_cache_compare_1d_mass(double sigma_sign,
+	int64_t center_num32, double *reference_mass, double *cached_mass);
+
+int e8_sampler_cache_compare_component_mass(uint8_t tau,
+	uint8_t component, double sigma_sign,
+	double *reference_mass, double *cached_mass);
 
 #endif
 

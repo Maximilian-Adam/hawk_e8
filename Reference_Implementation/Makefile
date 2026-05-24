@@ -28,8 +28,6 @@ test-e8: build bin $(E8_PROGS)
 	./bin/test_e8_sign_sampler
 e8-histograms: build bin data $(E8_HIST_PROGS)
 	./bin/e8_histograms
-e8-sampler-bench: build bin $(E8_BENCH_PROGS)
-	@./bin/e8_sampler_bench
 sampler-bench: build bin $(E8_BENCH_PROGS)
 	@./bin/e8_sampler_bench > e8_sampler_bench.csv
 	@printf 'wrote e8_sampler_bench.csv\n'
