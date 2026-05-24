@@ -245,9 +245,29 @@ The compatibility names `e8_sample_block_float` and `e8_sample_z_float` still
 refer to that bounded baseline for older tests and diagnostics.
 
 The CM sampler uses floating-point one-dimensional conditional CDFs with a
-large finite tail cutoff for the current research prototype. All sampler paths
-are experimental, floating-point, data-dependent, and non-constant-time. They
-are not suitable for deployment.
+large finite tail cutoff for the current research prototype.  Its default path
+uses a runtime cache keyed by the exact `sigma_sign` bit pattern, the derived
+`sigma_coord = sigma_sign / sqrt(32)` bit pattern, and the exact
+Construction-A one-dimensional centre numerator over denominator `32`.  The
+cache stores:
+
+```text
+lo, hi, total mass, and cumulative weights for each shifted 1D table
+per-tau masses and prefix sums for the 16 RM(1,3) components
+```
+
+`e8_sampler_warm_cache(sigma_sign)` explicitly precomputes the tables for one
+`sigma_sign`; the full CM sampler also warms lazily on first use.  Warm-up does
+not consume sampler RNG output.  The cache is an optimisation only, not a
+constant-time hardening mechanism.
+
+The internal macro `HAWK_E8_DEBUG_CHECKS` defaults to `1`.  In that mode the
+CM sampler keeps the reconstruction, parity, syndrome, and norm consistency
+checks used by the test builds.  Benchmark or release builds may compile with
+`HAWK_E8_DEBUG_CHECKS=0` to skip those extra prototype checks.
+
+All sampler paths are experimental, floating-point, data-dependent, and
+non-constant-time. They are not suitable for deployment.
 
 ## Signer Separation
 
@@ -446,13 +466,40 @@ Generate sampler-isolated timing rows:
 make -C Reference_Implementation sampler-bench
 ```
 
-This benchmark is separate from signing and verification.  It emits
-`hawk_sampler` rows from the ordinary HAWK signing sampler and `e8_sampler`
-rows from `e8_sample_block_construction_a_cm`.  The HAWK sampler produces a
-full `2n` scalar batch internally, so its per-block column is the batch timing
-amortized to one eight-scalar unit; the E8 row times one Construction-A CM
-block sample directly.  `E8_SAMPLER_BENCH_TRIALS` controls the number of
-trials per `logn`, and the target writes
+This benchmark emits sampler-scope and signature-scope rows.  The current row
+types are:
+
+```text
+hawk_sampler
+e8_sampler_cached_cold_full
+e8_sampler_cached_warm_block
+hawk_sign
+e8_sign_sampler_cached
+```
+
+`hawk_sampler` times the ordinary HAWK signing sampler.  The ordinary sampler
+produces a full `2n` scalar batch internally, so `cycles_total` is the full
+sampler call and `cycles_per_unit` is amortized to one eight-scalar unit.
+
+`e8_sampler_cached_cold_full` times one full
+`e8_sample_z_construction_a_cm` call including lazy cache warm-up for that
+`sigma_sign`.  `e8_sampler_cached_warm_block` also times the full
+`e8_sample_z_construction_a_cm` call, but with the cache already warm; its
+name is historical, and its per-unit columns are amortized over the `n/4` E8
+blocks.  Thus the E8 sampler row's `cycles_total` is now a full-dimension
+sampler measurement, not a single-block measurement.
+
+`hawk_sign` times ordinary compressed HAWK signing through
+`hawk_sign_finish`, with key generation and message setup outside the timed
+region.  `e8_sign_sampler_cached` times the experimental uncompressed
+HAWK-E8-CM signing path through `e8_sign_sampler_trace_timed_uncompressed`,
+again with setup outside the timed region and with the E8 sampler cache warm.
+These two `signature` rows are the closest signature-level comparison, though
+they still compare ordinary compressed HAWK with the experimental uncompressed
+E8 path.
+
+`E8_SAMPLER_BENCH_TRIALS` controls the number of trials per `logn`, and the
+target writes
 `Reference_Implementation/e8_sampler_bench.csv`.
 
 Generate aggregate rejection and norm statistics for valid signing only:
@@ -485,7 +532,7 @@ E8_REJECTION_LOGN=10 E8_REJECTION_TRIALS=10000 E8_REJECTION_KEYS=5 make -C Refer
 
 - Floating-point sampler.
 - The CM sampler currently uses floating-point finite-tail one-dimensional
-  conditional CDFs.
+  conditional CDFs and runtime caches.
 - The previous bounded/truncated sampler remains only as a baseline.
 - Data-dependent, non-constant-time sampling and signing paths.
 - No AVX2 E8 implementation.
