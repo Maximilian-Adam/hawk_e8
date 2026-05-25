@@ -20,6 +20,7 @@
 #define E8_TWO_PI              6.28318530717958647692528676655900576839
 #define E8_1D_TINY_VALUES      6
 #define E8_1D_TINY_SCALE       4294967296.0
+#define E8_RNG_STREAM_BYTES    128
 
 #ifndef HAWK_E8_DEBUG_CHECKS
 #define HAWK_E8_DEBUG_CHECKS   1
@@ -87,9 +88,13 @@ typedef struct {
 typedef struct {
 	int64_t center_num32;
 	double tiny_mass;
+	double tail_mass;
 	uint8_t tiny_len;
+	size_t tail_len;
 	int32_t tiny_value[E8_1D_TINY_VALUES];
 	uint32_t tiny_cdf[E8_1D_TINY_VALUES];
+	int32_t *tail_value;
+	double *tail_cdf;
 } e8_1d_hot_row;
 
 typedef struct {
@@ -118,6 +123,14 @@ struct e8_ca_sigma_cache_s {
 };
 
 static e8_ca_sigma_cache *e8_ca_cache_list = NULL;
+
+typedef struct {
+	hawk_rng rng;
+	void *rng_context;
+	uint8_t buf[E8_RNG_STREAM_BYTES];
+	size_t pos;
+	size_t len;
+} e8_rng_stream;
 
 /*
  * Experimental E8 samplers.
@@ -167,10 +180,61 @@ rng_double(hawk_rng rng, void *rng_context)
 	return (double)(x >> 11) * 0x1.0p-53;
 }
 
-static uint32_t
-rng_u32(hawk_rng rng, void *rng_context)
+static int
+rng_stream_init(e8_rng_stream *stream, hawk_rng rng, void *rng_context)
 {
-	return (uint32_t)(rng_u64(rng, rng_context) >> 32);
+	if (stream == NULL || rng == NULL) {
+		return 0;
+	}
+	stream->rng = rng;
+	stream->rng_context = rng_context;
+	stream->pos = 0;
+	stream->len = 0;
+	return 1;
+}
+
+static void
+rng_stream_refill(e8_rng_stream *stream)
+{
+	stream->rng(stream->rng_context, stream->buf, sizeof stream->buf);
+	stream->pos = 0;
+	stream->len = sizeof stream->buf;
+}
+
+static uint64_t
+rng_stream_u64(e8_rng_stream *stream)
+{
+	uint64_t x = 0;
+
+	if (stream->len - stream->pos < 8) {
+		rng_stream_refill(stream);
+	}
+	for (unsigned u = 0; u < 8; u ++) {
+		x |= (uint64_t)stream->buf[stream->pos ++] << (u << 3);
+	}
+	return x;
+}
+
+static uint32_t
+rng_stream_u32(e8_rng_stream *stream)
+{
+	uint32_t x = 0;
+
+	if (stream->len - stream->pos < 4) {
+		rng_stream_refill(stream);
+	}
+	for (unsigned u = 0; u < 4; u ++) {
+		x |= (uint32_t)stream->buf[stream->pos ++] << (u << 3);
+	}
+	return x;
+}
+
+static double
+rng_stream_double(e8_rng_stream *stream)
+{
+	uint64_t x = rng_stream_u64(stream);
+
+	return (double)(x >> 11) * 0x1.0p-53;
 }
 
 static uint64_t
@@ -297,15 +361,82 @@ sample_1d_integer_mass(double center, double sigma)
 	return sample_1d_integer_mass_range(center, sigma, lo, hi);
 }
 
-static int
-sample_1d_tiny_contains(const e8_1d_hot_row *row, int32_t x)
+static void
+sample_1d_hot_row_free(e8_1d_hot_row *row)
 {
+	if (row == NULL) {
+		return;
+	}
+	free(row->tail_value);
+	free(row->tail_cdf);
+	memset(row, 0, sizeof *row);
+}
+
+static int
+sample_1d_integer_table_build_tail(e8_1d_hot_row *row,
+	const e8_1d_integer_table *table, const double *weights)
+{
+	unsigned char *used;
+	size_t tail_cap = 0;
+	double tail_mass = 0.0;
+
+	if (row == NULL || table == NULL || weights == NULL) {
+		return 0;
+	}
+	used = calloc(table->len, sizeof *used);
+	if (used == NULL) {
+		return 0;
+	}
 	for (unsigned i = 0; i < row->tiny_len; i ++) {
-		if (row->tiny_value[i] == x) {
-			return 1;
+		int64_t idx = (int64_t)row->tiny_value[i] - table->lo;
+		if (idx >= 0 && (size_t)idx < table->len) {
+			used[idx] = 1;
 		}
 	}
-	return 0;
+	for (size_t i = 0; i < table->len; i ++) {
+		if (!used[i] && weights[i] > 0.0) {
+			tail_cap ++;
+		}
+	}
+	if (tail_cap == 0) {
+		free(used);
+		row->tail_mass = 0.0;
+		return 1;
+	}
+
+	row->tail_value = malloc(tail_cap * sizeof *row->tail_value);
+	row->tail_cdf = malloc(tail_cap * sizeof *row->tail_cdf);
+	if (row->tail_value == NULL || row->tail_cdf == NULL) {
+		free(used);
+		free(row->tail_value);
+		free(row->tail_cdf);
+		row->tail_value = NULL;
+		row->tail_cdf = NULL;
+		return 0;
+	}
+
+	for (size_t out = 0; out < tail_cap; out ++) {
+		size_t best = table->len;
+		double best_weight = 0.0;
+
+		for (size_t i = 0; i < table->len; i ++) {
+			if (!used[i] && weights[i] > best_weight) {
+				best = i;
+				best_weight = weights[i];
+			}
+		}
+		if (best == table->len || !(best_weight > 0.0)) {
+			break;
+		}
+		used[best] = 1;
+		tail_mass += best_weight;
+		row->tail_value[row->tail_len] = (int32_t)(table->lo + (int)best);
+		row->tail_cdf[row->tail_len] = tail_mass;
+		row->tail_len ++;
+	}
+	free(used);
+	row->tail_mass = tail_mass;
+	return row->tail_len > 0 && tail_mass > 0.0;
 }
 
 static int
@@ -367,7 +498,10 @@ sample_1d_integer_table_build_tiny(e8_1d_hot_row *row,
 	}
 	row->tiny_len = (uint8_t)table_len;
 	row->tiny_mass = tiny_mass;
-	return table_len > 0 && tiny_mass > 0.0;
+	if (table_len == 0 || !(tiny_mass > 0.0)) {
+		return 0;
+	}
+	return sample_1d_integer_table_build_tail(row, table, weights);
 }
 
 static int
@@ -427,7 +561,7 @@ sample_1d_integer_table_build(e8_1d_integer_table *table,
 	if (!ok) {
 		free(cdf);
 		memset(table, 0, sizeof *table);
-		memset(row, 0, sizeof *row);
+		sample_1d_hot_row_free(row);
 		return 0;
 	}
 	return 1;
@@ -436,16 +570,16 @@ sample_1d_integer_table_build(e8_1d_integer_table *table,
 static int
 sample_1d_integer_gaussian_hot(int32_t *out,
 	const e8_1d_hot_row *row, const e8_1d_integer_table *table,
-	hawk_rng rng, void *rng_context)
+	e8_rng_stream *rng_stream)
 {
 	if (out == NULL || row == NULL || table == NULL || table->cdf == NULL
 		|| table->len == 0 || !(table->total > 0.0)
-		|| row->tiny_len == 0 || rng == NULL)
+		|| row->tiny_len == 0 || rng_stream == NULL)
 	{
 		return 0;
 	}
 
-	uint32_t target = rng_u32(rng, rng_context);
+	uint32_t target = rng_stream_u32(rng_stream);
 	for (unsigned i = 0; i < row->tiny_len; i ++) {
 		if (target < row->tiny_cdf[i]) {
 			*out = row->tiny_value[i];
@@ -453,31 +587,23 @@ sample_1d_integer_gaussian_hot(int32_t *out,
 		}
 	}
 
-	double tail_total = table->total - row->tiny_mass;
+	double tail_total = row->tail_mass;
 	if (!(tail_total > 0.0)) {
 		*out = row->tiny_value[row->tiny_len - 1];
 		return 1;
 	}
 
-	double tail_target = rng_double(rng, rng_context) * tail_total;
-	double tail_cdf = 0.0;
-	double prev = 0.0;
-	for (size_t i = 0; i < table->len; i ++) {
-		int32_t x = (int32_t)(table->lo + (int)i);
-		double w = table->cdf[i] - prev;
-
-		prev = table->cdf[i];
-		if (sample_1d_tiny_contains(row, x)) {
-			continue;
-		}
-		tail_cdf += w;
-		if (w > 0.0 && tail_cdf >= tail_target) {
-			*out = x;
+	double tail_target = rng_stream_double(rng_stream) * tail_total;
+	for (size_t i = 0; i < row->tail_len; i ++) {
+		if (row->tail_cdf[i] >= tail_target) {
+			*out = row->tail_value[i];
 			return 1;
 		}
 	}
 
-	*out = (int32_t)table->hi;
+	*out = row->tail_len > 0
+		? row->tail_value[row->tail_len - 1]
+		: row->tiny_value[row->tiny_len - 1];
 	return 1;
 }
 
@@ -841,6 +967,7 @@ e8_ca_sigma_cache_free(e8_ca_sigma_cache *cache)
 	}
 	for (size_t i = 0; i < cache->table_count; i ++) {
 		free(cache->tables[i].cdf);
+		sample_1d_hot_row_free(&cache->hot_rows[i]);
 	}
 	free(cache->tables);
 	free(cache->hot_rows);
@@ -1087,17 +1214,16 @@ e8_ca_component_mass_cm_cached(double *mass_out, uint8_t tau,
 static int
 e8_ca_select_component_cm_cached(uint8_t *component,
 	uint8_t *component_codeword, uint8_t tau,
-	e8_ca_sigma_cache *cache,
-	hawk_rng rng, void *rng_context)
+	e8_ca_sigma_cache *cache, e8_rng_stream *rng_stream)
 {
 	if (component == NULL || component_codeword == NULL
-		|| cache == NULL || rng == NULL)
+		|| cache == NULL || rng_stream == NULL)
 	{
 		return 0;
 	}
 
 	const uint32_t *cdf = cache->component_cdf[tau];
-	uint32_t target = rng_u32(rng, rng_context);
+	uint32_t target = rng_stream_u32(rng_stream);
 	for (unsigned u = 0; u < E8_CA_COSETS; u ++) {
 		if (target < cdf[u]) {
 			*component = (uint8_t)u;
@@ -1200,7 +1326,7 @@ e8_ca_reconstruct_z_affine(int32_t *zblk, const int32_t *base_z,
 
 static int
 e8_sample_block_construction_a_cm_inner(int32_t *zblk, uint8_t tau,
-	double sigma_sign, hawk_rng rng, void *rng_context,
+	double sigma_sign, e8_rng_stream *rng_stream,
 	uint64_t *norm2_out, e8_sampler_stats *stats,
 	e8_ca_sample_trace *trace)
 {
@@ -1230,14 +1356,14 @@ e8_sample_block_construction_a_cm_inner(int32_t *zblk, uint8_t tau,
 	 * because xblk - P tau is in 2PZ^8, this inverse is integral and
 	 * zblk is congruent to tau modulo 2.
 	 */
-	if (zblk == NULL || !(sigma_sign > 0.0) || rng == NULL) {
+	if (zblk == NULL || !(sigma_sign > 0.0) || rng_stream == NULL) {
 		return 0;
 	}
 
 	cache = e8_ca_get_sigma_cache(sigma_sign);
 	if (cache == NULL
 		|| !e8_ca_select_component_cm_cached(&component,
-			&component_codeword, tau, cache, rng, rng_context))
+			&component_codeword, tau, cache, rng_stream))
 	{
 		return 0;
 	}
@@ -1247,7 +1373,7 @@ e8_sample_block_construction_a_cm_inner(int32_t *zblk, uint8_t tau,
 		const e8_1d_hot_row *row = &cache->hot_rows[center_class];
 
 		if (!sample_1d_integer_gaussian_hot(&coords[u],
-			row, &cache->tables[center_class], rng, rng_context))
+			row, &cache->tables[center_class], rng_stream))
 		{
 			return 0;
 		}
@@ -1325,8 +1451,13 @@ e8_sample_block_construction_a_cm_trace(int32_t *zblk, uint8_t tau,
 	uint64_t *norm2_out, e8_sampler_stats *stats,
 	e8_ca_sample_trace *trace)
 {
+	e8_rng_stream rng_stream;
+
+	if (!rng_stream_init(&rng_stream, rng, rng_context)) {
+		return 0;
+	}
 	return e8_sample_block_construction_a_cm_inner(zblk, tau,
-		sigma_sign, rng, rng_context, norm2_out, stats, trace);
+		sigma_sign, &rng_stream, norm2_out, stats, trace);
 }
 
 /* see hawk_e8_inner.h */
@@ -1335,8 +1466,13 @@ e8_sample_block_construction_a_cm(int32_t *zblk, uint8_t tau,
 	double sigma_sign, hawk_rng rng, void *rng_context,
 	uint64_t *norm2_out, e8_sampler_stats *stats)
 {
+	e8_rng_stream rng_stream;
+
+	if (!rng_stream_init(&rng_stream, rng, rng_context)) {
+		return 0;
+	}
 	return e8_sample_block_construction_a_cm_inner(zblk, tau,
-		sigma_sign, rng, rng_context, norm2_out, stats, NULL);
+		sigma_sign, &rng_stream, norm2_out, stats, NULL);
 }
 
 /* see hawk_e8_inner.h */
@@ -1359,6 +1495,11 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 	size_t n = (size_t)1 << logn;
 	size_t k = n >> 2;
 	uint64_t acc = 0;
+	e8_rng_stream rng_stream;
+
+	if (!rng_stream_init(&rng_stream, rng, rng_context)) {
+		return 0;
+	}
 
 	memset(z0, 0, n * sizeof *z0);
 	memset(z1, 0, n * sizeof *z1);
@@ -1367,8 +1508,8 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 		uint64_t n2;
 		uint8_t tau = e8_extract_tau(t0, t1, r, logn);
 
-		if (!e8_sample_block_construction_a_cm(zblk,
-			tau, sigma_sign, rng, rng_context, &n2, stats))
+		if (!e8_sample_block_construction_a_cm_inner(zblk,
+			tau, sigma_sign, &rng_stream, &n2, stats, NULL))
 		{
 			return 0;
 		}
