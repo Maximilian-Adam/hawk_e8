@@ -254,15 +254,35 @@ cache stores:
 ```text
 lo, hi, total mass, and cumulative weights for each shifted 1D table
 per-tau masses and prefix sums for the 16 RM(1,3) components
+32-bit per-tau component CDFs for fixed-integer component selection
+dense centre-class rows for the eight product-coordinate draws
+base z-blocks, base norms, and coordinate delta vectors for affine reconstruction
 ```
 
-Each shifted 1D table also stores a tiny hot sampler for the current prototype:
-the six largest-mass integer values for that centre, plus a 32-bit integer CDF.
-The CM hot path samples this tiny table first. Only the rare remaining tail
-falls back to the full cached floating-point CDF, so the common path avoids the
-long `lo..hi` CDF scan and keeps the active data within a small local row. This
-is a performance approximation to the current experimental sampler, not a claim
-of exact discrete-Gaussian sampling.
+Each finite shifted centre also has a tiny hot sampler for the current
+prototype: the six largest-mass integer values for that centre, plus a 32-bit
+integer CDF. The finite set of shifted centres is represented by dense
+`uint8_t` centre classes, so each `(tau, component, coord)` slot maps directly
+to a compact hot row. The CM hot path samples this row first. Only the rare
+remaining tail falls back to the full cached floating-point CDF, so the common
+path avoids the long `lo..hi` CDF scan and avoids loading the general table
+metadata. This is a performance approximation to the current experimental
+sampler, not a claim of exact discrete-Gaussian sampling.
+
+Component selection is also table-driven in the hot path: the cached double
+component masses are retained for diagnostics, while sampling uses a compact
+`uint32_t component_cdf[256][16]` table.  After the eight product coordinates
+are sampled, the non-debug hot path reconstructs `z_block` directly from the
+cached affine form
+
+```text
+z_block = base_z[tau][component]
+        + sum_i coord[i] * delta_z[i]
+```
+
+and computes `norm2` from the cached base norm and the orthogonal
+product-coordinate quadratic formula.  Debug builds still reconstruct the
+E8-side block and check the inverse map, coset, syndrome, and norm consistency.
 
 `e8_sampler_warm_cache(sigma_sign)` explicitly precomputes the tables for one
 `sigma_sign`; the full CM sampler also warms lazily on first use.  Warm-up does
@@ -562,7 +582,8 @@ E8_REJECTION_LOGN=10 E8_REJECTION_TRIALS=10000 E8_REJECTION_KEYS=5 make -C Refer
 
 - Floating-point sampler.
 - The CM sampler currently builds floating-point finite-tail one-dimensional
-  conditional CDFs at runtime, then uses tiny 32-bit hot CDFs with a
+  conditional CDFs and component masses at runtime, then uses fixed 32-bit
+  component CDFs plus centre-class-indexed tiny 32-bit hot CDFs with a
   floating-point tail fallback.
 - First use of a new `sigma_sign` pays the cache-build cost.  Static
   pregenerated tables could remove that startup wait, but they are not
