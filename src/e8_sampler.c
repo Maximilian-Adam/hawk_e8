@@ -18,6 +18,8 @@
 #define E8_1D_TAIL_SIGMAS      20.0
 #define E8_1D_TAIL_FLOOR       32.0
 #define E8_TWO_PI              6.28318530717958647692528676655900576839
+#define E8_1D_TINY_VALUES      6
+#define E8_1D_TINY_SCALE       4294967296.0
 
 #ifndef HAWK_E8_DEBUG_CHECKS
 #define HAWK_E8_DEBUG_CHECKS   1
@@ -68,6 +70,10 @@ typedef struct {
 	size_t len;
 	double total;
 	double *cdf;
+	double tiny_mass;
+	uint8_t tiny_len;
+	int32_t tiny_value[E8_1D_TINY_VALUES];
+	uint32_t tiny_cdf[E8_1D_TINY_VALUES];
 } e8_1d_integer_table;
 
 typedef struct {
@@ -138,6 +144,12 @@ rng_double(hawk_rng rng, void *rng_context)
 	uint64_t x = rng_u64(rng, rng_context);
 
 	return (double)(x >> 11) * 0x1.0p-53;
+}
+
+static uint32_t
+rng_u32(hawk_rng rng, void *rng_context)
+{
+	return (uint32_t)(rng_u64(rng, rng_context) >> 32);
 }
 
 static uint64_t
@@ -265,6 +277,78 @@ sample_1d_integer_mass(double center, double sigma)
 }
 
 static int
+sample_1d_tiny_contains(const e8_1d_integer_table *table, int32_t x)
+{
+	for (unsigned i = 0; i < table->tiny_len; i ++) {
+		if (table->tiny_value[i] == x) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int
+sample_1d_integer_table_build_tiny(e8_1d_integer_table *table,
+	const double *weights)
+{
+	size_t chosen[E8_1D_TINY_VALUES];
+	unsigned chosen_len = 0;
+	double tiny_mass = 0.0;
+	double prefix = 0.0;
+
+	if (table == NULL || weights == NULL || table->len == 0
+		|| !(table->total > 0.0))
+	{
+		return 0;
+	}
+
+	for (unsigned out = 0; out < E8_1D_TINY_VALUES; out ++) {
+		size_t best = table->len;
+		double best_weight = 0.0;
+
+		for (size_t i = 0; i < table->len; i ++) {
+			int used = 0;
+
+			for (unsigned j = 0; j < chosen_len; j ++) {
+				used |= chosen[j] == i;
+			}
+			if (!used && weights[i] > best_weight) {
+				best = i;
+				best_weight = weights[i];
+			}
+		}
+		if (best == table->len || !(best_weight > 0.0)) {
+			break;
+		}
+		chosen[chosen_len ++] = best;
+	}
+
+	table->tiny_len = (uint8_t)chosen_len;
+	unsigned table_len = 0;
+	for (unsigned i = 0; i < chosen_len; i ++) {
+		size_t idx = chosen[i];
+		uint64_t q;
+
+		prefix = tiny_mass + weights[idx];
+		q = (uint64_t)((prefix / table->total)
+			* E8_1D_TINY_SCALE);
+		if (q > UINT32_MAX) {
+			q = UINT32_MAX;
+		}
+		if (table_len > 0 && q <= table->tiny_cdf[table_len - 1]) {
+			continue;
+		}
+		table->tiny_value[table_len] = (int32_t)(table->lo + (int)idx);
+		table->tiny_cdf[table_len] = (uint32_t)q;
+		tiny_mass = prefix;
+		table_len ++;
+	}
+	table->tiny_len = (uint8_t)table_len;
+	table->tiny_mass = tiny_mass;
+	return table_len > 0 && tiny_mass > 0.0;
+}
+
+static int
 sample_1d_integer_table_build(e8_1d_integer_table *table,
 	int64_t center_num32, double sigma)
 {
@@ -286,17 +370,25 @@ sample_1d_integer_table_build(e8_1d_integer_table *table,
 	if (cdf == NULL) {
 		return 0;
 	}
+	double *weights = malloc(len * sizeof *weights);
+	if (weights == NULL) {
+		free(cdf);
+		return 0;
+	}
 
 	double inv_2sigma2 = 1.0 / (2.0 * sigma * sigma);
 	double total = 0.0;
 	for (size_t i = 0; i < len; i ++) {
 		int x = lo + (int)i;
 		double d = (double)x - center;
+		double w = exp(-(d * d) * inv_2sigma2);
 
-		total += exp(-(d * d) * inv_2sigma2);
+		weights[i] = w;
+		total += w;
 		cdf[i] = total;
 	}
 	if (!(total > 0.0)) {
+		free(weights);
 		free(cdf);
 		return 0;
 	}
@@ -308,6 +400,13 @@ sample_1d_integer_table_build(e8_1d_integer_table *table,
 	table->len = len;
 	table->total = total;
 	table->cdf = cdf;
+	int ok = sample_1d_integer_table_build_tiny(table, weights);
+	free(weights);
+	if (!ok) {
+		free(cdf);
+		memset(table, 0, sizeof *table);
+		return 0;
+	}
 	return 1;
 }
 
@@ -316,15 +415,40 @@ sample_1d_integer_gaussian_table(int32_t *out,
 	const e8_1d_integer_table *table, hawk_rng rng, void *rng_context)
 {
 	if (out == NULL || table == NULL || table->cdf == NULL
-		|| table->len == 0 || !(table->total > 0.0) || rng == NULL)
+		|| table->len == 0 || !(table->total > 0.0)
+		|| table->tiny_len == 0 || rng == NULL)
 	{
 		return 0;
 	}
 
-	double target = rng_double(rng, rng_context) * table->total;
+	uint32_t target = rng_u32(rng, rng_context);
+	for (unsigned i = 0; i < table->tiny_len; i ++) {
+		if (target < table->tiny_cdf[i]) {
+			*out = table->tiny_value[i];
+			return 1;
+		}
+	}
+
+	double tail_total = table->total - table->tiny_mass;
+	if (!(tail_total > 0.0)) {
+		*out = table->tiny_value[table->tiny_len - 1];
+		return 1;
+	}
+
+	double tail_target = rng_double(rng, rng_context) * tail_total;
+	double tail_cdf = 0.0;
+	double prev = 0.0;
 	for (size_t i = 0; i < table->len; i ++) {
-		if (table->cdf[i] >= target) {
-			*out = (int32_t)(table->lo + (int)i);
+		int32_t x = (int32_t)(table->lo + (int)i);
+		double w = table->cdf[i] - prev;
+
+		prev = table->cdf[i];
+		if (sample_1d_tiny_contains(table, x)) {
+			continue;
+		}
+		tail_cdf += w;
+		if (w > 0.0 && tail_cdf >= tail_target) {
+			*out = x;
 			return 1;
 		}
 	}

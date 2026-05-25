@@ -256,6 +256,14 @@ lo, hi, total mass, and cumulative weights for each shifted 1D table
 per-tau masses and prefix sums for the 16 RM(1,3) components
 ```
 
+Each shifted 1D table also stores a tiny hot sampler for the current prototype:
+the six largest-mass integer values for that centre, plus a 32-bit integer CDF.
+The CM hot path samples this tiny table first. Only the rare remaining tail
+falls back to the full cached floating-point CDF, so the common path avoids the
+long `lo..hi` CDF scan and keeps the active data within a small local row. This
+is a performance approximation to the current experimental sampler, not a claim
+of exact discrete-Gaussian sampling.
+
 `e8_sampler_warm_cache(sigma_sign)` explicitly precomputes the tables for one
 `sigma_sign`; the full CM sampler also warms lazily on first use.  Warm-up does
 not consume sampler RNG output.  The cache is an optimisation only, not a
@@ -265,6 +273,13 @@ The internal macro `HAWK_E8_DEBUG_CHECKS` defaults to `1`.  In that mode the
 CM sampler keeps the reconstruction, parity, syndrome, and norm consistency
 checks used by the test builds.  Benchmark or release builds may compile with
 `HAWK_E8_DEBUG_CHECKS=0` to skip those extra prototype checks.
+
+Keep the default at `1` for development and correctness tests.  For
+sampler-speed comparisons against ordinary HAWK, rebuild the E8 benchmark with
+`-DHAWK_E8_DEBUG_CHECKS=0`; these checks are prototype assertions rather than
+part of the sampler contract.  In local measurements this changed the
+sampler-only gap from roughly `1.8x` slower than HAWK to roughly `1.4x`, so
+benchmark notes should record whether debug checks were enabled.
 
 All sampler paths are experimental, floating-point, data-dependent, and
 non-constant-time. They are not suitable for deployment.
@@ -466,6 +481,20 @@ Generate sampler-isolated timing rows:
 make -C Reference_Implementation sampler-bench
 ```
 
+For sampler-speed comparisons, disable E8 debug consistency checks explicitly:
+
+```sh
+make -C Reference_Implementation clean
+make -C Reference_Implementation sampler-bench E8_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0'
+```
+
+For a longer run, set `E8_SAMPLER_BENCH_TRIALS`; for example, this runs 1000
+warm trials per supported `logn`:
+
+```sh
+E8_SAMPLER_BENCH_TRIALS=1000 make -C Reference_Implementation sampler-bench E8_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0'
+```
+
 This benchmark emits sampler-scope and signature-scope rows.  The current row
 types are:
 
@@ -483,8 +512,9 @@ sampler call and `cycles_per_unit` is amortized to one eight-scalar unit.
 
 `e8_sampler_cached_cold_full` times one full
 `e8_sample_z_construction_a_cm` call including lazy cache warm-up for that
-`sigma_sign`.  `e8_sampler_cached_warm_block` also times the full
-`e8_sample_z_construction_a_cm` call, but with the cache already warm; its
+`sigma_sign`.  This row is a startup-cost diagnostic, not the intended
+steady-state sampler comparison.  `e8_sampler_cached_warm_block` also times the
+full `e8_sample_z_construction_a_cm` call, but with the cache already warm; its
 name is historical, and its per-unit columns are amortized over the `n/4` E8
 blocks.  Thus the E8 sampler row's `cycles_total` is now a full-dimension
 sampler measurement, not a single-block measurement.
@@ -498,8 +528,8 @@ These two `signature` rows are the closest signature-level comparison, though
 they still compare ordinary compressed HAWK with the experimental uncompressed
 E8 path.
 
-`E8_SAMPLER_BENCH_TRIALS` controls the number of trials per `logn`, and the
-target writes
+`E8_SAMPLER_BENCH_TRIALS` controls the number of warm HAWK/E8 trials per
+`logn`, and the target writes
 `Reference_Implementation/e8_sampler_bench.csv`.
 
 Generate aggregate rejection and norm statistics for valid signing only:
@@ -531,8 +561,12 @@ E8_REJECTION_LOGN=10 E8_REJECTION_TRIALS=10000 E8_REJECTION_KEYS=5 make -C Refer
 ## Known Limitations
 
 - Floating-point sampler.
-- The CM sampler currently uses floating-point finite-tail one-dimensional
-  conditional CDFs and runtime caches.
+- The CM sampler currently builds floating-point finite-tail one-dimensional
+  conditional CDFs at runtime, then uses tiny 32-bit hot CDFs with a
+  floating-point tail fallback.
+- First use of a new `sigma_sign` pays the cache-build cost.  Static
+  pregenerated tables could remove that startup wait, but they are not
+  implemented in this repository.
 - The previous bounded/truncated sampler remains only as a baseline.
 - Data-dependent, non-constant-time sampling and signing paths.
 - No AVX2 E8 implementation.
