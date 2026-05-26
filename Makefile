@@ -1,5 +1,5 @@
 # This Makefile compiles the implementation in this directory.
-.PHONY: avx2 ref test-e8 sampler-bench e8-rejection-summary
+.PHONY: avx2 ref test-e8 e8-histograms sampler-bench sign-bench profile-sign-bench e8-rejection-summary
 .POSIX:
 
 all: build avx2 ref
@@ -12,7 +12,13 @@ ref:
 	make -C Reference_Implementation
 test-e8: build
 	make -C Reference_Implementation test-e8
+e8-histograms:
+	@make -s -C Reference_Implementation --no-print-directory e8-histograms
 sampler-bench:
 	@make -s -C Reference_Implementation --no-print-directory sampler-bench
+sign-bench:
+	@make -s -C Reference_Implementation --no-print-directory sign-bench
+profile-sign-bench:
+	@make -s -C Reference_Implementation --no-print-directory profile-sign-bench
 e8-rejection-summary:
 	@make -s -C Reference_Implementation --no-print-directory e8-rejection-summary

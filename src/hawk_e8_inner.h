@@ -54,14 +54,16 @@
 #define e8_rm13_codeword  Zh(e8_rm13_codeword)
 #define e8_rm13_syndrome  Zh(e8_rm13_syndrome)
 #define e8_sigma_to_rho_s  Zh(e8_sigma_to_rho_s)
-#define e8_sample_block_bounded_float  Zh(e8_sample_block_bounded_float)
-#define e8_sample_z_bounded_float  Zh(e8_sample_z_bounded_float)
-#define e8_sample_block_float  Zh(e8_sample_block_float)
-#define e8_sample_z_float  Zh(e8_sample_z_float)
 #define e8_sample_block_construction_a_cm  Zh(e8_sample_block_construction_a_cm)
 #define e8_sample_block_construction_a_cm_trace  Zh(e8_sample_block_construction_a_cm_trace)
 #define e8_sample_z_construction_a_cm  Zh(e8_sample_z_construction_a_cm)
 #define e8_sampler_warm_cache  Zh(e8_sampler_warm_cache)
+#define e8_sampler_set_thread_count  Zh(e8_sampler_set_thread_count)
+#define e8_sampler_get_thread_count  Zh(e8_sampler_get_thread_count)
+#define e8_sampler_set_rng_mode  Zh(e8_sampler_set_rng_mode)
+#define e8_sampler_get_rng_mode  Zh(e8_sampler_get_rng_mode)
+#define e8_sampler_profile_reset  Zh(e8_sampler_profile_reset)
+#define e8_sampler_profile_get  Zh(e8_sampler_profile_get)
 #define e8_sampler_cache_compare_1d_mass  Zh(e8_sampler_cache_compare_1d_mass)
 #define e8_sampler_cache_compare_component_mass  Zh(e8_sampler_cache_compare_component_mass)
 
@@ -103,6 +105,28 @@ typedef struct {
 	uint64_t rejections_total;
 #endif
 } e8_sign_trace_timing;
+
+#define E8_SAMPLER_WORKER_SERIAL      0u
+#define E8_SAMPLER_WORKER_SPIN        1u
+#define E8_SAMPLER_RNG_PER_BLOCK      0u
+#define E8_SAMPLER_RNG_PER_WORKER     1u
+
+typedef struct {
+	uint64_t worker_mode;
+	uint64_t rng_mode;
+	uint64_t cycles_master_seed;
+	uint64_t cycles_block_rng_init;
+	uint64_t cycles_block_sample;
+	uint64_t cycles_worker_dispatch;
+	uint64_t cycles_worker_wait;
+	uint64_t cycles_reduction;
+	uint64_t wall_ns_master_seed;
+	uint64_t wall_ns_block_rng_init;
+	uint64_t wall_ns_block_sample;
+	uint64_t wall_ns_worker_dispatch;
+	uint64_t wall_ns_worker_wait;
+	uint64_t wall_ns_reduction;
+} e8_sampler_profile;
 
 void e8_apply_P(int32_t *out0, int32_t *out1,
 	const int32_t *z0, const int32_t *z1, unsigned logn);
@@ -189,7 +213,7 @@ int e8_sign_sampler_uncompressed(unsigned logn,
 	const void *hpub, size_t hpub_len,
 	const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G, const uint8_t *salt,
-	double sigma_sign, double sigma_verify, int sampler_bound,
+	double sigma_sign, double sigma_verify,
 	unsigned max_attempts, hawk_rng rng, void *rng_context);
 
 int e8_sign_sampler_trace_uncompressed(unsigned logn,
@@ -197,7 +221,7 @@ int e8_sign_sampler_trace_uncompressed(unsigned logn,
 	const void *hpub, size_t hpub_len,
 	const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G, const uint8_t *salt,
-	double sigma_sign, double sigma_verify, int sampler_bound,
+	double sigma_sign, double sigma_verify,
 	unsigned max_attempts, hawk_rng rng, void *rng_context,
 	int32_t *trace_z0, int32_t *trace_z1,
 	int64_t *trace_pnorm, unsigned *trace_attempts);
@@ -207,7 +231,7 @@ int e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 	const void *hpub, size_t hpub_len,
 	const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G, const uint8_t *salt,
-	double sigma_sign, double sigma_verify, int sampler_bound,
+	double sigma_sign, double sigma_verify,
 	unsigned max_attempts, hawk_rng rng, void *rng_context,
 	int32_t *trace_z0, int32_t *trace_z1,
 	int64_t *trace_pnorm, unsigned *trace_attempts,
@@ -241,26 +265,6 @@ uint8_t e8_rm13_syndrome(uint8_t p);
 double e8_sigma_to_rho_s(double sigma);
 
 /*
- * Explicit bounded/truncated baseline retained for comparison.
- */
-int e8_sample_block_bounded_float(int32_t *zblk, uint8_t tau,
-	double sigma, int bound, hawk_rng rng, void *rng_context);
-
-int e8_sample_z_bounded_float(int32_t *z0, int32_t *z1, int64_t *norm2,
-	const uint8_t *t0, const uint8_t *t1, unsigned logn,
-	double sigma, int bound, hawk_rng rng, void *rng_context);
-
-/*
- * Backward-compatible names for the bounded baseline.
- */
-int e8_sample_block_float(int32_t *zblk, uint8_t tau,
-	double sigma, int bound, hawk_rng rng, void *rng_context);
-
-int e8_sample_z_float(int32_t *z0, int32_t *z1, int64_t *norm2,
-	const uint8_t *t0, const uint8_t *t1, unsigned logn,
-	double sigma, int bound, hawk_rng rng, void *rng_context);
-
-/*
  * Coset-matched Construction-A HAWK-E8-CM sampler.  The input tau is the
  * internal P-coordinate coset label; the returned zblk always satisfies
  * zblk[i] = bit_i(tau) mod 2, and norm2 is ||P zblk||^2.
@@ -271,6 +275,26 @@ int e8_sample_z_float(int32_t *z0, int32_t *z1, int64_t *norm2,
  * is an optimisation only and is not constant-time hardened.
  */
 int e8_sampler_warm_cache(double sigma_sign);
+
+/*
+ * Control full-dimension CM sampler parallelism.  A count of 1 forces the
+ * single-thread path.  User-selected counts greater than 1 use the spin/yield
+ * worker pool.  A count of 0 requests an automatic worker count, capped by
+ * the number of E8 blocks and by the sampler's conservative worker limit.
+ * If not set here, HAWK_E8_SAMPLER_THREADS is used, then the
+ * HAWK_E8_SAMPLER_THREADS environment variable can override it at runtime.
+ */
+void e8_sampler_set_thread_count(unsigned threads);
+
+unsigned e8_sampler_get_thread_count(unsigned logn);
+
+void e8_sampler_set_rng_mode(unsigned mode);
+
+unsigned e8_sampler_get_rng_mode(void);
+
+void e8_sampler_profile_reset(void);
+
+int e8_sampler_profile_get(e8_sampler_profile *profile);
 
 int e8_sample_block_construction_a_cm(int32_t *zblk, uint8_t tau,
 	double sigma_sign, hawk_rng rng, void *rng_context,

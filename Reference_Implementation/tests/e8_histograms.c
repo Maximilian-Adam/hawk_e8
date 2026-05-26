@@ -15,7 +15,6 @@
 #include "../hawk_e8_inner.h"
 
 #define MAXN   1024
-#define E8_HIST_MAX_SAMPLER_BOUND   16
 #define E8_HIST_DEFAULT_KEYS         3
 #define E8_HIST_DEFAULT_TRIALS       5
 
@@ -31,7 +30,6 @@ typedef struct {
 	unsigned logn;
 	double sigma_sign;
 	double sigma_verify;
-	int quick_bound;
 	unsigned max_attempts;
 } hist_param;
 
@@ -73,9 +71,9 @@ typedef struct {
  * the Construction-A CM sampler and are not final E8 parameter claims.
  */
 static const hist_param PARAMS[] = {
-	{ 8,  1.25, 1.06, 2, 1000 },
-	{ 9,  1.28, 1.42, 2, 1000 },
-	{ 10, 1.30, 1.57, 2, 1000 }
+	{ 8,  1.25, 1.06, 1000 },
+	{ 9,  1.28, 1.42, 1000 },
+	{ 10, 1.30, 1.57, 1000 }
 };
 
 static uint64_t
@@ -166,37 +164,6 @@ parse_count_override(const char *name, unsigned *value)
 		return 0;
 	}
 	*value = (unsigned)x;
-	return 1;
-}
-
-static int
-parse_bound_override(int *bound, int *is_set)
-{
-	const char *env = getenv("E8_HIST_BOUND");
-
-	*is_set = 0;
-	if (env == NULL) {
-		return 1;
-	}
-	if (env[0] == 0) {
-		fprintf(stderr,
-			"ERR: E8_HIST_BOUND must be a positive integer"
-			" in [1,%d]\n", E8_HIST_MAX_SAMPLER_BOUND);
-		return 0;
-	}
-	char *end = NULL;
-	unsigned long x = strtoul(env, &end, 10);
-	if (end == env || *end != 0 || x == 0
-		|| x > E8_HIST_MAX_SAMPLER_BOUND)
-	{
-		fprintf(stderr,
-			"ERR: E8_HIST_BOUND must be a positive integer"
-			" in [1,%d], got '%s'\n",
-			E8_HIST_MAX_SAMPLER_BOUND, env);
-		return 0;
-	}
-	*bound = (int)x;
-	*is_set = 1;
 	return 1;
 }
 
@@ -354,15 +321,14 @@ stats_i16(const int16_t *a, size_t n)
 
 static void
 make_message_context(shake_context *sc_data,
-	unsigned logn, unsigned keynum, unsigned trial, unsigned bound)
+	unsigned logn, unsigned keynum, unsigned trial)
 {
 	static const char prefix[] = "experimental e8 histogram";
-	uint8_t buf[4];
+	uint8_t buf[3];
 
 	buf[0] = (uint8_t)logn;
 	buf[1] = (uint8_t)keynum;
 	buf[2] = (uint8_t)trial;
-	buf[3] = (uint8_t)bound;
 	shake_init(sc_data, 256);
 	shake_inject(sc_data, prefix, sizeof prefix - 1);
 	shake_inject(sc_data, buf, sizeof buf);
@@ -399,11 +365,11 @@ make_hpub(uint8_t *hpub, size_t hpub_len, unsigned logn, unsigned keynum)
 
 static void
 make_salt(uint8_t *salt, size_t salt_len,
-	unsigned logn, unsigned keynum, unsigned trial, unsigned bound)
+	unsigned logn, unsigned keynum, unsigned trial)
 {
 	for (size_t u = 0; u < salt_len; u ++) {
 		salt[u] = (uint8_t)(0x79u + 31u * u
-			+ 7u * logn + 3u * keynum + trial + bound);
+			+ 7u * logn + 3u * keynum + trial);
 	}
 }
 
@@ -507,7 +473,7 @@ static void
 write_signature_header(FILE *fp)
 {
 	fprintf(fp, "logn,n,key_index,trial_index,accepted,attempts,"
-		"rejected_attempts,sigma_sign,sigma_verify,sampler_bound,"
+		"rejected_attempts,sigma_sign,sigma_verify,"
 		"pnorm,qnorm,norm_equal,"
 		"s0_min,s0_max,s0_absmax,s0_absmax_bits,"
 		"s1_min,s1_max,s1_absmax,s1_absmax_bits,"
@@ -549,7 +515,7 @@ write_public_row(FILE *fp, unsigned logn, unsigned key_index,
 static void
 write_signature_row(FILE *fp, unsigned logn, unsigned key_index,
 	unsigned trial_index, int accepted, unsigned attempts,
-	double sigma_sign, double sigma_verify, int sampler_bound,
+	double sigma_sign, double sigma_verify,
 	int64_t pnorm, int64_t qnorm, int norm_equal,
 	const int16_t *s0, const int16_t *s1,
 	const int32_t *z0, const int32_t *z1,
@@ -588,7 +554,7 @@ write_signature_row(FILE *fp, unsigned logn, unsigned key_index,
 	sz0 = stats_i32(z0, n);
 	sz1 = stats_i32(z1, n);
 
-	fprintf(fp, "%u,%u,%u,%u,%d,%u,%u,%.17g,%.17g,%d,"
+	fprintf(fp, "%u,%u,%u,%u,%d,%u,%u,%.17g,%.17g,"
 		"%lld,%lld,%d,"
 		"%d,%d,%lld,%u,"
 		"%d,%d,%lld,%u,"
@@ -600,8 +566,7 @@ write_signature_row(FILE *fp, unsigned logn, unsigned key_index,
 		"%llu,%llu,%llu,%llu,%llu,%llu\n",
 		logn, (unsigned)n, key_index, trial_index, accepted,
 		attempts, rejected_attempts, sigma_sign, sigma_verify,
-		sampler_bound, (long long)pnorm, (long long)qnorm,
-		norm_equal,
+		(long long)pnorm, (long long)qnorm, norm_equal,
 		ss0.min, ss0.max, (long long)ss0.absmax, ss0.bits,
 		ss1.min, ss1.max, (long long)ss1.absmax, ss1.bits,
 		sz0.min, sz0.max, (long long)sz0.absmax, sz0.bits,
@@ -663,8 +628,8 @@ compute_case_qnorm(int64_t *qnorm, int64_t *norm_margin,
 
 static int
 write_verify_case_row(FILE *sig_fp, const hist_param *param,
-	unsigned key_index, unsigned trial_index, int sampler_bound,
-	const char *test_type, int expected_verify,
+	unsigned key_index, unsigned trial_index, const char *test_type,
+	int expected_verify,
 	const uint8_t *sig, size_t sig_len,
 	const shake_context *sc_data, const uint8_t *hpub, size_t hpub_len,
 	const int32_t *q00, const int32_t *q01,
@@ -706,7 +671,7 @@ write_verify_case_row(FILE *sig_fp, const hist_param *param,
 
 	write_signature_row(sig_fp, logn, key_index, trial_index,
 		accepted, attempts, param->sigma_sign, param->sigma_verify,
-		sampler_bound, pnorm, qnorm, norm_equal,
+		pnorm, qnorm, norm_equal,
 		decoded ? s0 : NULL, decoded ? s1 : NULL, z0, z1,
 		test_type, expected_verify, verify_success,
 		have_qnorm ? norm_margin : 0, verify_bound,
@@ -717,7 +682,7 @@ write_verify_case_row(FILE *sig_fp, const hist_param *param,
 
 static int
 collect_signature_row(FILE *sig_fp, const hist_param *param,
-	unsigned key_index, unsigned trial_index, int sampler_bound,
+	unsigned key_index, unsigned trial_index,
 	const int8_t *f, const int8_t *g, const int8_t *F, const int8_t *G,
 	const int32_t *q00, const int32_t *q01,
 	const int32_t *q10, const int32_t *q11,
@@ -751,17 +716,15 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	}
 	memset(&sign_trace, 0, sizeof sign_trace);
 	e8_verify_bound_from_sigma(logn, param->sigma_verify, &verify_bound);
-	make_salt(salt, salt_len, logn, key_index, trial_index,
-		(unsigned)sampler_bound);
-	make_message_context(&sc_data, logn, key_index, trial_index,
-		(unsigned)sampler_bound);
+	make_salt(salt, salt_len, logn, key_index, trial_index);
+	make_message_context(&sc_data, logn, key_index, trial_index);
 	sign_c0 = hist_cycles_start();
 	sign_w0 = hist_wall_ns();
 	accepted = e8_sign_sampler_trace_timed_uncompressed(logn,
 		sig, sig_len, &sc_data, hpub, (size_t)1 << (logn - 4),
 		f, g, F, G, salt, param->sigma_sign, param->sigma_verify,
-		sampler_bound, max_attempts, hist_rng, rng_state,
-		z0, z1, &pnorm, &attempts, &sign_trace);
+		max_attempts, hist_rng, rng_state, z0, z1, &pnorm,
+		&attempts, &sign_trace);
 	sign_w1 = hist_wall_ns();
 	sign_c1 = hist_cycles_end();
 	timing.cycles_sample_total = sign_trace.cycles_sample_total;
@@ -773,8 +736,7 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	if (!accepted) {
 		write_signature_row(sig_fp, logn, key_index, trial_index,
 			0, max_attempts, param->sigma_sign,
-			param->sigma_verify, sampler_bound,
-			0, 0, 1, NULL, NULL, NULL, NULL,
+			param->sigma_verify, 0, 0, 1, NULL, NULL, NULL, NULL,
 			"signing_failed", 0, 0, 0, verify_bound,
 			NULL, &timing);
 		return -1;
@@ -783,14 +745,12 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	if (!e8_decode_sig_uncompressed(logn, NULL, s0, s1, sig, sig_len)) {
 		write_signature_row(sig_fp, logn, key_index, trial_index,
 			0, attempts, param->sigma_sign,
-			param->sigma_verify, sampler_bound,
-			0, 0, 1, NULL, NULL, NULL, NULL,
+			param->sigma_verify, 0, 0, 1, NULL, NULL, NULL, NULL,
 			"decode_failed", 0, 0, 0, verify_bound,
 			NULL, &timing);
 		return -1;
 	}
-	make_message_context(&sc_data, logn, key_index, trial_index,
-		(unsigned)sampler_bound);
+	make_message_context(&sc_data, logn, key_index, trial_index);
 	compute_target_t(t0, t1, logn, f, g, F, G,
 		&sc_data, hpub, salt, salt_len);
 	coset_diag = compute_coset_diag(logn, t0, t1, z0, z1);
@@ -803,7 +763,7 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	}
 
 	if (!write_verify_case_row(sig_fp, param, key_index, trial_index,
-		sampler_bound, "valid_signature", 1,
+		"valid_signature", 1,
 		sig, sig_len, &sc_data, hpub, (size_t)1 << (logn - 4),
 		q00, q01, q10, q11, 1, attempts, pnorm_check, z0, z1,
 		&coset_diag, &timing))
@@ -823,10 +783,9 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	 * Negative verification rows.  These keep the original signing
 	 * metrics and record the actual verifier result for each mutation.
 	 */
-	make_message_context(&sc_data, logn, key_index, trial_index,
-		((unsigned)sampler_bound) ^ 0x80u);
+	make_message_context(&sc_data, logn, key_index, trial_index ^ 0x80u);
 	if (!write_verify_case_row(sig_fp, param, key_index, trial_index,
-		sampler_bound, "tamper_message", 0,
+		"tamper_message", 0,
 		sig, sig_len, &sc_data, hpub, (size_t)1 << (logn - 4),
 		q00, q01, q10, q11, 1, attempts, pnorm_check, z0, z1,
 		&coset_diag, &timing))
@@ -837,10 +796,9 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	memcpy(bad_sig, sig, sig_len);
 	bad_sig[salt_len + 0] = 0xFF;
 	bad_sig[salt_len + 1] = 0x7F;
-	make_message_context(&sc_data, logn, key_index, trial_index,
-		(unsigned)sampler_bound);
+	make_message_context(&sc_data, logn, key_index, trial_index);
 	if (!write_verify_case_row(sig_fp, param, key_index, trial_index,
-		sampler_bound, "tamper_s0", 0,
+		"tamper_s0", 0,
 		bad_sig, sig_len, &sc_data, hpub, (size_t)1 << (logn - 4),
 		q00, q01, q10, q11, 1, attempts, pnorm_check, z0, z1,
 		&coset_diag, &timing))
@@ -852,7 +810,7 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	bad_sig[salt_len + (2 << logn) + 0] = 0xFF;
 	bad_sig[salt_len + (2 << logn) + 1] = 0x7F;
 	if (!write_verify_case_row(sig_fp, param, key_index, trial_index,
-		sampler_bound, "tamper_s1", 0,
+		"tamper_s1", 0,
 		bad_sig, sig_len, &sc_data, hpub, (size_t)1 << (logn - 4),
 		q00, q01, q10, q11, 1, attempts, pnorm_check, z0, z1,
 		&coset_diag, &timing))
@@ -863,7 +821,7 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	memcpy(bad_sig, sig, sig_len);
 	bad_sig[0] ^= 0x80u;
 	if (!write_verify_case_row(sig_fp, param, key_index, trial_index,
-		sampler_bound, "tamper_salt", 0,
+		"tamper_salt", 0,
 		bad_sig, sig_len, &sc_data, hpub, (size_t)1 << (logn - 4),
 		q00, q01, q10, q11, 1, attempts, pnorm_check, z0, z1,
 		&coset_diag, &timing))
@@ -874,7 +832,7 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	memcpy(bad_hpub, hpub, (size_t)1 << (logn - 4));
 	bad_hpub[0] ^= 0x80u;
 	if (!write_verify_case_row(sig_fp, param, key_index, trial_index,
-		sampler_bound, "tamper_hpub", 0,
+		"tamper_hpub", 0,
 		sig, sig_len, &sc_data, bad_hpub, (size_t)1 << (logn - 4),
 		q00, q01, q10, q11, 1, attempts, pnorm_check, z0, z1,
 		&coset_diag, &timing))
@@ -889,7 +847,7 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	memcpy(bad_q11, q11, n * sizeof *q11);
 	memset(bad_q00, 0, n * sizeof *bad_q00);
 	if (!write_verify_case_row(sig_fp, param, key_index, trial_index,
-		sampler_bound, "tamper_public_form", 0,
+		"tamper_public_form", 0,
 		sig, sig_len, &sc_data, hpub, (size_t)1 << (logn - 4),
 		bad_q00, bad_q01, bad_q10, bad_q11,
 		1, attempts, pnorm_check, z0, z1, &coset_diag, &timing))
@@ -928,14 +886,9 @@ collect(void)
 	FILE *pub_fp;
 	FILE *sig_fp;
 	int status = 0;
-	int bound_override = 0;
-	int has_bound_override = 0;
 	unsigned key_count = E8_HIST_DEFAULT_KEYS;
 	unsigned sig_count = E8_HIST_DEFAULT_TRIALS;
 
-	if (!parse_bound_override(&bound_override, &has_bound_override)) {
-		return 0;
-	}
 	if (!parse_count_override("E8_HIST_KEYS", &key_count)
 		|| !parse_count_override("E8_HIST_TRIALS", &sig_count))
 	{
@@ -1004,13 +957,10 @@ collect(void)
 				hist_wall_delta(public_w0, public_w1);
 			write_public_row(pub_fp, logn, key, q00, q01, q11);
 
-			int bound = has_bound_override
-				? bound_override : param->quick_bound;
 			for (unsigned trial = 0; trial < sig_count; trial ++) {
 				int r = collect_signature_row(sig_fp,
 					param, key, trial,
-					bound, f, g, F, G,
-					q00, q01, q10, q11, hpub,
+					f, g, F, G, q00, q01, q10, q11, hpub,
 					&rng_state, max_attempts,
 					&key_timing);
 				if (r <= 0) {

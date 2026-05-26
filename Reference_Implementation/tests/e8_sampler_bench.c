@@ -3,11 +3,14 @@
 #endif
 
 #include <limits.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 #if defined(__x86_64__)
 #include <x86intrin.h>
 #endif
@@ -36,9 +39,10 @@
 #include "../e8_sign.c"
 
 #define MAXN                         1024
-#define E8_BLOCK_DIM                 8
 #define DEFAULT_BENCH_TRIALS         16
+#define DEFAULT_BENCH_WARMUPS        1
 #define MAX_BENCH_TRIALS             1000000
+#define MAX_BENCH_LINE               4096
 
 #if HAWK_E8_PROFILE_SIGN
 typedef struct {
@@ -69,6 +73,74 @@ static bench_sign_profile_totals sign_profile_totals[11];
 typedef struct {
 	uint64_t state;
 } bench_rng_state;
+
+typedef enum {
+	BENCH_MODE_ISOLATED_MATRIX = 0,
+	BENCH_MODE_SINGLE_CONFIG = 1,
+	BENCH_MODE_SINGLE_HAWK_SAMPLER = 2,
+	BENCH_MODE_SIGN = 3,
+	BENCH_MODE_SELECTED_CONFIGS = 4
+} bench_run_mode;
+
+typedef struct {
+	const char *label;
+	unsigned threads;
+} bench_thread_case;
+
+typedef struct {
+	const char *label;
+	unsigned mode;
+} bench_mode_case;
+
+static const bench_thread_case E8_THREAD_CASES[] = {
+	{ "1", 1 },
+	{ "2", 2 },
+	{ "4", 4 },
+	{ "8", 8 },
+	{ "12", 12 },
+	{ "16", 16 },
+	{ "24", 24 }
+};
+
+static const bench_mode_case E8_RNG_MODE_CASES[] = {
+	{ "per_block", E8_SAMPLER_RNG_PER_BLOCK },
+	{ "per_worker", E8_SAMPLER_RNG_PER_WORKER }
+};
+
+static int
+bench_selected_e8_sampler_config(unsigned logn,
+	unsigned *threads, unsigned *rng_mode)
+{
+	if (threads == NULL || rng_mode == NULL) {
+		return 0;
+	}
+	switch (logn) {
+	case 8:
+	case 9:
+		*threads = 4;
+		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
+		return 1;
+	case 10:
+		*threads = 8;
+		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+typedef struct {
+	bench_run_mode mode;
+	unsigned logn;
+	unsigned threads;
+	unsigned rng_mode;
+	unsigned trials;
+	unsigned warmups;
+	int no_header;
+	int sign_only;
+	int worker_mode_set;
+	int worker_mode_spin;
+} bench_options;
 
 static uint64_t
 bench_wall_ns(void)
@@ -188,14 +260,12 @@ bench_rng_init(bench_rng_state *rng,
 
 static void
 fill_hawk_parities(uint8_t *t, size_t t_len,
-	unsigned logn, unsigned trial_index, unsigned block_index,
-	uint8_t tau)
+	unsigned logn, unsigned trial_index)
 {
 	for (size_t u = 0; u < t_len; u ++) {
 		t[u] = (uint8_t)(0xA7u + 29u * u
 			+ 17u * logn + 43u * trial_index);
 	}
-	t[block_index] = tau;
 }
 
 static uint8_t
@@ -253,23 +323,38 @@ e8_sigma_verify_sign(unsigned logn)
 }
 
 static unsigned
-get_trials(void)
+parse_bench_count_env(const char *name, unsigned fallback,
+	unsigned min_value, unsigned max_value)
 {
-	const char *env = getenv("E8_SAMPLER_BENCH_TRIALS");
+	const char *env = getenv(name);
 	char *end = NULL;
 	unsigned long x;
 
 	if (env == NULL || env[0] == 0) {
-		return DEFAULT_BENCH_TRIALS;
+		return fallback;
 	}
 	x = strtoul(env, &end, 10);
-	if (end == env || *end != 0 || x == 0 || x > MAX_BENCH_TRIALS) {
+	if (end == env || *end != 0 || x < min_value || x > max_value) {
 		fprintf(stderr,
-			"ERR: E8_SAMPLER_BENCH_TRIALS must be in [1,%u]\n",
-			MAX_BENCH_TRIALS);
+			"ERR: %s must be in [%u,%u]\n",
+			name, min_value, max_value);
 		return 0;
 	}
 	return (unsigned)x;
+}
+
+static unsigned
+get_trials(void)
+{
+	return parse_bench_count_env("E8_SAMPLER_BENCH_TRIALS",
+		DEFAULT_BENCH_TRIALS, 1, MAX_BENCH_TRIALS);
+}
+
+static unsigned
+get_warmups(void)
+{
+	return parse_bench_count_env("E8_SAMPLER_BENCH_WARMUPS",
+		DEFAULT_BENCH_WARMUPS, 0, MAX_BENCH_TRIALS);
 }
 
 static int
@@ -278,6 +363,196 @@ get_sign_only(void)
 	const char *env = getenv("E8_SAMPLER_BENCH_SIGN_ONLY");
 
 	return env != NULL && env[0] != 0 && strcmp(env, "0") != 0;
+}
+
+static int
+parse_unsigned_arg(const char *text, unsigned min_value,
+	unsigned max_value, unsigned *out)
+{
+	char *end = NULL;
+	unsigned long x;
+
+	if (text == NULL || out == NULL) {
+		return 0;
+	}
+	x = strtoul(text, &end, 10);
+	if (end == text || *end != 0
+		|| x < min_value || x > max_value)
+	{
+		return 0;
+	}
+	*out = (unsigned)x;
+	return 1;
+}
+
+static const char *
+thread_label(unsigned threads, char *buf, size_t buf_len)
+{
+	for (size_t u = 0;
+		u < sizeof E8_THREAD_CASES / sizeof E8_THREAD_CASES[0];
+		u ++)
+	{
+		if (E8_THREAD_CASES[u].threads == threads) {
+			return E8_THREAD_CASES[u].label;
+		}
+	}
+	if (buf_len != 0) {
+		snprintf(buf, buf_len, "%u", threads);
+	}
+	return buf;
+}
+
+static const char *
+rng_mode_label(unsigned mode)
+{
+	for (size_t u = 0;
+		u < sizeof E8_RNG_MODE_CASES / sizeof E8_RNG_MODE_CASES[0];
+		u ++)
+	{
+		if (E8_RNG_MODE_CASES[u].mode == mode) {
+			return E8_RNG_MODE_CASES[u].label;
+		}
+	}
+	return "unknown";
+}
+
+static int
+parse_rng_mode(const char *text, unsigned *mode)
+{
+	if (text == NULL || mode == NULL) {
+		return 0;
+	}
+	for (size_t u = 0;
+		u < sizeof E8_RNG_MODE_CASES / sizeof E8_RNG_MODE_CASES[0];
+		u ++)
+	{
+		if (strcmp(text, E8_RNG_MODE_CASES[u].label) == 0) {
+			*mode = E8_RNG_MODE_CASES[u].mode;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void
+usage(const char *prog)
+{
+	fprintf(stderr,
+		"usage: %s [--selected-configs|--isolated-matrix]"
+		" [--trials N] [--warmups N]\n"
+		"       %s --single-config --logn N --threads N "
+		"--worker-mode serial|spin --rng-mode per_block|per_worker "
+		"[--trials N] [--warmups N]\n"
+		"       %s --single-hawk-sampler --logn N [--trials N]\n",
+		prog, prog, prog);
+}
+
+static int
+parse_options(int argc, char **argv, bench_options *opts)
+{
+	memset(opts, 0, sizeof *opts);
+	opts->mode = BENCH_MODE_SELECTED_CONFIGS;
+	opts->logn = 8;
+	opts->threads = 1;
+	opts->rng_mode = E8_SAMPLER_RNG_PER_BLOCK;
+	opts->trials = get_trials();
+	opts->warmups = get_warmups();
+	opts->sign_only = get_sign_only();
+	if (opts->sign_only) {
+		opts->mode = BENCH_MODE_SIGN;
+	}
+	if (opts->trials == 0) {
+		return 0;
+	}
+
+	for (int i = 1; i < argc; i ++) {
+		const char *arg = argv[i];
+
+		if (strcmp(arg, "--help") == 0) {
+			usage(argv[0]);
+			exit(0);
+		} else if (strcmp(arg, "--single-config") == 0) {
+			opts->mode = BENCH_MODE_SINGLE_CONFIG;
+		} else if (strcmp(arg, "--single-hawk-sampler") == 0) {
+			opts->mode = BENCH_MODE_SINGLE_HAWK_SAMPLER;
+		} else if (strcmp(arg, "--isolated-matrix") == 0) {
+			opts->mode = BENCH_MODE_ISOLATED_MATRIX;
+		} else if (strcmp(arg, "--selected-configs") == 0) {
+			opts->mode = BENCH_MODE_SELECTED_CONFIGS;
+		} else if (strcmp(arg, "--no-header") == 0) {
+			opts->no_header = 1;
+		} else if (strcmp(arg, "--logn") == 0) {
+			if (++ i >= argc || !parse_unsigned_arg(argv[i],
+				8, 10, &opts->logn))
+			{
+				fprintf(stderr, "ERR: invalid --logn\n");
+				return 0;
+			}
+		} else if (strcmp(arg, "--threads") == 0) {
+			if (++ i >= argc || !parse_unsigned_arg(argv[i],
+				1, 24, &opts->threads))
+			{
+				fprintf(stderr, "ERR: invalid --threads\n");
+				return 0;
+			}
+		} else if (strcmp(arg, "--rng-mode") == 0) {
+			if (++ i >= argc || !parse_rng_mode(argv[i],
+				&opts->rng_mode))
+			{
+				fprintf(stderr, "ERR: invalid --rng-mode\n");
+				return 0;
+			}
+		} else if (strcmp(arg, "--worker-mode") == 0) {
+			if (++ i >= argc) {
+				fprintf(stderr, "ERR: missing --worker-mode\n");
+				return 0;
+			}
+			opts->worker_mode_set = 1;
+			if (strcmp(argv[i], "serial") == 0) {
+				opts->worker_mode_spin = 0;
+			} else if (strcmp(argv[i], "spin") == 0) {
+				opts->worker_mode_spin = 1;
+			} else {
+				fprintf(stderr, "ERR: invalid --worker-mode\n");
+				return 0;
+			}
+		} else if (strcmp(arg, "--trials") == 0) {
+			if (++ i >= argc || !parse_unsigned_arg(argv[i],
+				1, MAX_BENCH_TRIALS, &opts->trials))
+			{
+				fprintf(stderr, "ERR: invalid --trials\n");
+				return 0;
+			}
+		} else if (strcmp(arg, "--warmups") == 0) {
+			if (++ i >= argc || !parse_unsigned_arg(argv[i],
+				0, MAX_BENCH_TRIALS, &opts->warmups))
+			{
+				fprintf(stderr, "ERR: invalid --warmups\n");
+				return 0;
+			}
+		} else {
+			fprintf(stderr, "ERR: unknown argument: %s\n", arg);
+			return 0;
+		}
+	}
+
+	if (opts->mode == BENCH_MODE_SINGLE_CONFIG) {
+		int spin = opts->threads > 1;
+
+		if (opts->worker_mode_set && opts->worker_mode_spin != spin) {
+			fprintf(stderr,
+				"ERR: --worker-mode must be serial for threads=1"
+				" and spin for threads>1\n");
+			return 0;
+		}
+	}
+	if (opts->mode != BENCH_MODE_SIGN && opts->sign_only) {
+		fprintf(stderr,
+			"ERR: sign-only mode is only supported by the"
+			" sign benchmark\n");
+		return 0;
+	}
+	return opts->trials != 0;
 }
 
 #if HAWK_E8_PROFILE_SIGN
@@ -424,49 +699,86 @@ profile_print_summary(void)
 }
 #endif
 
-static uint64_t
-hawk_block_norm(const int8_t *x, unsigned block_index)
-{
-	size_t off = (size_t)block_index * E8_BLOCK_DIM;
-	uint64_t norm = 0;
-
-	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		int32_t y = x[off + u];
-
-		norm += (uint64_t)((int64_t)y * y);
-	}
-	return norm;
-}
-
 static void
 write_header(void)
 {
-	printf("sampler_type,scope,logn,n,block_index,trial_index,sigma,"
-		"coset_label,accepted,attempts,cycles_total,"
+	printf("sampler_type,scope,logn,n,trial_index,sigma,"
+		"accepted,attempts,cycles_total,"
 		"cycles_per_unit,wall_ns_total,"
-		"wall_ns_per_unit,norm,notes\n");
+		"wall_ns_per_unit,threads_requested,threads_used,"
+		"worker_mode,rng_mode,speedup_vs_threads_1,"
+		"profile_master_seed_cycles,profile_block_rng_init_cycles,"
+		"profile_block_sample_cycles,profile_worker_dispatch_cycles,"
+		"profile_worker_wait_cycles,profile_reduction_cycles,"
+		"profile_master_seed_wall_ns,"
+		"profile_block_rng_init_wall_ns,profile_block_sample_wall_ns,"
+		"profile_worker_dispatch_wall_ns,profile_worker_wait_wall_ns,"
+		"profile_reduction_wall_ns,notes\n");
 }
 
 static void
-write_row(const char *sampler_type, const char *scope,
-	unsigned logn, unsigned block_index, unsigned trial_index,
-	double sigma, uint8_t tau, int accepted, unsigned attempts,
+write_row_threads(const char *sampler_type, const char *scope,
+	unsigned logn, unsigned trial_index,
+	double sigma, int accepted, unsigned attempts,
 	uint64_t cycles_total,
 	uint64_t cycles_per_accepted_block, uint64_t wall_ns_total,
-	uint64_t wall_ns_per_accepted_block, uint64_t norm,
+	uint64_t wall_ns_per_accepted_block,
+	const char *threads_requested, unsigned threads_used,
+	const char *worker_mode, const char *rng_mode,
+	double speedup_vs_threads_1, const e8_sampler_profile *profile,
 	const char *notes)
 {
 	size_t n = (size_t)1 << logn;
+	e8_sampler_profile empty_profile;
 
-	printf("%s,%s,%u,%u,%u,%u,%.17g,%u,%d,%u,"
-		"%llu,%llu,%llu,%llu,%llu,%s\n",
-		sampler_type, scope, logn, (unsigned)n, block_index,
-		trial_index, sigma, (unsigned)tau, accepted, attempts,
+	if (profile == NULL) {
+		memset(&empty_profile, 0, sizeof empty_profile);
+		profile = &empty_profile;
+	}
+
+	printf("%s,%s,%u,%u,%u,%.17g,%d,%u,"
+		"%llu,%llu,%llu,%llu,%s,%u,%s,%s,%.6f,"
+		"%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%s\n",
+		sampler_type, scope, logn, (unsigned)n,
+		trial_index, sigma, accepted, attempts,
 		(unsigned long long)cycles_total,
 		(unsigned long long)cycles_per_accepted_block,
 		(unsigned long long)wall_ns_total,
 		(unsigned long long)wall_ns_per_accepted_block,
-		(unsigned long long)norm, notes);
+		threads_requested != NULL ? threads_requested : "",
+		threads_used,
+		worker_mode != NULL ? worker_mode : "",
+		rng_mode != NULL ? rng_mode : "",
+		speedup_vs_threads_1,
+		(unsigned long long)profile->cycles_master_seed,
+		(unsigned long long)profile->cycles_block_rng_init,
+		(unsigned long long)profile->cycles_block_sample,
+		(unsigned long long)profile->cycles_worker_dispatch,
+		(unsigned long long)profile->cycles_worker_wait,
+		(unsigned long long)profile->cycles_reduction,
+		(unsigned long long)profile->wall_ns_master_seed,
+		(unsigned long long)profile->wall_ns_block_rng_init,
+		(unsigned long long)profile->wall_ns_block_sample,
+		(unsigned long long)profile->wall_ns_worker_dispatch,
+		(unsigned long long)profile->wall_ns_worker_wait,
+		(unsigned long long)profile->wall_ns_reduction,
+		notes);
+}
+
+static void
+write_row(const char *sampler_type, const char *scope,
+	unsigned logn, unsigned trial_index,
+	double sigma, int accepted, unsigned attempts,
+	uint64_t cycles_total,
+	uint64_t cycles_per_accepted_block, uint64_t wall_ns_total,
+	uint64_t wall_ns_per_accepted_block,
+	const char *notes)
+{
+	write_row_threads(sampler_type, scope, logn,
+		trial_index, sigma, accepted, attempts,
+		cycles_total, cycles_per_accepted_block, wall_ns_total,
+		wall_ns_per_accepted_block, "", 0, "", "", 0.0, NULL,
+		notes);
 }
 
 static void
@@ -475,16 +787,13 @@ bench_hawk_sampler(unsigned logn, unsigned trial_index)
 	size_t n = (size_t)1 << logn;
 	size_t t_len = n >> 2;
 	unsigned block_units = (unsigned)(n >> 2);
-	unsigned block_index = trial_index % block_units;
-	uint8_t tau = make_tau(logn, trial_index, block_index);
 	uint8_t t[MAXN >> 2];
 	int8_t x[2 * MAXN];
 	bench_rng_state rng;
 	uint64_t c0, c1, w0, w1, cycles_total, wall_ns_total;
-	uint64_t norm;
 
 	memset(x, 0, sizeof x);
-	fill_hawk_parities(t, t_len, logn, trial_index, block_index, tau);
+	fill_hawk_parities(t, t_len, logn, trial_index);
 	bench_rng_init(&rng, 0, logn, trial_index);
 
 	c0 = bench_cycles_start();
@@ -495,24 +804,38 @@ bench_hawk_sampler(unsigned logn, unsigned trial_index)
 
 	cycles_total = bench_cycles_delta(c0, c1);
 	wall_ns_total = bench_wall_delta(w0, w1);
-	norm = hawk_block_norm(x, block_index);
 
-	write_row("hawk_sampler", "amortized_block", logn, block_index,
-		trial_index,
-		hawk_sigma_sign(logn), tau, 1, 1, cycles_total,
+	write_row("hawk_sampler", "amortized_block", logn, trial_index,
+		hawk_sigma_sign(logn), 1, 1, cycles_total,
 		bench_per_unit(cycles_total, block_units), wall_ns_total,
-		bench_per_unit(wall_ns_total, block_units), norm,
+		bench_per_unit(wall_ns_total, block_units),
 		"sig_gauss_2n_samples_amortized_to_8_scalar_unit");
 }
 
-static void
+static int
+run_single_hawk_sampler(const bench_options *opts)
+{
+	if (!opts->no_header) {
+		write_header();
+	}
+	for (unsigned trial_index = 0;
+		trial_index < opts->trials; trial_index ++)
+	{
+		bench_hawk_sampler(opts->logn, trial_index);
+	}
+	return 0;
+}
+
+static uint64_t
 bench_e8_sampler_full(unsigned logn, unsigned trial_index,
-	int warm_cache, const char *sampler_type, const char *notes)
+	int warm_cache, unsigned requested_threads,
+	const char *threads_requested,
+	unsigned rng_mode, const char *rng_mode_label,
+	uint64_t baseline_cycles,
+	const char *sampler_type, const char *notes)
 {
 	size_t n = (size_t)1 << logn;
 	unsigned block_units = (unsigned)(n >> 2);
-	unsigned block_index = trial_index % block_units;
-	uint8_t tau = make_tau(logn, trial_index, block_index);
 	uint8_t t0[MAXN], t1[MAXN];
 	int32_t z0[MAXN], z1[MAXN];
 	uint64_t norm = 0;
@@ -520,19 +843,27 @@ bench_e8_sampler_full(unsigned logn, unsigned trial_index,
 	bench_rng_state rng;
 	uint64_t c0, c1, w0, w1, cycles_total, wall_ns_total;
 	int accepted;
+	unsigned threads_used;
+	double speedup = 0.0;
 
 	memset(&stats, 0, sizeof stats);
 	memset(z0, 0, sizeof z0);
 	memset(z1, 0, sizeof z1);
 	fill_e8_parities(t0, t1, logn, trial_index);
 	bench_rng_init(&rng, 1, logn, trial_index);
+	e8_sampler_set_thread_count(requested_threads);
+	e8_sampler_set_rng_mode(rng_mode);
+	threads_used = e8_sampler_get_thread_count(logn);
 	if (warm_cache && !e8_sampler_warm_cache(e8_sigma_sign(logn))) {
-		write_row(sampler_type, "amortized_block", logn, block_index,
-			trial_index, e8_sigma_sign(logn), tau, 0, 0,
-			0, 0, 0, 0, 0, "cache_warmup_failed");
-		return;
+		write_row_threads(sampler_type, "amortized_block",
+			logn, trial_index, e8_sigma_sign(logn), 0, 0,
+			0, 0, 0, 0, threads_requested, threads_used,
+			threads_used == 1 ? "serial" : "spin", rng_mode_label,
+			0.0, NULL, "cache_warmup_failed");
+		return 0;
 	}
 
+	e8_sampler_profile_reset();
 	c0 = bench_cycles_start();
 	w0 = bench_wall_ns();
 	accepted = e8_sample_z_construction_a_cm(z0, z1, &norm,
@@ -540,15 +871,98 @@ bench_e8_sampler_full(unsigned logn, unsigned trial_index,
 		&stats);
 	w1 = bench_wall_ns();
 	c1 = bench_cycles_end();
+	e8_sampler_profile profile;
+	if (!e8_sampler_profile_get(&profile)) {
+		memset(&profile, 0, sizeof profile);
+	}
 
 	cycles_total = bench_cycles_delta(c0, c1);
 	wall_ns_total = bench_wall_delta(w0, w1);
-	write_row(sampler_type, "amortized_block", logn, block_index,
-		trial_index, e8_sigma_sign(logn), tau, accepted, 1,
+	if (accepted) {
+		if (baseline_cycles != 0 && cycles_total != 0) {
+			speedup = (double)baseline_cycles / (double)cycles_total;
+		} else if (requested_threads == 1) {
+			speedup = 1.0;
+		}
+	}
+	write_row_threads(sampler_type, "amortized_block", logn,
+		trial_index, e8_sigma_sign(logn), accepted, 1,
 		cycles_total, accepted ? bench_per_unit(cycles_total,
 			block_units) : 0, wall_ns_total,
 		accepted ? bench_per_unit(wall_ns_total, block_units) : 0,
-		accepted ? norm : 0, notes);
+		threads_requested, threads_used,
+		threads_used == 1 ? "serial" : "spin", rng_mode_label,
+		speedup, accepted ? &profile : NULL, notes);
+	return accepted ? cycles_total : 0;
+}
+
+static int
+bench_e8_sampler_warmup(unsigned logn, unsigned trial_index,
+	unsigned requested_threads, unsigned rng_mode)
+{
+	size_t n = (size_t)1 << logn;
+	uint8_t t0[MAXN], t1[MAXN];
+	int32_t z0[MAXN], z1[MAXN];
+	uint64_t norm = 0;
+	e8_sampler_stats stats;
+	bench_rng_state rng;
+
+	memset(&stats, 0, sizeof stats);
+	memset(z0, 0, sizeof z0);
+	memset(z1, 0, sizeof z1);
+	fill_e8_parities(t0, t1, logn, trial_index);
+	bench_rng_init(&rng, 7, logn, trial_index);
+	e8_sampler_set_thread_count(requested_threads);
+	e8_sampler_set_rng_mode(rng_mode);
+	return e8_sample_z_construction_a_cm(z0, z1, &norm,
+		t0, t1, logn, e8_sigma_sign(logn), bench_rng, &rng,
+		&stats) && n != 0;
+}
+
+static int
+run_single_config(const bench_options *opts)
+{
+	char threads_buf[16];
+	const char *threads_text = thread_label(opts->threads,
+		threads_buf, sizeof threads_buf);
+	const char *rng_text = rng_mode_label(opts->rng_mode);
+	unsigned warmups = opts->warmups;
+
+	if (!e8_sampler_warm_cache(e8_sigma_sign(opts->logn))) {
+		fprintf(stderr, "ERR: E8 sampler cache warm-up failed\n");
+		return 1;
+	}
+	if (opts->threads > 1 && warmups == 0) {
+		warmups = 1;
+	}
+	for (unsigned u = 0; u < warmups; u ++) {
+		if (!bench_e8_sampler_warmup(opts->logn,
+			0xA0000000u + u, opts->threads, opts->rng_mode))
+		{
+			fprintf(stderr,
+				"ERR: E8 sampler warm-up failed"
+				" logn=%u threads=%u rng=%s\n",
+				opts->logn, opts->threads, rng_text);
+			return 1;
+		}
+	}
+	if (!opts->no_header) {
+		write_header();
+	}
+	for (unsigned trial_index = 0;
+		trial_index < opts->trials; trial_index ++)
+	{
+		if (bench_e8_sampler_full(opts->logn, trial_index, 0,
+			opts->threads, threads_text, opts->rng_mode, rng_text,
+			0, "e8_sampler_cached_warm_block",
+			"isolated_single_configuration") == 0)
+		{
+			return 1;
+		}
+	}
+	e8_sampler_set_thread_count(1);
+	e8_sampler_set_rng_mode(E8_SAMPLER_RNG_PER_BLOCK);
+	return 0;
 }
 
 static void
@@ -586,9 +1000,9 @@ bench_hawk_sign(unsigned logn, unsigned trial_index)
 	if (!hawk_keygen(logn, priv, pub, bench_rng, &key_rng,
 		tmp_keygen, HAWK_TMPSIZE_KEYGEN(logn)))
 	{
-		write_row("hawk_sign", "signature", logn, 0, trial_index,
-			hawk_sigma_sign(logn), 0, 0, 0,
-			0, 0, 0, 0, 0, "keygen_setup_failed");
+		write_row("hawk_sign", "signature", logn, trial_index,
+			hawk_sigma_sign(logn), 0, 0, 0, 0, 0, 0,
+			"keygen_setup_failed");
 		return;
 	}
 
@@ -601,10 +1015,10 @@ bench_hawk_sign(unsigned logn, unsigned trial_index)
 
 	cycles_total = bench_cycles_delta(c0, c1);
 	wall_ns_total = bench_wall_delta(w0, w1);
-	write_row("hawk_sign", "signature", logn, 0, trial_index,
-		hawk_sigma_sign(logn), 0, accepted, 1, cycles_total,
+	write_row("hawk_sign", "signature", logn, trial_index,
+		hawk_sigma_sign(logn), accepted, 1, cycles_total,
 		accepted ? cycles_total : 0, wall_ns_total,
-		accepted ? wall_ns_total : 0, 0,
+		accepted ? wall_ns_total : 0,
 		"ordinary_hawk_sign_finish_encoded_private_key");
 }
 
@@ -666,8 +1080,13 @@ bench_e8_sign_sampler(unsigned logn, unsigned trial_index)
 	bench_rng_state key_rng, sign_rng;
 	e8_sign_trace_timing timing;
 	uint64_t c0, c1, w0, w1, cycles_total, wall_ns_total;
-	int64_t pnorm = 0;
 	unsigned attempts = 0;
+	unsigned sampler_threads;
+	unsigned sampler_rng_mode;
+	unsigned threads_used = 0;
+	char threads_buf[16];
+	const char *threads_text;
+	const char *rng_text;
 	int accepted;
 
 	bench_rng_init(&key_rng, 3, logn, trial_index);
@@ -677,13 +1096,33 @@ bench_e8_sign_sampler(unsigned logn, unsigned trial_index)
 	bench_make_message_context(&sc_data, logn, trial_index);
 	bench_make_hpub(hpub, hpub_len, logn, trial_index);
 	bench_make_salt(salt, salt_len, logn, trial_index);
+	if (!bench_selected_e8_sampler_config(logn,
+			&sampler_threads, &sampler_rng_mode))
+	{
+		write_row("e8_sign_sampler_cached", "signature", logn,
+			trial_index, e8_sigma_sign(logn), 0, 0, 0, 0, 0, 0,
+			"unsupported_logn");
+		return;
+	}
+	threads_text = thread_label(sampler_threads,
+		threads_buf, sizeof threads_buf);
+	rng_text = rng_mode_label(sampler_rng_mode);
+	e8_sampler_set_thread_count(sampler_threads);
+	e8_sampler_set_rng_mode(sampler_rng_mode);
+	threads_used = e8_sampler_get_thread_count(logn);
 
 	if (!bench_make_basis(logn, f, g, F, G, &key_rng)
-		|| !e8_sampler_warm_cache(e8_sigma_sign(logn)))
+		|| !e8_sampler_warm_cache(e8_sigma_sign(logn))
+		|| !bench_e8_sampler_warmup(logn,
+			0xB0000000u + trial_index,
+			sampler_threads, sampler_rng_mode))
 	{
-		write_row("e8_sign_sampler_cached", "signature", logn, 0,
-			trial_index, e8_sigma_sign(logn), 0, 0, 0,
-			0, 0, 0, 0, 0, "setup_failed");
+		write_row_threads("e8_sign_sampler_cached", "signature", logn,
+			trial_index, e8_sigma_sign(logn), 0, 0, 0, 0, 0, 0,
+			threads_text, threads_used,
+			threads_used == 1 ? "serial" : "spin", rng_text, 0.0,
+			NULL,
+			"setup_failed");
 		return;
 	}
 
@@ -691,8 +1130,8 @@ bench_e8_sign_sampler(unsigned logn, unsigned trial_index)
 	w0 = bench_wall_ns();
 	accepted = e8_sign_sampler_trace_timed_uncompressed(logn,
 		sig, sig_len, &sc_data, hpub, hpub_len, f, g, F, G, salt,
-		e8_sigma_sign(logn), e8_sigma_verify_sign(logn), 2, 1000,
-		bench_rng, &sign_rng, NULL, NULL, &pnorm, &attempts,
+		e8_sigma_sign(logn), e8_sigma_verify_sign(logn), 1000,
+		bench_rng, &sign_rng, NULL, NULL, NULL, &attempts,
 		&timing);
 	w1 = bench_wall_ns();
 	c1 = bench_cycles_end();
@@ -702,38 +1141,373 @@ bench_e8_sign_sampler(unsigned logn, unsigned trial_index)
 #if HAWK_E8_PROFILE_SIGN
 	profile_add(logn, accepted, attempts, &timing);
 #endif
-	write_row("e8_sign_sampler_cached", "signature", logn, 0,
-		trial_index, e8_sigma_sign(logn), 0, accepted, attempts,
+	write_row_threads("e8_sign_sampler_cached", "signature", logn,
+		trial_index, e8_sigma_sign(logn), accepted, attempts,
 		cycles_total, accepted ? cycles_total : 0, wall_ns_total,
-		accepted ? wall_ns_total : 0, accepted ? (uint64_t)pnorm : 0,
+		accepted ? wall_ns_total : 0,
+		threads_text, threads_used,
+		threads_used == 1 ? "serial" : "spin", rng_text, 0.0, NULL,
 		"end_to_end_signing_warm_cache");
 }
 
-int
-main(void)
+static size_t
+split_csv_simple(char *line, char **fields, size_t max_fields)
 {
-	unsigned trials = get_trials();
-	int sign_only = get_sign_only();
+	size_t count = 0;
 
-	if (trials == 0) {
+	if (line == NULL || fields == NULL || max_fields == 0) {
+		return 0;
+	}
+	fields[count ++] = line;
+	for (char *p = line; *p != 0; p ++) {
+		if (*p == ',') {
+			*p = 0;
+			if (count < max_fields) {
+				fields[count ++] = p + 1;
+			}
+		}
+	}
+	return count;
+}
+
+static void
+print_csv_fields(char **fields, size_t count, size_t replace_index,
+	const char *replace_value)
+{
+	for (size_t u = 0; u < count; u ++) {
+		if (u != 0) {
+			putchar(',');
+		}
+		fputs(u == replace_index ? replace_value : fields[u], stdout);
+	}
+	putchar('\n');
+}
+
+static int
+emit_child_csv_line(const char *line_in, uint64_t *baseline_cycles,
+	unsigned trials, int store_baseline)
+{
+	char line[MAX_BENCH_LINE];
+	char *fields[48];
+	size_t count;
+	unsigned trial_index = 0;
+	uint64_t cycles = 0;
+	char speedup[64];
+
+	if (line_in == NULL || line_in[0] == 0) {
 		return 1;
 	}
+	if (strncmp(line_in, "sampler_type,", 13) == 0) {
+		return 1;
+	}
+	snprintf(line, sizeof line, "%s", line_in);
+	line[strcspn(line, "\r\n")] = 0;
+	count = split_csv_simple(line, fields,
+		sizeof fields / sizeof fields[0]);
+	if (count < 30) {
+		fprintf(stderr, "ERR: child emitted malformed CSV row\n");
+		return 0;
+	}
+
+	if (!parse_unsigned_arg(fields[4], 0, MAX_BENCH_TRIALS,
+		&trial_index))
+	{
+		fprintf(stderr, "ERR: child emitted invalid trial index\n");
+		return 0;
+	}
+	cycles = strtoull(fields[8], NULL, 10);
+	if (trial_index >= trials) {
+		fprintf(stderr, "ERR: child trial index out of range\n");
+		return 0;
+	}
+	if (store_baseline && baseline_cycles != NULL) {
+		baseline_cycles[trial_index] = cycles;
+	}
+	if (store_baseline) {
+		snprintf(speedup, sizeof speedup, "%.6f", 1.0);
+	} else if (baseline_cycles != NULL
+		&& baseline_cycles[trial_index] != 0 && cycles != 0)
+	{
+		snprintf(speedup, sizeof speedup, "%.6f",
+			(double)baseline_cycles[trial_index] / (double)cycles);
+	} else {
+		snprintf(speedup, sizeof speedup, "%s", fields[16]);
+	}
+	print_csv_fields(fields, count, 16, speedup);
+	return 1;
+}
+
+static int
+run_child_config(const char *self_path, unsigned logn, unsigned threads,
+	const char *worker_mode, unsigned rng_mode, unsigned trials,
+	unsigned warmups, uint64_t *baseline_cycles, int store_baseline)
+{
+	int pipefd[2];
+	pid_t pid;
+	FILE *fp;
+	char line[MAX_BENCH_LINE];
+	char logn_arg[16], threads_arg[16], trials_arg[16], warmups_arg[16];
+	const char *rng_text = rng_mode_label(rng_mode);
+	int status;
+	int ok = 1;
+
+	snprintf(logn_arg, sizeof logn_arg, "%u", logn);
+	snprintf(threads_arg, sizeof threads_arg, "%u", threads);
+	snprintf(trials_arg, sizeof trials_arg, "%u", trials);
+	snprintf(warmups_arg, sizeof warmups_arg, "%u", warmups);
+	if (pipe(pipefd) != 0) {
+		fprintf(stderr, "ERR: pipe failed: %s\n", strerror(errno));
+		return 0;
+	}
+	fflush(stdout);
+	pid = fork();
+	if (pid < 0) {
+		fprintf(stderr, "ERR: fork failed: %s\n", strerror(errno));
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return 0;
+	}
+	if (pid == 0) {
+		close(pipefd[0]);
+		if (dup2(pipefd[1], STDOUT_FILENO) < 0) {
+			fprintf(stderr, "ERR: dup2 failed: %s\n", strerror(errno));
+			_exit(127);
+		}
+		close(pipefd[1]);
+		execlp(self_path, self_path,
+			"--single-config",
+			"--logn", logn_arg,
+			"--threads", threads_arg,
+			"--worker-mode", worker_mode,
+			"--rng-mode", rng_text,
+			"--trials", trials_arg,
+			"--warmups", warmups_arg,
+			"--no-header",
+			(char *)NULL);
+		fprintf(stderr, "ERR: exec failed: %s\n", strerror(errno));
+		_exit(127);
+	}
+	close(pipefd[1]);
+	fp = fdopen(pipefd[0], "r");
+	if (fp == NULL) {
+		fprintf(stderr, "ERR: fdopen failed: %s\n", strerror(errno));
+		close(pipefd[0]);
+		(void)waitpid(pid, &status, 0);
+		return 0;
+	}
+	while (fgets(line, sizeof line, fp) != NULL) {
+		if (!emit_child_csv_line(line, baseline_cycles, trials,
+			store_baseline))
+		{
+			ok = 0;
+		}
+	}
+	if (ferror(fp)) {
+		fprintf(stderr, "ERR: failed reading child CSV output\n");
+		ok = 0;
+	}
+	fclose(fp);
+	if (waitpid(pid, &status, 0) < 0) {
+		fprintf(stderr, "ERR: waitpid failed: %s\n", strerror(errno));
+		return 0;
+	}
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		if (WIFSIGNALED(status)) {
+			fprintf(stderr,
+				"ERR: child failed logn=%u threads=%u rng=%s"
+				" signal=%d\n",
+				logn, threads, rng_text, WTERMSIG(status));
+		} else {
+			fprintf(stderr,
+				"ERR: child failed logn=%u threads=%u rng=%s"
+				" status=%d\n",
+				logn, threads, rng_text,
+				WIFEXITED(status) ? WEXITSTATUS(status) : status);
+		}
+		ok = 0;
+	}
+	return ok;
+}
+
+static int
+run_child_hawk_sampler(const char *self_path, unsigned logn, unsigned trials)
+{
+	int pipefd[2];
+	pid_t pid;
+	FILE *fp;
+	char line[MAX_BENCH_LINE];
+	char logn_arg[16], trials_arg[16];
+	int status;
+	int ok = 1;
+	unsigned rows = 0;
+
+	snprintf(logn_arg, sizeof logn_arg, "%u", logn);
+	snprintf(trials_arg, sizeof trials_arg, "%u", trials);
+	if (pipe(pipefd) != 0) {
+		fprintf(stderr, "ERR: pipe failed: %s\n", strerror(errno));
+		return 0;
+	}
+	fflush(stdout);
+	pid = fork();
+	if (pid < 0) {
+		fprintf(stderr, "ERR: fork failed: %s\n", strerror(errno));
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return 0;
+	}
+	if (pid == 0) {
+		close(pipefd[0]);
+		if (dup2(pipefd[1], STDOUT_FILENO) < 0) {
+			fprintf(stderr, "ERR: dup2 failed: %s\n", strerror(errno));
+			_exit(127);
+		}
+		close(pipefd[1]);
+		execlp(self_path, self_path,
+			"--single-hawk-sampler",
+			"--logn", logn_arg,
+			"--trials", trials_arg,
+			"--no-header",
+			(char *)NULL);
+		fprintf(stderr, "ERR: exec failed: %s\n", strerror(errno));
+		_exit(127);
+	}
+	close(pipefd[1]);
+	fp = fdopen(pipefd[0], "r");
+	if (fp == NULL) {
+		fprintf(stderr, "ERR: fdopen failed: %s\n", strerror(errno));
+		close(pipefd[0]);
+		(void)waitpid(pid, &status, 0);
+		return 0;
+	}
+	while (fgets(line, sizeof line, fp) != NULL) {
+		if (line[0] != 0 && line[0] != '\n' && line[0] != '\r'
+			&& strncmp(line, "sampler_type,", 13) != 0)
+		{
+			rows ++;
+		}
+		if (!emit_child_csv_line(line, NULL, trials, 0)) {
+			ok = 0;
+		}
+	}
+	if (ferror(fp)) {
+		fprintf(stderr, "ERR: failed reading HAWK sampler child CSV output\n");
+		ok = 0;
+	}
+	fclose(fp);
+	if (waitpid(pid, &status, 0) < 0) {
+		fprintf(stderr, "ERR: waitpid failed: %s\n", strerror(errno));
+		return 0;
+	}
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		if (WIFSIGNALED(status)) {
+			fprintf(stderr,
+				"ERR: HAWK sampler child failed logn=%u"
+				" signal=%d\n",
+				logn, WTERMSIG(status));
+		} else {
+			fprintf(stderr,
+				"ERR: HAWK sampler child failed logn=%u"
+				" status=%d\n",
+				logn, WIFEXITED(status)
+					? WEXITSTATUS(status) : status);
+		}
+		ok = 0;
+	}
+	if (rows != trials) {
+		fprintf(stderr,
+			"ERR: HAWK sampler child logn=%u emitted %u rows"
+			" instead of %u\n",
+			logn, rows, trials);
+		ok = 0;
+	}
+	return ok;
+}
+
+static int
+run_isolated_matrix(const char *self_path, unsigned trials, unsigned warmups)
+{
+	int ok = 1;
+
 	write_header();
 	for (unsigned logn = 8; logn <= 10; logn ++) {
-		if (!sign_only) {
-			bench_e8_sampler_full(logn, 0, 0,
-				"e8_sampler_cached_cold_full",
-				"construction_a_cm_full_dimension_sampler_includes_lazy_cache_warmup");
+		uint64_t *baseline_cycles =
+			calloc(trials, sizeof *baseline_cycles);
+
+		if (baseline_cycles == NULL) {
+			fprintf(stderr, "ERR: baseline allocation failed\n");
+			return 1;
 		}
+		if (!run_child_hawk_sampler(self_path, logn, trials)) {
+			ok = 0;
+		}
+		if (!run_child_config(self_path, logn, 1, "serial",
+			E8_SAMPLER_RNG_PER_BLOCK, trials, warmups,
+			baseline_cycles, 1))
+		{
+			ok = 0;
+		}
+		for (size_t rm = 0;
+			rm < sizeof E8_RNG_MODE_CASES / sizeof E8_RNG_MODE_CASES[0];
+			rm ++)
+		{
+			for (size_t u = 1;
+				u < sizeof E8_THREAD_CASES / sizeof E8_THREAD_CASES[0];
+				u ++)
+			{
+				if (!run_child_config(self_path, logn,
+					E8_THREAD_CASES[u].threads, "spin",
+					E8_RNG_MODE_CASES[rm].mode,
+					trials, warmups, baseline_cycles, 0))
+				{
+					ok = 0;
+				}
+			}
+		}
+		free(baseline_cycles);
+	}
+	return ok ? 0 : 1;
+}
+
+static int
+run_selected_configs(const char *self_path, unsigned trials, unsigned warmups)
+{
+	int ok = 1;
+
+	write_header();
+	for (unsigned logn = 8; logn <= 10; logn ++) {
+		unsigned threads;
+		unsigned rng_mode;
+
+		if (!bench_selected_e8_sampler_config(logn,
+				&threads, &rng_mode))
+		{
+			fprintf(stderr,
+				"ERR: no selected E8 sampler config"
+				" for logn=%u\n", logn);
+			ok = 0;
+			continue;
+		}
+		if (!run_child_hawk_sampler(self_path, logn, trials)) {
+			ok = 0;
+		}
+		if (!run_child_config(self_path, logn, threads,
+			threads == 1 ? "serial" : "spin", rng_mode,
+			trials, warmups, NULL, 0))
+		{
+			ok = 0;
+		}
+	}
+	return ok ? 0 : 1;
+}
+
+static int
+run_sign_bench(unsigned trials)
+{
+	write_header();
+	for (unsigned logn = 8; logn <= 10; logn ++) {
 		for (unsigned trial_index = 0;
 			trial_index < trials; trial_index ++)
 		{
-			if (!sign_only) {
-				bench_hawk_sampler(logn, trial_index);
-				bench_e8_sampler_full(logn, trial_index, 1,
-					"e8_sampler_cached_warm_block",
-					"construction_a_cm_cached_full_dimension_sampler_amortized_to_e8_block");
-			}
 			bench_hawk_sign(logn, trial_index);
 			bench_e8_sign_sampler(logn, trial_index);
 		}
@@ -742,4 +1516,32 @@ main(void)
 	profile_print_summary();
 #endif
 	return 0;
+}
+
+int
+main(int argc, char **argv)
+{
+	bench_options opts;
+
+	if (!parse_options(argc, argv, &opts)) {
+		usage(argv[0]);
+		return 1;
+	}
+	if (opts.mode == BENCH_MODE_SINGLE_CONFIG) {
+		return run_single_config(&opts);
+	}
+	if (opts.mode == BENCH_MODE_SINGLE_HAWK_SAMPLER) {
+		return run_single_hawk_sampler(&opts);
+	}
+	if (opts.mode == BENCH_MODE_SIGN) {
+		return run_sign_bench(opts.trials);
+	}
+	if (opts.mode == BENCH_MODE_ISOLATED_MATRIX) {
+		return run_isolated_matrix(argv[0], opts.trials, opts.warmups);
+	}
+	if (opts.mode == BENCH_MODE_SELECTED_CONFIGS) {
+		return run_selected_configs(argv[0], opts.trials, opts.warmups);
+	}
+	usage(argv[0]);
+	return 1;
 }

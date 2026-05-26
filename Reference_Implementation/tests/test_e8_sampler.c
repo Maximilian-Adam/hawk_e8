@@ -7,9 +7,7 @@
 #include "../hawk_e8_inner.h"
 
 #define MAXN             1024
-#define SAMPLE_BOUND     2
 #define SAMPLE_SIGMA     1.25
-#define BLOCK_SAMPLES    4
 #define FULL_SAMPLES     2
 #define CM_BLOCK_SAMPLES 8
 
@@ -466,38 +464,6 @@ test_block_norm_against_full(unsigned logn,
 }
 
 static int
-test_all_tau_block_support_bounded(void)
-{
-	uint64_t rng_state = UINT64_C(0xE8B10C0000000000);
-
-	for (unsigned tau = 0; tau < 256; tau ++) {
-		for (unsigned sample = 0; sample < BLOCK_SAMPLES; sample ++) {
-			int32_t zblk[8];
-			unsigned id = tau * BLOCK_SAMPLES + sample;
-
-			if (!e8_sample_block_float(zblk, (uint8_t)tau,
-				SAMPLE_SIGMA, SAMPLE_BOUND,
-				test_rng, &rng_state))
-			{
-				fprintf(stderr,
-					"ERR: bounded E8 block sampler failed"
-					" tau=%u sample=%u\n", tau, sample);
-				return 0;
-			}
-			if (!check_block_parity(zblk, (uint8_t)tau,
-				"sampled", 8, id))
-			{
-				return 0;
-			}
-			if (!test_block_norm_against_full(8, zblk, id)) {
-				return 0;
-			}
-		}
-	}
-	return 1;
-}
-
-static int
 test_all_tau_block_support_cm(void)
 {
 	uint64_t rng_state = UINT64_C(0xE8CA000000000000);
@@ -556,48 +522,6 @@ test_all_tau_block_support_cm(void)
 }
 
 static int
-test_full_support_and_norm_bounded(unsigned logn)
-{
-	size_t n = (size_t)1 << logn;
-	uint64_t rng_state = UINT64_C(0xE8F0110000000000) + logn;
-	static uint8_t t0[MAXN], t1[MAXN];
-	static int32_t z0[MAXN], z1[MAXN];
-
-	for (unsigned sample = 0; sample < FULL_SAMPLES; sample ++) {
-		int64_t norm2, check_norm;
-
-		make_random_bits(t0, t1, n, &rng_state);
-		if (!e8_sample_z_float(z0, z1, &norm2, t0, t1, logn,
-			SAMPLE_SIGMA, SAMPLE_BOUND, test_rng, &rng_state))
-		{
-			fprintf(stderr,
-				"ERR: bounded E8 full sampler failed"
-				" logn=%u sample=%u\n", logn, sample);
-			return 0;
-		}
-		for (size_t u = 0; u < n; u ++) {
-			if ((((uint32_t)z0[u]) & 1u) != t0[u]
-				|| (((uint32_t)z1[u]) & 1u) != t1[u])
-			{
-				fprintf(stderr,
-					"ERR: E8 full sampler coset mismatch"
-					" logn=%u sample=%u coeff=%u\n",
-					logn, sample, (unsigned)u);
-				return 0;
-			}
-		}
-		check_norm = full_norm_from_apply(logn, z0, z1);
-		if (norm2 != check_norm) {
-			fprintf(stderr,
-				"ERR: E8 full sampler norm mismatch"
-				" logn=%u sample=%u\n", logn, sample);
-			return 0;
-		}
-	}
-	return 1;
-}
-
-static int
 test_full_support_and_norm_cm(unsigned logn)
 {
 	size_t n = (size_t)1 << logn;
@@ -644,6 +568,219 @@ test_full_support_and_norm_cm(unsigned logn)
 }
 
 static int
+stats_equal(const e8_sampler_stats *a, const e8_sampler_stats *b)
+{
+	if (a->blocks != b->blocks
+		|| a->one_dim_samples != b->one_dim_samples
+		|| a->norm2_sum != b->norm2_sum
+		|| a->norm2_max != b->norm2_max)
+	{
+		return 0;
+	}
+	for (unsigned u = 0; u < 16; u ++) {
+		if (a->construction_a_cosets[u]
+			!= b->construction_a_cosets[u])
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int
+test_full_thread_equivalence_cm(unsigned logn)
+{
+	size_t n = (size_t)1 << logn;
+	size_t k = n >> 2;
+	uint64_t bit_rng = UINT64_C(0xE8CA7A1100000000) + logn;
+	uint64_t rng_one = UINT64_C(0xE8CA7A11C0FFEE00) + logn;
+	uint64_t rng_many = rng_one;
+	static uint8_t t0[MAXN], t1[MAXN];
+	static int32_t z0_one[MAXN], z1_one[MAXN];
+	static int32_t z0_many[MAXN], z1_many[MAXN];
+	e8_sampler_stats stats_one, stats_many;
+	uint64_t norm_one, norm_many;
+	unsigned auto_threads;
+
+	make_random_bits(t0, t1, n, &bit_rng);
+	memset(&stats_one, 0, sizeof stats_one);
+	memset(&stats_many, 0, sizeof stats_many);
+
+	e8_sampler_set_rng_mode(E8_SAMPLER_RNG_PER_BLOCK);
+	e8_sampler_set_thread_count(0);
+	auto_threads = e8_sampler_get_thread_count(logn);
+	if (auto_threads < 1 || auto_threads > k) {
+		fprintf(stderr,
+			"ERR: CM E8 auto thread count invalid"
+			" logn=%u threads=%u\n", logn, auto_threads);
+		return 0;
+	}
+
+	e8_sampler_set_thread_count(1);
+	if (!e8_sample_z_construction_a_cm(z0_one, z1_one, &norm_one,
+		t0, t1, logn, SAMPLE_SIGMA,
+		test_rng, &rng_one, &stats_one))
+	{
+		fprintf(stderr,
+			"ERR: CM E8 single-thread full sampler failed"
+			" logn=%u\n", logn);
+		return 0;
+	}
+
+	e8_sampler_set_thread_count(4);
+	if (!e8_sample_z_construction_a_cm(z0_many, z1_many, &norm_many,
+		t0, t1, logn, SAMPLE_SIGMA,
+		test_rng, &rng_many, &stats_many))
+	{
+		fprintf(stderr,
+			"ERR: CM E8 multi-thread full sampler failed"
+			" logn=%u\n", logn);
+		return 0;
+	}
+	e8_sampler_set_thread_count(1);
+
+	if (norm_one != norm_many
+		|| memcmp(z0_one, z0_many, n * sizeof *z0_one) != 0
+		|| memcmp(z1_one, z1_many, n * sizeof *z1_one) != 0
+		|| !stats_equal(&stats_one, &stats_many))
+	{
+		fprintf(stderr,
+			"ERR: CM E8 thread-equivalence mismatch logn=%u\n",
+			logn);
+		return 0;
+	}
+	if (stats_one.blocks != k
+		|| stats_one.one_dim_samples != 8 * k
+		|| stats_one.norm2_sum != norm_one
+		|| norm_one != (uint64_t)full_norm_from_apply(
+			logn, z0_one, z1_one))
+	{
+		fprintf(stderr,
+			"ERR: CM E8 thread-equivalence norm/stats mismatch"
+			" logn=%u\n", logn);
+		return 0;
+	}
+	return 1;
+}
+
+static int
+test_full_parallel_modes_cm(unsigned logn)
+{
+	static const unsigned rng_modes[] = {
+		E8_SAMPLER_RNG_PER_BLOCK,
+		E8_SAMPLER_RNG_PER_WORKER
+	};
+	static const char *rng_labels[] = {
+		"per_block",
+		"per_worker"
+	};
+	size_t n = (size_t)1 << logn;
+	size_t k = n >> 2;
+	uint64_t bit_rng = UINT64_C(0xE8CA908E00000000) + logn;
+	static uint8_t t0[MAXN], t1[MAXN];
+	static int32_t z0[MAXN], z1[MAXN];
+
+	make_random_bits(t0, t1, n, &bit_rng);
+	for (size_t rm = 0; rm < sizeof rng_modes / sizeof rng_modes[0];
+		rm ++)
+	{
+		uint64_t rng_state = UINT64_C(0xE8CA908ECAFE0000)
+			+ ((uint64_t)logn << 12) + (uint64_t)rm;
+		uint64_t norm2;
+		int64_t check_norm;
+		e8_sampler_stats stats;
+
+		memset(&stats, 0, sizeof stats);
+		e8_sampler_set_thread_count(4);
+		e8_sampler_set_rng_mode(rng_modes[rm]);
+		if (!e8_sample_z_construction_a_cm(z0, z1, &norm2,
+			t0, t1, logn, SAMPLE_SIGMA,
+			test_rng, &rng_state, &stats))
+		{
+			fprintf(stderr,
+				"ERR: CM E8 mode sampler failed"
+				" logn=%u rng=%s\n",
+				logn, rng_labels[rm]);
+			return 0;
+		}
+		for (size_t u = 0; u < n; u ++) {
+			if ((((uint32_t)z0[u]) & 1u) != t0[u]
+				|| (((uint32_t)z1[u]) & 1u) != t1[u])
+			{
+				fprintf(stderr,
+					"ERR: CM E8 mode coset mismatch"
+					" logn=%u rng=%s coeff=%u\n",
+					logn, rng_labels[rm], (unsigned)u);
+				return 0;
+			}
+		}
+		check_norm = full_norm_from_apply(logn, z0, z1);
+		if (norm2 != (uint64_t)check_norm
+			|| stats.blocks != k
+			|| stats.one_dim_samples != 8 * k
+			|| stats.norm2_sum != norm2)
+		{
+			fprintf(stderr,
+				"ERR: CM E8 mode norm/stats mismatch"
+				" logn=%u rng=%s\n",
+				logn, rng_labels[rm]);
+			return 0;
+		}
+	}
+	{
+		uint64_t rng_state = UINT64_C(0xE8CA908EA0700000) + logn;
+		uint64_t norm2;
+		int64_t check_norm;
+		unsigned auto_threads;
+		e8_sampler_stats stats;
+		e8_sampler_profile profile;
+
+		memset(&stats, 0, sizeof stats);
+		memset(&profile, 0, sizeof profile);
+		e8_sampler_set_thread_count(0);
+		e8_sampler_set_rng_mode(E8_SAMPLER_RNG_PER_BLOCK);
+		auto_threads = e8_sampler_get_thread_count(logn);
+		e8_sampler_profile_reset();
+		if (!e8_sample_z_construction_a_cm(z0, z1, &norm2,
+			t0, t1, logn, SAMPLE_SIGMA,
+			test_rng, &rng_state, &stats)
+			|| !e8_sampler_profile_get(&profile))
+		{
+			fprintf(stderr,
+				"ERR: CM E8 auto mode sampler failed logn=%u\n",
+				logn);
+			return 0;
+		}
+		check_norm = full_norm_from_apply(logn, z0, z1);
+		if (norm2 != (uint64_t)check_norm
+			|| stats.blocks != k
+			|| stats.one_dim_samples != 8 * k
+			|| stats.norm2_sum != norm2)
+		{
+			fprintf(stderr,
+				"ERR: CM E8 auto mode norm/stats mismatch"
+				" logn=%u\n", logn);
+			return 0;
+		}
+		if (auto_threads > 1
+			&& (profile.worker_mode != E8_SAMPLER_WORKER_SPIN
+				|| profile.rng_mode != E8_SAMPLER_RNG_PER_WORKER))
+		{
+			fprintf(stderr,
+				"ERR: CM E8 auto mode policy mismatch"
+				" logn=%u threads=%u worker=%llu rng=%llu\n",
+				logn, auto_threads,
+				(unsigned long long)profile.worker_mode,
+				(unsigned long long)profile.rng_mode);
+			return 0;
+		}
+	}
+	e8_sampler_set_thread_count(1);
+	e8_sampler_set_rng_mode(E8_SAMPLER_RNG_PER_BLOCK);
+	return 1;
+}
+
+static int
 test_logn(unsigned logn)
 {
 	if (!test_sigma_convention()
@@ -653,23 +790,23 @@ test_logn(unsigned logn)
 	}
 	if (logn == 8
 		&& (!test_rm13_table()
-			|| !test_cache_1d_masses()
-			|| !test_cache_component_masses()
-			|| !test_construction_a_trace_path()
-			|| !test_all_tau_block_support_bounded()
-			|| !test_all_tau_block_support_cm()))
+				|| !test_cache_1d_masses()
+				|| !test_cache_component_masses()
+				|| !test_construction_a_trace_path()
+				|| !test_all_tau_block_support_cm()))
 	{
 		return 0;
 	}
-	return test_full_support_and_norm_bounded(logn)
-		&& test_full_support_and_norm_cm(logn);
+	return test_full_support_and_norm_cm(logn)
+		&& test_full_thread_equivalence_cm(logn)
+		&& test_full_parallel_modes_cm(logn);
 }
 
 int
 main(void)
 {
 	for (unsigned logn = 8; logn <= 10; logn ++) {
-		printf("E8 floating/Construction-A-CM sampler n=%u: ",
+		printf("E8 Construction-A-CM sampler n=%u: ",
 			1u << logn);
 		fflush(stdout);
 		if (!test_logn(logn)) {

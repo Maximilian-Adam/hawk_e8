@@ -67,8 +67,9 @@ Core experimental files:
 - `src/e8_math.c`: `P_n`, `S_n`, `Delta_n`, and `Q_E8` helpers.
 - `src/e8_vrfy.c`: uncompressed signature codec, sign-based sym-break, and
   E8 completion-norm verifier.
-- `src/e8_sampler.c`: standalone E8 block samplers, including the
-  coset-matched Construction-A CM sampler and the bounded baseline.
+- `src/e8_sampler.c`: standalone coset-matched Construction-A CM E8 sampler,
+  including the cached full-dimension sampler and optional spin/yield
+  block-level worker pool.
 - `src/e8_sign.c`: dummy E8 signers and sampler-backed uncompressed signer.
 
 The corresponding files under `Reference_Implementation/` are kept in sync for
@@ -138,8 +139,7 @@ e = w0 + q01 d
 This is deliberately separate from ordinary HAWK verification. The E8 path uses
 the `Delta_n`-weighted formula above, not the ordinary determinant-one
 completion-of-squares formula. The verifier does not run the expanded direct
-`Q_E8` norm check; that slower equivalence check is kept in tests while this
-path is still experimental.
+`Q_E8` norm check; the tests check equivalence with the expanded direct norm.
 
 This is not full public-orbit canonicalisation for the E8 form.  The
 implementation does not apply rotations, `omega_E8_Q`, or a full `G_E8,Q`
@@ -192,7 +192,7 @@ Each block sample satisfies:
 z_block in 2Z^8 + tau_r
 ```
 
-The default sampler-backed signer now calls:
+The sampler-backed signer calls:
 
 ```text
 e8_sample_z_construction_a_cm
@@ -232,17 +232,6 @@ The sampler returns both `z0,z1` and:
 ```text
 norm2 = ||P_n z||^2
 ```
-
-The old bounded enumerator remains available only as an explicitly named
-experimental baseline:
-
-```text
-e8_sample_block_bounded_float
-e8_sample_z_bounded_float
-```
-
-The compatibility names `e8_sample_block_float` and `e8_sample_z_float` still
-refer to that bounded baseline for older tests and diagnostics.
 
 The CM sampler uses floating-point one-dimensional conditional CDFs with a
 large finite tail cutoff for the current research prototype.  Its default path
@@ -286,10 +275,50 @@ z_block = base_z[tau][component]
 and computes `norm2` from the cached base norm and the orthogonal
 product-coordinate quadratic formula.  Debug builds still reconstruct the
 E8-side block and check the inverse map, coset, syndrome, and norm consistency.
-The full-ring sampler also batches RNG callback output into a small local byte
-stream and consumes `uint32_t`/`uint64_t` words from it for component and
-coordinate draws; this changes deterministic test traces but not the sampler
-support contract.
+The full-ring CM sampler parallelises over the independent `n/4` E8 blocks.
+Before entering the block loop it fully warms the cache for the requested
+`sigma_sign`, then workers only read the cached tables.  For `threads > 1`, a
+small pthread worker pool is initialised lazily and resized to the number of
+helper workers needed by the current sample.  The caller handles one contiguous
+range, so a `threads = 2` sample creates one pool worker, not the compile-time
+maximum.  Switching back to the serial path shrinks the pool to zero helper
+workers.  The pool uses a shared generation counter with spin-then-yield
+workers, and the serial path is the safe/reference baseline.  In
+multi-threaded mode, each active range extracts `tau_r`, samples that block
+with the cached Construction-A CM block sampler, writes disjoint `z0,z1`
+positions, and accumulates a local norm
+contribution.  The caller-visible norm is the integer reduction of those
+per-range block norms.
+
+The full-ring sampler draws one 32-byte master seed from the supplied `hawk_rng`
+callback per full sample.  The default reproducible mode derives each block's
+byte stream with SHAKE256 from a domain separator, `logn`, `tau_r`,
+`sigma_sign`, and the block index.  The fast mode derives one SHAKE256 stream
+per active worker range from a separate domain separator, the master seed,
+`logn`, `sigma_sign`, worker id, range start, and range end, then consumes that
+stream for all blocks in the range.  Both modes avoid shared mutable RNG state
+and are independent of worker scheduling.  The per-worker stream mode changes
+deterministic traces and makes output depend on the chosen range partition, but
+it does not change the coset support contract.
+
+Parallelism is controlled by the internal `e8_sampler_set_thread_count()`
+helper, the `HAWK_E8_SAMPLER_THREADS` environment variable, or the compile-time
+`HAWK_E8_SAMPLER_THREADS` macro.  A value of `1` forces the single-worker
+cached sampler and uses per-block RNG.  User-selected `2`, `4`, `8`, `12`,
+`16`, or `24` use the spin/yield pool.  The RNG mode is controlled by
+`e8_sampler_set_rng_mode()`
+(`E8_SAMPLER_RNG_PER_BLOCK` or `E8_SAMPLER_RNG_PER_WORKER`).  The default RNG
+mode is per-block SHAKE for reproducibility and debugging.  A thread count of
+`0` or `auto` uses the online CPU count capped by 24 total sampler threads and
+by the number of E8 blocks, with the spin/generation pool and per-worker SHAKE
+streams for `logn = 8, 9, 10`.  The compile-time default is `1`, so ordinary
+builds remain serial unless parallelism is requested.
+
+The sampler profile records the effective thread count, worker mode, RNG mode,
+master seed generation cost, RNG setup cost, cached block sampling cost,
+dispatch cost, wait/completion cost, and norm/stat reduction cost.  The
+`e8_sampler_bench` CSV includes those fields and sweeps `logn = 8, 9, 10`,
+the serial baseline, and spin-pool runs with per-block and per-worker RNG.
 
 `e8_sampler_warm_cache(sigma_sign)` explicitly precomputes the tables for one
 `sigma_sign`; the full CM sampler also warms lazily on first use.  Warm-up does
@@ -380,19 +409,17 @@ threshold can be kept identical.
 The current sampler-backed tests and histogram defaults use:
 
 ```text
-n=256:  sigma_sign = 1.25, sigma_verify = 1.06, sampler_bound = 2
-n=512:  sigma_sign = 1.28, sigma_verify = 1.42, sampler_bound = 2
-n=1024: sigma_sign = 1.30, sigma_verify = 1.57, sampler_bound = 2
+n=256:  sigma_sign = 1.25, sigma_verify = 1.06
+n=512:  sigma_sign = 1.28, sigma_verify = 1.42
+n=1024: sigma_sign = 1.30, sigma_verify = 1.57
 ```
 
 `max_attempts` defaults to `1000` in the sampler-backed tests and histogram
 driver. These are prototype integration and calibration values only. They are
 not final parameter claims.
 
-`sampler_bound` is retained in the existing test/histogram interfaces for the
-bounded baseline and for backward-compatible CSV columns. The default
-sampler-backed signer uses the CM sampler above and does not use this value to
-truncate the block support.
+The sampler-backed signer uses the cached Construction-A CM sampler above.
+This implementation has a single E8 sampler path.
 
 The C API uses the `sigma` convention:
 
@@ -412,21 +439,12 @@ The histogram target supports:
 ```text
 E8_HIST_KEYS=<positive integer>
 E8_HIST_TRIALS=<positive integer>
-E8_HIST_BOUND=<positive integer>
 E8_HIST_MAX_ATTEMPTS=<positive integer>
 ```
 
 In short mode, `E8_HIST_KEYS` and `E8_HIST_TRIALS` apply uniformly to every
 listed `logn`; the defaults are 3 keys and 5 trials per key per `logn`, so the
 short correctness CSVs do not silently use fewer keys at larger dimensions.
-
-The sampler-backed signing test supports:
-
-```text
-E8_SIGN_TEST_BOUND=<positive integer>
-```
-
-If unset, defaults are unchanged. Invalid bound values fail with a clear error.
 
 ## Build And Test Commands
 
@@ -502,7 +520,7 @@ unsupported platforms; wall-clock timings use `CLOCK_MONOTONIC_RAW` where
 available.  Tamper rows reuse the corresponding valid signature's
 keygen/public-form/sign/sample timings and measure verifier time separately.
 
-Generate sampler-isolated timing rows:
+Generate isolated sampler timing rows:
 
 ```sh
 make -C Reference_Implementation sampler-bench
@@ -522,29 +540,67 @@ warm trials per supported `logn`:
 E8_SAMPLER_BENCH_TRIALS=1000 make -C Reference_Implementation sampler-bench E8_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0'
 ```
 
-This benchmark emits sampler-scope and signature-scope rows.  The current row
-types are:
+The `sampler-bench` target runs the selected benchmark sampler configuration in
+fresh child processes:
+
+```text
+n=256:  threads=4, rng_mode=per_worker
+n=512:  threads=4, rng_mode=per_worker
+n=1024: threads=8, rng_mode=per_worker
+```
+
+The full exploratory matrix is still available explicitly, and single
+configurations can also be run directly after building the benchmark binary:
+
+```sh
+make -C Reference_Implementation bin/e8_sampler_bench
+Reference_Implementation/bin/e8_sampler_bench --selected-configs --trials 50 --warmups 1
+Reference_Implementation/bin/e8_sampler_bench --isolated-matrix --trials 50 --warmups 1
+Reference_Implementation/bin/e8_sampler_bench --single-hawk-sampler --logn 10 --trials 50
+Reference_Implementation/bin/e8_sampler_bench --single-config --logn 10 --threads 8 --worker-mode spin --rng-mode per_worker --trials 50 --warmups 1
+```
+
+The default isolated sampler benchmark emits sampler-scope rows:
 
 ```text
 hawk_sampler
-e8_sampler_cached_cold_full
 e8_sampler_cached_warm_block
+```
+
+The `sign-bench` target emits signature-scope rows:
+
+```text
 hawk_sign
 e8_sign_sampler_cached
 ```
 
-`hawk_sampler` times the ordinary HAWK signing sampler.  The ordinary sampler
-produces a full `2n` scalar batch internally, so `cycles_total` is the full
-sampler call and `cycles_per_unit` is amortized to one eight-scalar unit.
+`hawk_sampler` times the ordinary HAWK signing sampler.  The worker and RNG
+columns are left empty/zero because ordinary HAWK sampler behaviour is
+unchanged.  The ordinary sampler produces a full `2n` scalar batch internally,
+so `cycles_total` is the full sampler call and `cycles_per_unit` is amortized
+to one eight-scalar unit.
 
-`e8_sampler_cached_cold_full` times one full
-`e8_sample_z_construction_a_cm` call including lazy cache warm-up for that
-`sigma_sign`.  This row is a startup-cost diagnostic, not the intended
-steady-state sampler comparison.  `e8_sampler_cached_warm_block` also times the
-full `e8_sample_z_construction_a_cm` call, but with the cache already warm; its
-name is historical, and its per-unit columns are amortized over the `n/4` E8
-blocks.  Thus the E8 sampler row's `cycles_total` is now a full-dimension
-sampler measurement, not a single-block measurement.
+`e8_sampler_cached_warm_block` times one full
+`e8_sample_z_construction_a_cm` call with the cache warmed before the measured
+sample.  Its per-unit columns are amortized over the `n/4` E8 blocks, so
+`cycles_total` is a full-dimension sampler measurement, not a single-block
+measurement.  E8 sampler rows use one serial `threads_requested = 1` baseline,
+then spin-pool rows for
+`threads_requested = 2, 4, 8, 12, 16, 24` with `rng_mode = per_block` and
+`per_worker` only when the explicit `--isolated-matrix` mode is requested.
+The default `sampler-bench`, `sign-bench`, and `profile-sign-bench` targets use
+the selected benchmark sampler configuration above.  `threads_used` records the
+resolved count after capping, and
+`speedup_vs_threads_1` compares each row with the same trial's one-thread E8
+sampler baseline.  In isolated matrix mode, that baseline is collected
+from a fresh serial child process for the same `logn` and trial index, and the
+parent process patches the speedup column while merging child CSV output.
+The sampler profile columns break out master-seed generation, RNG stream
+initialisation, cached block sampling, worker dispatch, worker wait/completion,
+and norm/statistic reduction.
+The sampler benchmark CSV is timing-focused: it omits per-row block labels,
+coset labels, and sampled norms.  Use `test_e8_sampler`, `e8_histograms`, or
+`e8_rejection_summary` for coset and norm diagnostics.
 
 `hawk_sign` times ordinary compressed HAWK signing through
 `hawk_sign_finish`, with key generation and message setup outside the timed
@@ -552,8 +608,8 @@ region.  `e8_sign_sampler_cached` times the experimental uncompressed
 HAWK-E8-CM signing path through `e8_sign_sampler_trace_timed_uncompressed`,
 again with setup outside the timed region and with the E8 sampler cache warm.
 These two `signature` rows are the closest signature-level comparison, though
-they still compare ordinary compressed HAWK with the experimental uncompressed
-E8 path.
+they compare ordinary compressed HAWK with the experimental uncompressed E8
+path.
 
 For signature-only runs over `logn = 8, 9, 10`:
 
@@ -599,6 +655,30 @@ For example:
 E8_REJECTION_LOGN=10 E8_REJECTION_TRIALS=10000 E8_REJECTION_KEYS=5 make -C Reference_Implementation e8-rejection-summary
 ```
 
+### Summary of Tests
+
+Core Correctness:
+
+- make -C Reference_Implementation test-e8
+	- test_e8_math
+	- test_e8_public
+	- test_e8_verify
+	- test_e8_sign
+	- test_e8_sampler
+	- test_e8_sign_sampler
+
+Benchmarks:
+
+- make -C Reference_Implementation sampler-bench
+- make -C Reference_Implementation sign-bench
+- make -C Reference_Implementation profile-sign-bench
+
+
+Diagnostics / CSV Validation:
+
+- make -C Reference_Implementation e8-histograms
+- make -C Reference_Implementation e8-rejection-summary
+
 ## Known Limitations
 
 - Floating-point sampler.
@@ -609,7 +689,6 @@ E8_REJECTION_LOGN=10 E8_REJECTION_TRIALS=10000 E8_REJECTION_KEYS=5 make -C Refer
 - First use of a new `sigma_sign` pays the cache-build cost.  Static
   pregenerated tables could remove that startup wait, but they are not
   implemented in this repository.
-- The previous bounded/truncated sampler remains only as a baseline.
 - Data-dependent, non-constant-time sampling and signing paths.
 - No AVX2 E8 implementation.
 - No compressed E8 public key or signature format.
@@ -619,6 +698,6 @@ E8_REJECTION_LOGN=10 E8_REJECTION_TRIALS=10000 E8_REJECTION_KEYS=5 make -C Refer
 - No side-channel hardening.
 - No production E8 key format. Tests use expanded `f,g,F,G` from
   `Hawk_keygen`.
-- The verifier uses the E8 completion-of-squares norm. Tests still compare it
-  with the expanded direct norm; compact public-key reconstruction from
+- The verifier uses the E8 completion-of-squares norm. Tests compare it with
+  the expanded direct norm; compact public-key reconstruction from
   `qtilde00,qtilde01` is not implemented.

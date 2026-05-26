@@ -22,7 +22,6 @@ typedef struct {
 	unsigned logn;
 	double sigma_sign;
 	double sigma_verify;
-	int sampler_bound;
 	unsigned max_attempts;
 } run_param;
 
@@ -60,9 +59,9 @@ typedef struct {
 } summary_row;
 
 static const run_param PARAMS[] = {
-	{ 8,  1.25, 1.06, 2, 1000 },
-	{ 9,  1.28, 1.42, 2, 1000 },
-	{ 10, 1.30, 1.57, 2, 1000 }
+	{ 8,  1.25, 1.06, 1000 },
+	{ 9,  1.28, 1.42, 1000 },
+	{ 10, 1.30, 1.57, 1000 }
 };
 
 static uint64_t
@@ -472,8 +471,7 @@ collect_one_key(FILE *fp, const run_param *param,
 			sig, sig_len, &sc_data, hpub, hpub_len,
 			f, g, F, G, salt,
 			param->sigma_sign, param->sigma_verify,
-			param->sampler_bound, param->max_attempts,
-			summary_rng, rng_state,
+			param->max_attempts, summary_rng, rng_state,
 			z0, z1, &pnorm, &attempts, &trace);
 		sign_w1 = wall_ns();
 		sign_c1 = cycles_end();
@@ -540,7 +538,7 @@ collect_one_key(FILE *fp, const run_param *param,
 
 	fprintf(fp,
 		"%u,%u,%u,%u,%llu,%llu,%llu,%.17g,%u,"
-		"%.17g,%.17g,%d,%lld,"
+		"%.17g,%.17g,%lld,"
 		"%lld,%.17g,%.17g,%lld,"
 		"%lld,%.17g,%.17g,%lld,"
 		"%lld,%.17g,%lld,"
@@ -551,8 +549,7 @@ collect_one_key(FILE *fp, const run_param *param,
 		(unsigned long long)row.total_attempts,
 		(unsigned long long)total_rejected,
 		rejection_rate, row.max_observed_attempts,
-		param->sigma_sign, param->sigma_verify, param->sampler_bound,
-		(long long)verify_bound,
+		param->sigma_sign, param->sigma_verify, (long long)verify_bound,
 		(long long)stat_i64_min(&row.pnorm), row.pnorm.mean,
 		stat_i64_variance(&row.pnorm),
 		(long long)stat_i64_max(&row.pnorm),
@@ -584,8 +581,8 @@ write_header(FILE *fp)
 	fprintf(fp,
 		"logn,n,key_index,trials,accepted,total_attempts,"
 		"total_rejected_attempts,empirical_rejection_rate,"
-		"max_attempts,sigma_sign,sigma_verify,sampler_bound,"
-		"verify_bound,pnorm_min,pnorm_mean,pnorm_variance,"
+		"max_attempts,sigma_sign,sigma_verify,verify_bound,"
+		"pnorm_min,pnorm_mean,pnorm_variance,"
 		"pnorm_max,qnorm_min,qnorm_mean,qnorm_variance,qnorm_max,"
 		"norm_margin_min,norm_margin_mean,norm_margin_max,"
 		"coset_failures,norm_mismatch_failures,verify_failures,"

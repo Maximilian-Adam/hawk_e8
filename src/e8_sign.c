@@ -459,7 +459,7 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 	const void *hpub, size_t hpub_len,
 	const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G, const uint8_t *salt,
-	double sigma_sign, double sigma_verify, int sampler_bound,
+	double sigma_sign, double sigma_verify,
 	unsigned max_attempts, hawk_rng rng, void *rng_context,
 	int32_t *trace_z0, int32_t *trace_z1,
 	int64_t *trace_pnorm, unsigned *trace_attempts,
@@ -495,7 +495,7 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 		|| sig == NULL || sc_data == NULL || hpub == NULL
 		|| f == NULL || g == NULL || F == NULL || G == NULL
 		|| salt == NULL || sigma_sign <= 0.0 || sigma_verify <= 0.0
-		|| sampler_bound < 1 || max_attempts == 0 || rng == NULL)
+		|| max_attempts == 0 || rng == NULL)
 	{
 		return 0;
 	}
@@ -674,14 +674,14 @@ e8_sign_sampler_trace_uncompressed(unsigned logn,
 	const void *hpub, size_t hpub_len,
 	const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G, const uint8_t *salt,
-	double sigma_sign, double sigma_verify, int sampler_bound,
+	double sigma_sign, double sigma_verify,
 	unsigned max_attempts, hawk_rng rng, void *rng_context,
 	int32_t *trace_z0, int32_t *trace_z1,
 	int64_t *trace_pnorm, unsigned *trace_attempts)
 {
 	return e8_sign_sampler_trace_timed_uncompressed(logn,
 		sig, sig_len, sc_data, hpub, hpub_len,
-		f, g, F, G, salt, sigma_sign, sigma_verify, sampler_bound,
+		f, g, F, G, salt, sigma_sign, sigma_verify,
 		max_attempts, rng, rng_context, trace_z0, trace_z1,
 		trace_pnorm, trace_attempts, NULL);
 }
@@ -693,13 +693,13 @@ e8_sign_sampler_uncompressed(unsigned logn,
 	const void *hpub, size_t hpub_len,
 	const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G, const uint8_t *salt,
-	double sigma_sign, double sigma_verify, int sampler_bound,
+	double sigma_sign, double sigma_verify,
 	unsigned max_attempts, hawk_rng rng, void *rng_context)
 {
 	return e8_sign_sampler_trace_uncompressed(logn,
 		sig, sig_len, sc_data, hpub, hpub_len, f, g, F, G, salt,
-		sigma_sign, sigma_verify, sampler_bound,
-		max_attempts, rng, rng_context, NULL, NULL, NULL, NULL);
+		sigma_sign, sigma_verify, max_attempts,
+		rng, rng_context, NULL, NULL, NULL, NULL);
 }
 
 #endif

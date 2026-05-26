@@ -7,7 +7,6 @@
 #include "../hawk_e8_inner.h"
 
 #define MAXN   1024
-#define E8_SIGN_TEST_MAX_SAMPLER_BOUND   16
 
 typedef struct {
 	unsigned logn;
@@ -15,7 +14,6 @@ typedef struct {
 	unsigned sign_trials;
 	double sigma_sign;
 	double sigma_verify;
-	int sampler_bound;
 	unsigned max_attempts;
 } e8_sign_param;
 
@@ -25,41 +23,10 @@ typedef struct {
  * they are not final parameter calibration claims.
  */
 static const e8_sign_param PARAMS[] = {
-	{ 8,  3, 3, 1.25, 1.06, 2, 1000 },
-	{ 9,  2, 2, 1.28, 1.42, 2, 1000 },
-	{ 10, 2, 2, 1.30, 1.57, 2, 1000 }
+	{ 8,  3, 3, 1.25, 1.06, 1000 },
+	{ 9,  2, 2, 1.28, 1.42, 1000 },
+	{ 10, 2, 2, 1.30, 1.57, 1000 }
 };
-
-static int
-parse_bound_override(int *bound, int *is_set)
-{
-	const char *env = getenv("E8_SIGN_TEST_BOUND");
-
-	*is_set = 0;
-	if (env == NULL) {
-		return 1;
-	}
-	if (env[0] == 0) {
-		fprintf(stderr,
-			"ERR: E8_SIGN_TEST_BOUND must be a positive integer"
-			" in [1,%d]\n", E8_SIGN_TEST_MAX_SAMPLER_BOUND);
-		return 0;
-	}
-	char *end = NULL;
-	unsigned long x = strtoul(env, &end, 10);
-	if (end == env || *end != 0 || x == 0
-		|| x > E8_SIGN_TEST_MAX_SAMPLER_BOUND)
-	{
-		fprintf(stderr,
-			"ERR: E8_SIGN_TEST_BOUND must be a positive integer"
-			" in [1,%d], got '%s'\n",
-			E8_SIGN_TEST_MAX_SAMPLER_BOUND, env);
-		return 0;
-	}
-	*bound = (int)x;
-	*is_set = 1;
-	return 1;
-}
 
 static uint64_t
 rng_next_u64(uint64_t *state)
@@ -460,7 +427,7 @@ check_sampler_trace(const e8_sign_param *param,
 
 static int
 test_unsupported_logn(const int8_t *f, const int8_t *g,
-	const int8_t *F, const int8_t *G, int sampler_bound)
+	const int8_t *F, const int8_t *G)
 {
 	uint8_t sig[40 + 4 * MAXN], hpub[64], salt[40];
 	shake_context sc_data;
@@ -472,8 +439,7 @@ test_unsupported_logn(const int8_t *f, const int8_t *g,
 	if (e8_sign_sampler_uncompressed(7,
 		sig, 0, &sc_data, hpub, 16, f, g, F, G, salt,
 		PARAMS[0].sigma_sign, PARAMS[0].sigma_verify,
-		sampler_bound, PARAMS[0].max_attempts,
-		test_rng, &rng_state))
+		PARAMS[0].max_attempts, test_rng, &rng_state))
 	{
 		fprintf(stderr, "ERR: sampled E8 signer accepted logn=7\n");
 		return 0;
@@ -482,7 +448,7 @@ test_unsupported_logn(const int8_t *f, const int8_t *g,
 }
 
 static int
-test_sampler_signing_logn(const e8_sign_param *param, int sampler_bound)
+test_sampler_signing_logn(const e8_sign_param *param)
 {
 	unsigned logn = param->logn;
 	size_t sig_len = e8_sig_uncompressed_size(logn);
@@ -496,16 +462,13 @@ test_sampler_signing_logn(const e8_sign_param *param, int sampler_bound)
 	uint8_t hpub[64], salt[40];
 	int32_t z0[MAXN], z1[MAXN];
 
-	printf("E8 sampler signer n=%u bound=%d:\n",
-		1u << logn, sampler_bound);
+	printf("E8 sampler signer n=%u:\n", 1u << logn);
 	if (!make_basis(logn, f, g, F, G, &rng_state)) {
 		fprintf(stderr, "ERR: initial Hawk_keygen failed logn=%u\n",
 			logn);
 		return 0;
 	}
-	if (logn == 8 && !test_unsupported_logn(f, g, F, G,
-		sampler_bound))
-	{
+	if (logn == 8 && !test_unsupported_logn(f, g, F, G)) {
 		return 0;
 	}
 
@@ -524,15 +487,17 @@ test_sampler_signing_logn(const e8_sign_param *param, int sampler_bound)
 			int64_t pnorm;
 			int64_t threshold;
 			unsigned attempts;
+			unsigned sampler_threads = (trial & 1u) == 0 ? 1 : 4;
 
 			make_salt(salt, salt_len, logn, keynum, trial);
 			make_message_context(&sc_data, logn, keynum, trial, 0);
+			e8_sampler_set_thread_count(sampler_threads);
 			if (!e8_sign_sampler_trace_uncompressed(logn,
 				sig, sig_len, &sc_data, hpub, hpub_len,
 				f, g, F, G, salt,
 				param->sigma_sign, param->sigma_verify,
-				sampler_bound, param->max_attempts,
-				test_rng, &rng_state, z0, z1, &pnorm, &attempts))
+				param->max_attempts, test_rng, &rng_state,
+				z0, z1, &pnorm, &attempts))
 			{
 				fprintf(stderr,
 					"ERR: sampled E8 signing failed"
@@ -541,9 +506,9 @@ test_sampler_signing_logn(const e8_sign_param *param, int sampler_bound)
 				return 0;
 			}
 
-			printf("  key=%u trial=%u bound=%d attempts=%u"
-				" pnorm=%lld\n",
-				keynum, trial, sampler_bound, attempts,
+			printf("  key=%u trial=%u threads=%u"
+				" attempts=%u pnorm=%lld\n",
+				keynum, trial, sampler_threads, attempts,
 				(long long)pnorm);
 			if (!e8_verify_bound_from_sigma(logn,
 				param->sigma_verify, &threshold)
@@ -608,27 +573,20 @@ test_sampler_signing_logn(const e8_sign_param *param, int sampler_bound)
 		}
 	}
 
+	e8_sampler_set_thread_count(1);
 	printf("E8 sampler signer n=%u summary: signatures=%u"
 		" total_attempts=%u max_seen=%u sigma_sign=%.2f"
-		" sigma_verify=%.2f bound=%d\n",
+		" sigma_verify=%.2f\n",
 		1u << logn, sig_count, total_attempts, max_seen,
-		param->sigma_sign, param->sigma_verify, sampler_bound);
+		param->sigma_sign, param->sigma_verify);
 	return 1;
 }
 
 int
 main(void)
 {
-	int bound_override = 0;
-	int has_bound_override = 0;
-
-	if (!parse_bound_override(&bound_override, &has_bound_override)) {
-		return 1;
-	}
 	for (size_t u = 0; u < sizeof PARAMS / sizeof PARAMS[0]; u ++) {
-		int sampler_bound = has_bound_override
-			? bound_override : PARAMS[u].sampler_bound;
-		if (!test_sampler_signing_logn(&PARAMS[u], sampler_bound)) {
+		if (!test_sampler_signing_logn(&PARAMS[u])) {
 			return 1;
 		}
 	}
