@@ -34,6 +34,10 @@
 #define HAWK_E8_DEBUG_CHECKS   1
 #endif
 
+#ifndef HAWK_E8_PROFILE_SAMPLER
+#define HAWK_E8_PROFILE_SAMPLER   1
+#endif
+
 #ifndef HAWK_E8_SAMPLER_THREADS
 #define HAWK_E8_SAMPLER_THREADS 1
 #endif
@@ -266,6 +270,8 @@ rng_stream_double(e8_rng_stream *stream)
 	return (double)(x >> 11) * 0x1.0p-53;
 }
 
+#if HAWK_E8_PROFILE_SAMPLER
+
 static uint64_t
 e8_profile_wall_ns(void)
 {
@@ -328,6 +334,20 @@ e8_profile_add(uint64_t *cycles_total, uint64_t *wall_total,
 	*cycles_total += e8_profile_delta(cycles_start, cycles_end);
 	*wall_total += e8_profile_delta(wall_start, wall_end);
 }
+
+#else
+
+#define e8_profile_wall_ns()          ((uint64_t)0)
+#define e8_profile_cycles_start()     ((uint64_t)0)
+#define e8_profile_add(ct, wt, cs, ws) \
+	do { \
+		(void)(ct); \
+		(void)(wt); \
+		(void)(cs); \
+		(void)(ws); \
+	} while (0)
+
+#endif
 
 /* see hawk_e8_inner.h */
 void

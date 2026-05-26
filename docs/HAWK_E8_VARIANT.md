@@ -333,9 +333,14 @@ checks used by the test builds.  Benchmark or release builds may compile with
 Keep the default at `1` for development and correctness tests.  For
 sampler-speed comparisons against ordinary HAWK, rebuild the E8 benchmark with
 `-DHAWK_E8_DEBUG_CHECKS=0`; these checks are prototype assertions rather than
-part of the sampler contract.  In local measurements this changed the
-sampler-only gap from roughly `1.8x` slower than HAWK to roughly `1.4x`, so
-benchmark notes should record whether debug checks were enabled.
+part of the sampler contract.
+
+The internal macro `HAWK_E8_PROFILE_SAMPLER` defaults to `1`.  It enables the
+sampler-internal profiling counters for master-seed generation, RNG setup,
+cached block sampling, worker dispatch/wait, and reduction.  Compile with
+`-DHAWK_E8_PROFILE_SAMPLER=0` for cleaner speed measurements; the benchmark
+still times the outer sampler call, but the CSV profiling breakdown columns are
+zero.
 
 All sampler paths are experimental, floating-point, data-dependent, and
 non-constant-time. They are not suitable for deployment.
@@ -526,18 +531,19 @@ Generate isolated sampler timing rows:
 make -C Reference_Implementation sampler-bench
 ```
 
-For sampler-speed comparisons, disable E8 debug consistency checks explicitly:
+For sampler-speed comparisons, disable E8 debug consistency checks and
+sampler-internal profiling explicitly:
 
 ```sh
 make -C Reference_Implementation clean
-make -C Reference_Implementation sampler-bench E8_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0'
+make -C Reference_Implementation sampler-bench E8_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0 -DHAWK_E8_PROFILE_SAMPLER=0'
 ```
 
 For a longer run, set `E8_SAMPLER_BENCH_TRIALS`; for example, this runs 1000
 warm trials per supported `logn`:
 
 ```sh
-E8_SAMPLER_BENCH_TRIALS=1000 make -C Reference_Implementation sampler-bench E8_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0'
+E8_SAMPLER_BENCH_TRIALS=1000 make -C Reference_Implementation sampler-bench E8_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0 -DHAWK_E8_PROFILE_SAMPLER=0'
 ```
 
 The `sampler-bench` target runs the selected benchmark sampler configuration in
