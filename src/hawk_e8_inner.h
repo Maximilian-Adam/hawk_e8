@@ -7,6 +7,10 @@
 #define HAWK_ENABLE_E8_EXPERIMENTAL   0
 #endif
 
+#ifndef HAWK_E8_PROFILE_SIGN
+#define HAWK_E8_PROFILE_SIGN   0
+#endif
+
 #if HAWK_ENABLE_E8_EXPERIMENTAL
 
 #ifndef HAWK_E8_DEBUG_CHECKS
@@ -82,6 +86,22 @@ typedef struct {
 	uint64_t cycles_sample_last;
 	uint64_t wall_ns_sample_total;
 	uint64_t wall_ns_sample_last;
+#if HAWK_E8_PROFILE_SIGN
+	uint64_t cycles_sign_total;
+	uint64_t cycles_hash_total;
+	uint64_t cycles_target_total;
+	uint64_t cycles_reconstruct_total;
+	uint64_t cycles_norm_check_total;
+	uint64_t cycles_encode_total;
+	uint64_t wall_ns_sign_total;
+	uint64_t wall_ns_hash_total;
+	uint64_t wall_ns_target_total;
+	uint64_t wall_ns_reconstruct_total;
+	uint64_t wall_ns_norm_check_total;
+	uint64_t wall_ns_encode_total;
+	uint64_t attempts_total;
+	uint64_t rejections_total;
+#endif
 } e8_sign_trace_timing;
 
 void e8_apply_P(int32_t *out0, int32_t *out1,

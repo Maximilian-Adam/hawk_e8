@@ -83,6 +83,41 @@ trace_wall_delta(uint64_t t0, uint64_t t1)
 	return t1 - t0;
 }
 
+#if HAWK_E8_PROFILE_SIGN
+static void
+sign_profile_stage_start(uint64_t *cycles_start, uint64_t *wall_start)
+{
+	*cycles_start = trace_cycles_start();
+	*wall_start = trace_wall_ns();
+}
+
+static void
+sign_profile_stage_add(uint64_t *cycles_total, uint64_t *wall_total,
+	uint64_t cycles_start, uint64_t wall_start)
+{
+	uint64_t wall_end = trace_wall_ns();
+	uint64_t cycles_end = trace_cycles_end();
+
+	*cycles_total += trace_cycles_delta(cycles_start, cycles_end);
+	*wall_total += trace_wall_delta(wall_start, wall_end);
+}
+
+static void
+sign_profile_finish(e8_sign_trace_timing *trace_timing,
+	uint64_t cycles_start, uint64_t wall_start)
+{
+	if (trace_timing != NULL && (cycles_start != 0 || wall_start != 0)) {
+		uint64_t wall_end = trace_wall_ns();
+		uint64_t cycles_end = trace_cycles_end();
+
+		trace_timing->cycles_sign_total +=
+			trace_cycles_delta(cycles_start, cycles_end);
+		trace_timing->wall_ns_sign_total +=
+			trace_wall_delta(wall_start, wall_end);
+	}
+}
+#endif
+
 static unsigned
 get_bit(const uint8_t *buf, size_t u)
 {
@@ -436,6 +471,11 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 	int32_t z0[E8_MAXN], z1[E8_MAXN];
 	int16_t s0[E8_MAXN], s1[E8_MAXN];
 	int64_t threshold;
+	size_t n;
+#if HAWK_E8_PROFILE_SIGN
+	uint64_t sign_c0 = 0, sign_w0 = 0;
+	uint64_t stage_c0 = 0, stage_w0 = 0;
+#endif
 
 	if (trace_timing != NULL) {
 		memset(trace_timing, 0, sizeof *trace_timing);
@@ -459,22 +499,56 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 	{
 		return 0;
 	}
+	n = (size_t)1 << logn;
+#if HAWK_E8_PROFILE_SIGN
+	if (trace_timing != NULL) {
+		sign_profile_stage_start(&sign_c0, &sign_w0);
+	}
+#endif
 	if (!e8_verify_bound_from_sigma(logn, sigma_verify, &threshold)) {
+#if HAWK_E8_PROFILE_SIGN
+		sign_profile_finish(trace_timing, sign_c0, sign_w0);
+#endif
 		return 0;
 	}
 
-	size_t n = (size_t)1 << logn;
+#if HAWK_E8_PROFILE_SIGN
+	if (trace_timing != NULL) {
+		sign_profile_stage_start(&stage_c0, &stage_w0);
+	}
+#endif
 	hash_to_h(logn, h, sc_data, hpub, salt, salt_len);
 	bits_to_poly(z0, h0b, h, 0, n);
 	bits_to_poly(z1, h1b, h, n, n);
+#if HAWK_E8_PROFILE_SIGN
+	if (trace_timing != NULL) {
+		sign_profile_stage_add(&trace_timing->cycles_hash_total,
+			&trace_timing->wall_ns_hash_total,
+			stage_c0, stage_w0);
+		sign_profile_stage_start(&stage_c0, &stage_w0);
+	}
+#endif
 	compute_t_mod2(t0, t1, f, g, F, G, h0b, h1b, n);
+#if HAWK_E8_PROFILE_SIGN
+	if (trace_timing != NULL) {
+		sign_profile_stage_add(&trace_timing->cycles_target_total,
+			&trace_timing->wall_ns_target_total,
+			stage_c0, stage_w0);
+	}
+#endif
 
 	for (unsigned attempt = 0; attempt < max_attempts; attempt ++) {
 		uint64_t sample_c0, sample_c1, sample_w0, sample_w1;
 		uint64_t pnorm_u;
 		int64_t pnorm;
 		int sr;
+		int rejected;
 
+#if HAWK_E8_PROFILE_SIGN
+		if (trace_timing != NULL) {
+			trace_timing->attempts_total ++;
+		}
+#endif
 		sample_c0 = trace_cycles_start();
 		sample_w0 = trace_wall_ns();
 		int sample_ok = e8_sample_z_construction_a_cm(z0, z1, &pnorm_u,
@@ -493,23 +567,77 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 			trace_timing->wall_ns_sample_last = sample_wall;
 		}
 		if (!sample_ok) {
+#if HAWK_E8_PROFILE_SIGN
+			sign_profile_finish(trace_timing, sign_c0, sign_w0);
+#endif
 			return 0;
 		}
 		if (pnorm_u > (uint64_t)INT64_MAX) {
+#if HAWK_E8_PROFILE_SIGN
+			sign_profile_finish(trace_timing, sign_c0, sign_w0);
+#endif
 			return 0;
 		}
 		pnorm = (int64_t)pnorm_u;
+#if HAWK_E8_PROFILE_SIGN
+		if (trace_timing != NULL) {
+			sign_profile_stage_start(&stage_c0, &stage_w0);
+		}
+#endif
 		sr = compute_s_from_sample(s0, s1, t0, t1, h0b, h1b,
 			f, g, F, G, z0, z1, n);
+#if HAWK_E8_PROFILE_SIGN
+		if (trace_timing != NULL) {
+			sign_profile_stage_add(
+				&trace_timing->cycles_reconstruct_total,
+				&trace_timing->wall_ns_reconstruct_total,
+				stage_c0, stage_w0);
+		}
+#endif
 		if (sr < 0) {
+#if HAWK_E8_PROFILE_SIGN
+			sign_profile_finish(trace_timing, sign_c0, sign_w0);
+#endif
 			return 0;
 		}
-		if (sr == 0 || pnorm > threshold) {
+#if HAWK_E8_PROFILE_SIGN
+		if (trace_timing != NULL) {
+			sign_profile_stage_start(&stage_c0, &stage_w0);
+		}
+#endif
+		rejected = (sr == 0 || pnorm > threshold);
+#if HAWK_E8_PROFILE_SIGN
+		if (trace_timing != NULL) {
+			sign_profile_stage_add(
+				&trace_timing->cycles_norm_check_total,
+				&trace_timing->wall_ns_norm_check_total,
+				stage_c0, stage_w0);
+			if (rejected) {
+				trace_timing->rejections_total ++;
+			}
+		}
+#endif
+		if (rejected) {
 			continue;
 		}
-		if (!e8_encode_sig_uncompressed(logn,
-			sig, sig_len, salt, s0, s1))
-		{
+#if HAWK_E8_PROFILE_SIGN
+		if (trace_timing != NULL) {
+			sign_profile_stage_start(&stage_c0, &stage_w0);
+		}
+#endif
+		int encode_ok = e8_encode_sig_uncompressed(logn,
+			sig, sig_len, salt, s0, s1);
+#if HAWK_E8_PROFILE_SIGN
+		if (trace_timing != NULL) {
+			sign_profile_stage_add(&trace_timing->cycles_encode_total,
+				&trace_timing->wall_ns_encode_total,
+				stage_c0, stage_w0);
+		}
+#endif
+		if (!encode_ok) {
+#if HAWK_E8_PROFILE_SIGN
+			sign_profile_finish(trace_timing, sign_c0, sign_w0);
+#endif
 			return 0;
 		}
 		if (trace_z0 != NULL) {
@@ -524,12 +652,18 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 		if (trace_attempts != NULL) {
 			*trace_attempts = attempt + 1;
 		}
+#if HAWK_E8_PROFILE_SIGN
+		sign_profile_finish(trace_timing, sign_c0, sign_w0);
+#endif
 		return 1;
 	}
 
 	if (trace_attempts != NULL) {
 		*trace_attempts = max_attempts;
 	}
+#if HAWK_E8_PROFILE_SIGN
+	sign_profile_finish(trace_timing, sign_c0, sign_w0);
+#endif
 	return 0;
 }
 

@@ -555,6 +555,20 @@ These two `signature` rows are the closest signature-level comparison, though
 they still compare ordinary compressed HAWK with the experimental uncompressed
 E8 path.
 
+For signature-only runs over `logn = 8, 9, 10`:
+
+```sh
+make -C Reference_Implementation sign-bench
+make -C Reference_Implementation profile-sign-bench
+```
+
+The first command writes `Reference_Implementation/e8_sign_bench.csv` with the
+normal `hawk_sign` and `e8_sign_sampler_cached` rows.  The second builds the same
+benchmark with `HAWK_E8_PROFILE_SIGN=1` and prints a per-stage E8 signing
+summary to the terminal without writing a CSV file.  The summary reports
+hash/challenge generation, mod-2 target/coset computation, E8 sampling,
+reconstruction, norm/rejection logic, encoding, and attempts/rejections.
+
 `E8_SAMPLER_BENCH_TRIALS` controls the number of warm HAWK/E8 trials per
 `logn`, and the target writes
 `Reference_Implementation/e8_sampler_bench.csv`.

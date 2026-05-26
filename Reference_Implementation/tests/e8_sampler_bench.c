@@ -40,6 +40,32 @@
 #define DEFAULT_BENCH_TRIALS         16
 #define MAX_BENCH_TRIALS             1000000
 
+#if HAWK_E8_PROFILE_SIGN
+typedef struct {
+	uint64_t trials;
+	uint64_t accepted;
+	uint64_t failed;
+	uint64_t attempts;
+	uint64_t rejections;
+	uint64_t cycles_total;
+	uint64_t cycles_hash;
+	uint64_t cycles_target;
+	uint64_t cycles_sample;
+	uint64_t cycles_reconstruct;
+	uint64_t cycles_norm_check;
+	uint64_t cycles_encode;
+	uint64_t wall_ns_total;
+	uint64_t wall_ns_hash;
+	uint64_t wall_ns_target;
+	uint64_t wall_ns_sample;
+	uint64_t wall_ns_reconstruct;
+	uint64_t wall_ns_norm_check;
+	uint64_t wall_ns_encode;
+} bench_sign_profile_totals;
+
+static bench_sign_profile_totals sign_profile_totals[11];
+#endif
+
 typedef struct {
 	uint64_t state;
 } bench_rng_state;
@@ -245,6 +271,158 @@ get_trials(void)
 	}
 	return (unsigned)x;
 }
+
+static int
+get_sign_only(void)
+{
+	const char *env = getenv("E8_SAMPLER_BENCH_SIGN_ONLY");
+
+	return env != NULL && env[0] != 0 && strcmp(env, "0") != 0;
+}
+
+#if HAWK_E8_PROFILE_SIGN
+static uint64_t
+profile_avg(uint64_t total, uint64_t count)
+{
+	if (total == 0 || count == 0) {
+		return 0;
+	}
+	return total / count;
+}
+
+static double
+profile_percent(uint64_t part, uint64_t total)
+{
+	if (part == 0 || total == 0) {
+		return 0.0;
+	}
+	return 100.0 * (double)part / (double)total;
+}
+
+static void
+profile_add(unsigned logn, int accepted, unsigned attempts,
+	const e8_sign_trace_timing *timing)
+{
+	bench_sign_profile_totals *total;
+
+	if (logn > 10 || timing == NULL) {
+		return;
+	}
+	total = &sign_profile_totals[logn];
+	total->trials ++;
+	if (accepted) {
+		total->accepted ++;
+	} else {
+		total->failed ++;
+	}
+	total->attempts += timing->attempts_total != 0
+		? timing->attempts_total : attempts;
+	total->rejections += timing->rejections_total;
+	total->cycles_total += timing->cycles_sign_total;
+	total->cycles_hash += timing->cycles_hash_total;
+	total->cycles_target += timing->cycles_target_total;
+	total->cycles_sample += timing->cycles_sample_total;
+	total->cycles_reconstruct += timing->cycles_reconstruct_total;
+	total->cycles_norm_check += timing->cycles_norm_check_total;
+	total->cycles_encode += timing->cycles_encode_total;
+	total->wall_ns_total += timing->wall_ns_sign_total;
+	total->wall_ns_hash += timing->wall_ns_hash_total;
+	total->wall_ns_target += timing->wall_ns_target_total;
+	total->wall_ns_sample += timing->wall_ns_sample_total;
+	total->wall_ns_reconstruct += timing->wall_ns_reconstruct_total;
+	total->wall_ns_norm_check += timing->wall_ns_norm_check_total;
+	total->wall_ns_encode += timing->wall_ns_encode_total;
+}
+
+static void
+profile_print_stage(const char *name, uint64_t cycles, uint64_t cycles_total,
+	uint64_t wall_ns, uint64_t wall_ns_total)
+{
+	fprintf(stderr,
+		"  %-18s cycles=%12llu %6.2f%%  wall_ns=%12llu %6.2f%%\n",
+		name,
+		(unsigned long long)cycles,
+		profile_percent(cycles, cycles_total),
+		(unsigned long long)wall_ns,
+		profile_percent(wall_ns, wall_ns_total));
+}
+
+static void
+profile_print_summary(void)
+{
+	fprintf(stderr,
+		"\nHAWK_E8_PROFILE_SIGN summary "
+		"(e8_sign_sampler_trace_timed_uncompressed)\n");
+	for (unsigned logn = 8; logn <= 10; logn ++) {
+		const bench_sign_profile_totals *total =
+			&sign_profile_totals[logn];
+		uint64_t stage_cycles, stage_wall_ns;
+		uint64_t other_cycles = 0, other_wall_ns = 0;
+
+		if (total->trials == 0) {
+			continue;
+		}
+		stage_cycles = total->cycles_hash
+			+ total->cycles_target
+			+ total->cycles_sample
+			+ total->cycles_reconstruct
+			+ total->cycles_norm_check
+			+ total->cycles_encode;
+		stage_wall_ns = total->wall_ns_hash
+			+ total->wall_ns_target
+			+ total->wall_ns_sample
+			+ total->wall_ns_reconstruct
+			+ total->wall_ns_norm_check
+			+ total->wall_ns_encode;
+		if (total->cycles_total > stage_cycles) {
+			other_cycles = total->cycles_total - stage_cycles;
+		}
+		if (total->wall_ns_total > stage_wall_ns) {
+			other_wall_ns = total->wall_ns_total - stage_wall_ns;
+		}
+
+		fprintf(stderr,
+			"logn=%u n=%u trials=%llu accepted=%llu failed=%llu "
+			"attempts=%llu rejections=%llu\n",
+			logn, 1u << logn,
+			(unsigned long long)total->trials,
+			(unsigned long long)total->accepted,
+			(unsigned long long)total->failed,
+			(unsigned long long)total->attempts,
+			(unsigned long long)total->rejections);
+		fprintf(stderr,
+			"  total cycles=%llu wall_ns=%llu "
+			"avg_cycles/sign=%llu avg_wall_ns/sign=%llu\n",
+			(unsigned long long)total->cycles_total,
+			(unsigned long long)total->wall_ns_total,
+			(unsigned long long)profile_avg(total->cycles_total,
+				total->trials),
+			(unsigned long long)profile_avg(total->wall_ns_total,
+				total->trials));
+		profile_print_stage("hash_challenge",
+			total->cycles_hash, total->cycles_total,
+			total->wall_ns_hash, total->wall_ns_total);
+		profile_print_stage("target_coset",
+			total->cycles_target, total->cycles_total,
+			total->wall_ns_target, total->wall_ns_total);
+		profile_print_stage("e8_sampler",
+			total->cycles_sample, total->cycles_total,
+			total->wall_ns_sample, total->wall_ns_total);
+		profile_print_stage("reconstruct_s",
+			total->cycles_reconstruct, total->cycles_total,
+			total->wall_ns_reconstruct, total->wall_ns_total);
+		profile_print_stage("norm_rejection",
+			total->cycles_norm_check, total->cycles_total,
+			total->wall_ns_norm_check, total->wall_ns_total);
+		profile_print_stage("encode_sig",
+			total->cycles_encode, total->cycles_total,
+			total->wall_ns_encode, total->wall_ns_total);
+		profile_print_stage("other",
+			other_cycles, total->cycles_total,
+			other_wall_ns, total->wall_ns_total);
+	}
+}
+#endif
 
 static uint64_t
 hawk_block_norm(const int8_t *x, unsigned block_index)
@@ -521,6 +699,9 @@ bench_e8_sign_sampler(unsigned logn, unsigned trial_index)
 
 	cycles_total = bench_cycles_delta(c0, c1);
 	wall_ns_total = bench_wall_delta(w0, w1);
+#if HAWK_E8_PROFILE_SIGN
+	profile_add(logn, accepted, attempts, &timing);
+#endif
 	write_row("e8_sign_sampler_cached", "signature", logn, 0,
 		trial_index, e8_sigma_sign(logn), 0, accepted, attempts,
 		cycles_total, accepted ? cycles_total : 0, wall_ns_total,
@@ -532,25 +713,33 @@ int
 main(void)
 {
 	unsigned trials = get_trials();
+	int sign_only = get_sign_only();
 
 	if (trials == 0) {
 		return 1;
 	}
 	write_header();
 	for (unsigned logn = 8; logn <= 10; logn ++) {
-		bench_e8_sampler_full(logn, 0, 0,
-			"e8_sampler_cached_cold_full",
-			"construction_a_cm_full_dimension_sampler_includes_lazy_cache_warmup");
+		if (!sign_only) {
+			bench_e8_sampler_full(logn, 0, 0,
+				"e8_sampler_cached_cold_full",
+				"construction_a_cm_full_dimension_sampler_includes_lazy_cache_warmup");
+		}
 		for (unsigned trial_index = 0;
 			trial_index < trials; trial_index ++)
 		{
-			bench_hawk_sampler(logn, trial_index);
-			bench_e8_sampler_full(logn, trial_index, 1,
-				"e8_sampler_cached_warm_block",
-				"construction_a_cm_cached_full_dimension_sampler_amortized_to_e8_block");
+			if (!sign_only) {
+				bench_hawk_sampler(logn, trial_index);
+				bench_e8_sampler_full(logn, trial_index, 1,
+					"e8_sampler_cached_warm_block",
+					"construction_a_cm_cached_full_dimension_sampler_amortized_to_e8_block");
+			}
 			bench_hawk_sign(logn, trial_index);
 			bench_e8_sign_sampler(logn, trial_index);
 		}
 	}
+#if HAWK_E8_PROFILE_SIGN
+	profile_print_summary();
+#endif
 	return 0;
 }

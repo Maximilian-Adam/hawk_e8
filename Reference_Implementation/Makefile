@@ -12,11 +12,13 @@ PROGS = bin/test_self bin/speed bin/test_codec bin/test_sampler
 E8_PROGS = bin/test_e8_math bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler
 E8_HIST_PROGS = bin/e8_histograms
 E8_BENCH_PROGS = bin/e8_sampler_bench
+E8_PROFILE_SIGN_PROGS = bin/e8_sign_profile_bench
 E8_REJECTION_PROGS = bin/e8_rejection_summary
 
 HEAD = hawk.h hawk_inner.h hawk_config.h sha3.h
 NG_HEAD = ng_config.h ng_inner.h sha3.h
 E8_CFLAGS = $(CFLAGS) -DHAWK_ENABLE_E8_EXPERIMENTAL=1
+E8_PROFILE_SIGN_CFLAGS = $(E8_CFLAGS) -DHAWK_E8_PROFILE_SIGN=1
 
 all: build bin $(PROGS)
 test-e8: build bin $(E8_PROGS)
@@ -31,6 +33,11 @@ e8-histograms: build bin data $(E8_HIST_PROGS)
 sampler-bench: build bin $(E8_BENCH_PROGS)
 	@./bin/e8_sampler_bench > e8_sampler_bench.csv
 	@printf 'wrote e8_sampler_bench.csv\n'
+sign-bench: build bin $(E8_BENCH_PROGS)
+	@E8_SAMPLER_BENCH_SIGN_ONLY=1 ./bin/e8_sampler_bench > e8_sign_bench.csv
+	@printf 'wrote e8_sign_bench.csv\n'
+profile-sign-bench: build bin $(E8_PROFILE_SIGN_PROGS)
+	@E8_SAMPLER_BENCH_SIGN_ONLY=1 ./bin/e8_sign_profile_bench > /dev/null
 e8-rejection-summary: build bin $(E8_REJECTION_PROGS)
 	@./bin/e8_rejection_summary > e8_rejection_summary.csv
 	@printf 'wrote e8_rejection_summary.csv\n'
@@ -43,8 +50,8 @@ data:
 	-mkdir -p data
 
 clean:
-	-rm -f $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(PROGS) $(E8_PROGS) $(E8_HIST_PROGS) $(E8_BENCH_PROGS) $(E8_REJECTION_PROGS)
-	-rm -f e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_rejection_summary.csv
+	-rm -f $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(PROGS) $(E8_PROGS) $(E8_HIST_PROGS) $(E8_BENCH_PROGS) $(E8_PROFILE_SIGN_PROGS) $(E8_REJECTION_PROGS)
+	-rm -f e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sign_bench.csv e8_sign_profile_bench.csv e8_rejection_summary.csv
 	-rm -f data/e8_hist_public.csv data/e8_hist_signatures.csv
 
 # Binaries:
@@ -72,8 +79,10 @@ bin/test_e8_sign_sampler: tests/test_e8_sign_sampler.c $(OBJ) $(E8_OBJ) $(E8_SAM
 	$(CC) $(E8_CFLAGS) -o bin/test_e8_sign_sampler tests/test_e8_sign_sampler.c $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) -lm
 bin/e8_histograms: tests/e8_histograms.c $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) -o bin/e8_histograms tests/e8_histograms.c $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) -lm
-bin/e8_sampler_bench: tests/e8_sampler_bench.c $(filter-out build/hawk_sign.o,$(OBJ)) build/e8_math.o $(E8_SAMPLER_OBJ)
+bin/e8_sampler_bench: tests/e8_sampler_bench.c hawk_sign.c e8_vrfy.c e8_sign.c hawk_e8_inner.h $(filter-out build/hawk_sign.o,$(OBJ)) build/e8_math.o $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) -o bin/e8_sampler_bench tests/e8_sampler_bench.c $(filter-out build/hawk_sign.o,$(OBJ)) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) -lm
+bin/e8_sign_profile_bench: tests/e8_sampler_bench.c hawk_sign.c e8_vrfy.c e8_sign.c hawk_e8_inner.h $(filter-out build/hawk_sign.o,$(OBJ)) build/e8_math.o $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_PROFILE_SIGN_CFLAGS) -o bin/e8_sign_profile_bench tests/e8_sampler_bench.c $(filter-out build/hawk_sign.o,$(OBJ)) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) -lm
 bin/e8_rejection_summary: tests/e8_rejection_summary.c $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) -o bin/e8_rejection_summary tests/e8_rejection_summary.c $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) -lm
 
