@@ -306,9 +306,9 @@ static double
 e8_sigma_sign(unsigned logn)
 {
 	switch (logn) {
-	case 8: return 1.25;
-	case 9: return 1.28;
-	default: return 1.30;
+	case 8: return 1.26;
+	case 9: return 1.278;
+	default: return 1.299;
 	}
 }
 
@@ -316,9 +316,9 @@ static double
 e8_sigma_verify_sign(unsigned logn)
 {
 	switch (logn) {
-	case 8: return 1.06;
-	case 9: return 1.42;
-	default: return 1.57;
+	case 8: return 0.73;
+	case 9: return 0.72;
+	default: return 0.71;
 	}
 }
 

@@ -60,7 +60,9 @@ Optimized_Implementation/avx2/*.h
 # Build directories
 **/build/
 **/bin/
-Reference_Implementation/e8_hist_*.csv
-Reference_Implementation/data/e8_hist_*.csv
+Reference_Implementation/*.csv
+Reference_Implementation/data
 
 **/NIST/
+
+.vscode/

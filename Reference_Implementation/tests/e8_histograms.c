@@ -71,9 +71,9 @@ typedef struct {
  * the Construction-A CM sampler and are not final E8 parameter claims.
  */
 static const hist_param PARAMS[] = {
-	{ 8,  1.25, 1.06, 1000 },
-	{ 9,  1.28, 1.42, 1000 },
-	{ 10, 1.30, 1.57, 1000 }
+	{ 8,  1.26,  0.73, 1000 },
+	{ 9,  1.278, 0.72, 1000 },
+	{ 10, 1.299, 0.71, 1000 }
 };
 
 static uint64_t

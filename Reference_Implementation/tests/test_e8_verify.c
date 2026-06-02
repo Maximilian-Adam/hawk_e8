@@ -21,6 +21,30 @@ next_small(uint64_t *state)
 	return (int32_t)(rng_next_u64(state) % 7u) - 3;
 }
 
+static void
+test_rng(void *ctx, void *dst, size_t len)
+{
+	uint64_t *state = ctx;
+	uint8_t *buf = dst;
+
+	for (size_t u = 0; u < len; u ++) {
+		if ((u & 7u) == 0) {
+			(void)rng_next_u64(state);
+		}
+		buf[u] = (uint8_t)(*state >> (8 * (u & 7u)));
+	}
+}
+
+static double
+sigma_sign_default(unsigned logn)
+{
+	switch (logn) {
+	case 8: return 1.26;
+	case 9: return 1.278;
+	default: return 1.299;
+	}
+}
+
 static int
 test_sym_break_rule(unsigned logn)
 {
@@ -134,23 +158,39 @@ find_valid_synthetic_sig(unsigned logn, uint8_t *sig, size_t sig_len,
 	size_t n = (size_t)1 << logn;
 	size_t salt_len = e8_salt_len(logn);
 	static uint8_t salt[40];
-	static int16_t s0[MAXN], s1[MAXN];
+	static int8_t f[MAXN], g[MAXN], F[MAXN], G[MAXN];
+	double sigma_verify;
+	uint64_t rng_state = UINT64_C(0xE8516A51A6000000) + logn;
 
-	memset(s0, 0, n * sizeof *s0);
-	memset(s1, 0, n * sizeof *s1);
-	for (unsigned attempt = 0; attempt < 2048; attempt ++) {
+	memset(f, 0, n);
+	memset(g, 0, n);
+	memset(F, 0, n);
+	memset(G, 0, n);
+	f[0] = 1;
+	G[0] = 1;
+
+	if (!e8_sigma_verify_default(logn, &sigma_verify)) {
+		return 0;
+	}
+
+	for (unsigned salt_attempt = 0; salt_attempt < 8; salt_attempt ++) {
 		for (size_t u = 0; u < salt_len; u ++) {
-			salt[u] = (uint8_t)(0xA5u + 17u * u + attempt);
+			salt[u] = (uint8_t)(0xA5u + 17u * u + salt_attempt);
 		}
-		salt[0] ^= (uint8_t)attempt;
-		salt[salt_len - 1] ^= (uint8_t)(attempt >> 8);
-		if (!e8_encode_sig_uncompressed(logn,
-			sig, sig_len, salt, s0, s1))
-		{
-			return 0;
-		}
+		salt[0] ^= (uint8_t)salt_attempt;
 
 		shake_context sc_data;
+		make_message_context(&sc_data, logn);
+		if (!e8_sign_sampler_trace_timed_uncompressed(logn,
+				sig, sig_len, &sc_data, hpub, hpub_len,
+				f, g, F, G, salt,
+				sigma_sign_default(logn), sigma_verify,
+				1000, test_rng, &rng_state,
+				NULL, NULL, NULL, NULL, NULL))
+		{
+			continue;
+		}
+
 		make_message_context(&sc_data, logn);
 		if (e8_verify_uncompressed(logn, sig, sig_len, &sc_data,
 			hpub, hpub_len, q00, q01, q10, q11))
@@ -382,7 +422,7 @@ test_completion_norm(unsigned logn,
 static int
 test_verify_bound_helper(unsigned logn)
 {
-	static const int64_t EXPECTED[] = { 2301, 8259, 20192 };
+	static const int64_t EXPECTED[] = { 1091, 2123, 4129 };
 	double sigma_verify;
 	int64_t bound;
 

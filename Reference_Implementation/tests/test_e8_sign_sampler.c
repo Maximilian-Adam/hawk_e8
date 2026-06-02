@@ -23,9 +23,9 @@ typedef struct {
  * they are not final parameter calibration claims.
  */
 static const e8_sign_param PARAMS[] = {
-	{ 8,  3, 3, 1.25, 1.06, 1000 },
-	{ 9,  2, 2, 1.28, 1.42, 1000 },
-	{ 10, 2, 2, 1.30, 1.57, 1000 }
+	{ 8,  3, 3, 1.26,  0.73, 1000 },
+	{ 9,  2, 2, 1.278, 0.72, 1000 },
+	{ 10, 2, 2, 1.299, 0.71, 1000 }
 };
 
 static uint64_t
@@ -575,8 +575,8 @@ test_sampler_signing_logn(const e8_sign_param *param)
 
 	e8_sampler_set_thread_count(1);
 	printf("E8 sampler signer n=%u summary: signatures=%u"
-		" total_attempts=%u max_seen=%u sigma_sign=%.2f"
-		" sigma_verify=%.2f\n",
+		" total_attempts=%u max_seen=%u sigma_sign=%.3f"
+		" sigma_verify=%.3f\n",
 		1u << logn, sig_count, total_attempts, max_seen,
 		param->sigma_sign, param->sigma_verify);
 	return 1;
