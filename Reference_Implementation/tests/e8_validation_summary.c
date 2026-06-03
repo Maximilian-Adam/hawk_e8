@@ -20,7 +20,8 @@
 
 #define MAXN                    1024
 #define SAMPLE_SIGMA            1.26
-#define SHELL_SAMPLES_PER_TAU   20000u
+#define SHELL_TAU_LABELS        256u
+#define SHELL_SAMPLES_PER_TAU   100000u
 #define SHELL_ENUM_LO           (-3)
 #define SHELL_ENUM_HI           3
 #define SHELL_MAX_NORM2         65535u
@@ -401,7 +402,6 @@ build_shell_reference(shell_reference *ref, uint8_t tau)
 static int
 run_shell_validation(FILE *out, unsigned *rows_out)
 {
-	static const uint8_t taus[] = { 0, 1, 17, 85, 255 };
 	static shell_reference ref;
 	static uint32_t observed[SHELL_MAX_NORM2 + 1u];
 
@@ -415,8 +415,10 @@ run_shell_validation(FILE *out, unsigned *rows_out)
 	}
 
 	write_shell_header(out);
-	for (size_t ti = 0; ti < sizeof taus / sizeof taus[0]; ti ++) {
-		uint8_t tau = taus[ti];
+	for (unsigned tau_label = 0;
+		tau_label < SHELL_TAU_LABELS; tau_label ++)
+	{
+		uint8_t tau = (uint8_t)tau_label;
 		uint64_t rng_state = UINT64_C(0xE8DA700000000000)
 			+ (uint64_t)tau;
 
@@ -745,7 +747,7 @@ main(void)
 
 	fprintf(summary, "table,file,rows,note\n");
 	fprintf(summary, "shell_validation,%s,%u,"
-		"finite_range_sanity_diagnostic_not_formal_proof\n",
+		"all_256_tau_labels_finite_range_sanity_diagnostic_not_formal_proof\n",
 		SHELL_CSV, shell_rows);
 	fprintf(summary, "coset_validation,%s,%u,all_256_tau_labels\n",
 		COSET_CSV, coset_rows);

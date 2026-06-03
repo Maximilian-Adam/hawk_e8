@@ -41,6 +41,7 @@
 #define MAXN                         1024
 #define DEFAULT_BENCH_TRIALS         16
 #define DEFAULT_BENCH_WARMUPS        1
+#define HAWK_BASELINE_BENCH_TRIALS   10000
 #define MAX_BENCH_TRIALS             1000000
 #define MAX_BENCH_LINE               4096
 
@@ -116,12 +117,15 @@ bench_selected_e8_sampler_config(unsigned logn,
 	}
 	switch (logn) {
 	case 8:
+		*threads = 12;
+		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
+		return 1;
 	case 9:
-		*threads = 4;
+		*threads = 16;
 		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 		return 1;
 	case 10:
-		*threads = 8;
+		*threads = 16;
 		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 		return 1;
 	default:
@@ -1437,7 +1441,9 @@ run_isolated_matrix(const char *self_path, unsigned trials, unsigned warmups)
 			fprintf(stderr, "ERR: baseline allocation failed\n");
 			return 1;
 		}
-		if (!run_child_hawk_sampler(self_path, logn, trials)) {
+		if (!run_child_hawk_sampler(self_path, logn,
+			HAWK_BASELINE_BENCH_TRIALS))
+		{
 			ok = 0;
 		}
 		if (!run_child_config(self_path, logn, 1, "serial",
@@ -1487,7 +1493,9 @@ run_selected_configs(const char *self_path, unsigned trials, unsigned warmups)
 			ok = 0;
 			continue;
 		}
-		if (!run_child_hawk_sampler(self_path, logn, trials)) {
+		if (!run_child_hawk_sampler(self_path, logn,
+			HAWK_BASELINE_BENCH_TRIALS))
+		{
 			ok = 0;
 		}
 		if (!run_child_config(self_path, logn, threads,

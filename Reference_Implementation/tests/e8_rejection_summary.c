@@ -612,12 +612,15 @@ selected_e8_sampler_config(unsigned logn,
 	}
 	switch (logn) {
 	case 8:
+		*threads = 12;
+		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
+		return 1;
 	case 9:
-		*threads = 4;
+		*threads = 16;
 		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 		return 1;
 	case 10:
-		*threads = 8;
+		*threads = 16;
 		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 		return 1;
 	default:
