@@ -9,7 +9,7 @@
 typedef __int128 e8_i128;
 
 static const double E8_SIGMA_VERIFY[] = {
-	1.06, 1.42, 1.57
+	0.73, 0.72, 0.71
 };
 
 typedef struct {
