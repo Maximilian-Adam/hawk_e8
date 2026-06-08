@@ -24,11 +24,15 @@
 #define SIGMA_VERIFY_SWEEP_DEFAULT_SEED     UINT64_C(0xE8516A5A5A000000)
 #define DEFAULT_SIGMA_SIGN_SWEEP_BLOCK_TRIALS_PER_LABEL   64
 #define DEFAULT_SIGMA_SIGN_SWEEP_SIGN_TRIALS              16
+#define DEFAULT_SIGMA_SIGN_SWEEP_EPS_BITS                 32
 #define SIGMA_SIGN_SWEEP_MAX_ATTEMPTS                     1000
-#define SIGMA_SIGN_SWEEP_VERIFY_LOOSE                     10.0
+#define SIGMA_SIGN_SWEEP_POINTS                           4
+#define SIGMA_SIGN_SWEEP_STEP                             0.05
+#define SIGMA_SIGN_SWEEP_SIGMA_VERIFY                     10.0
 #define SIGMA_SIGN_SWEEP_DEFAULT_SEED     UINT64_C(0xE8516A6D1A600000)
 #define E8_TAU_LABELS    256
 #define E8_COMPONENTS    16
+#define E8_SIGMA_SMOOTH_PI  3.14159265358979323846264338327950288
 
 #define ARRAY_LEN(x)   (sizeof (x) / sizeof (x)[0])
 
@@ -42,15 +46,8 @@ typedef struct {
 typedef struct {
 	unsigned logn;
 	double sigma_sign;
-	const double *sigma_verify;
-	size_t sigma_verify_len;
-} sigma_verify_sweep_grid;
-
-typedef struct {
-	unsigned logn;
-	const double *sigma_sign;
-	size_t sigma_sign_len;
-} sigma_sign_sweep_grid;
+	double sigma_verify;
+} sigma_verify_sweep_param;
 
 typedef struct {
 	uint64_t count;
@@ -86,57 +83,19 @@ typedef struct {
 } summary_row;
 
 static const run_param PARAMS[] = {
-	{ 8,  1.26,  0.73, 1000 },
-	{ 9,  1.278, 0.72, 1000 },
-	{ 10, 1.299, 0.71, 1000 }
+	{ 8,  3.592, 2.03, 1000 },
+	{ 9,  3.631, 1.99, 1000 },
+	{ 10, 3.669, 1.95, 1000 }
 };
 
-static const double SIGMA_VERIFY_SWEEP_8[] = {
-	0.73
-};
-static const double SIGMA_VERIFY_SWEEP_9[] = {
-	0.72
-};
-static const double SIGMA_VERIFY_SWEEP_10[] = {
-	0.71
+static const sigma_verify_sweep_param SIGMA_VERIFY_SWEEP_DEFAULTS[] = {
+	{ 8, 3.592, 2.03 },
+	{ 9, 3.631, 1.99 },
+	{ 10, 3.669, 1.95 }
 };
 
-static const double SIGMA_VERIFY_SWEEP_FALLBACK_8[] = { 0.73 };
-static const double SIGMA_VERIFY_SWEEP_FALLBACK_9[] = { 0.72 };
-static const double SIGMA_VERIFY_SWEEP_FALLBACK_10[] = { 0.71 };
-
-static const sigma_verify_sweep_grid SIGMA_VERIFY_SWEEP_DEFAULT_GRID[] = {
-	{ 8, 1.26, SIGMA_VERIFY_SWEEP_8,
-		ARRAY_LEN(SIGMA_VERIFY_SWEEP_8) },
-	{ 9, 1.278, SIGMA_VERIFY_SWEEP_9,
-		ARRAY_LEN(SIGMA_VERIFY_SWEEP_9) },
-	{ 10, 1.299, SIGMA_VERIFY_SWEEP_10,
-		ARRAY_LEN(SIGMA_VERIFY_SWEEP_10) }
-};
-
-static const sigma_verify_sweep_grid SIGMA_VERIFY_SWEEP_FALLBACK_GRID[] = {
-	{ 8, 1.26, SIGMA_VERIFY_SWEEP_FALLBACK_8,
-		ARRAY_LEN(SIGMA_VERIFY_SWEEP_FALLBACK_8) },
-	{ 9, 1.278, SIGMA_VERIFY_SWEEP_FALLBACK_9,
-		ARRAY_LEN(SIGMA_VERIFY_SWEEP_FALLBACK_9) },
-	{ 10, 1.299, SIGMA_VERIFY_SWEEP_FALLBACK_10,
-		ARRAY_LEN(SIGMA_VERIFY_SWEEP_FALLBACK_10) }
-};
-
-static const double SIGMA_SIGN_SWEEP_SIGN_8[] = {
-	1.26
-};
-static const double SIGMA_SIGN_SWEEP_SIGN_9[] = {
-	1.278
-};
-static const double SIGMA_SIGN_SWEEP_SIGN_10[] = {
-	1.299
-};
-
-static const sigma_sign_sweep_grid SIGMA_SIGN_SWEEP_GRID[] = {
-	{ 8, SIGMA_SIGN_SWEEP_SIGN_8, ARRAY_LEN(SIGMA_SIGN_SWEEP_SIGN_8) },
-	{ 9, SIGMA_SIGN_SWEEP_SIGN_9, ARRAY_LEN(SIGMA_SIGN_SWEEP_SIGN_9) },
-	{ 10, SIGMA_SIGN_SWEEP_SIGN_10, ARRAY_LEN(SIGMA_SIGN_SWEEP_SIGN_10) }
+static const unsigned SIGMA_SIGN_SWEEP_LOGN[] = {
+	8, 9, 10
 };
 
 static uint64_t
@@ -349,27 +308,6 @@ parse_logn_filter_env(const char *name, int allow_all,
 }
 
 static int
-parse_sigma_verify_sweep_grid(const sigma_verify_sweep_grid **grid, size_t *grid_len)
-{
-	const char *env = getenv("E8_SIGMA_VERIFY_SWEEP_GRID");
-
-	if (env == NULL || strcmp(env, "default") == 0) {
-		*grid = SIGMA_VERIFY_SWEEP_DEFAULT_GRID;
-		*grid_len = ARRAY_LEN(SIGMA_VERIFY_SWEEP_DEFAULT_GRID);
-		return 1;
-	}
-	if (strcmp(env, "fallback") == 0) {
-		*grid = SIGMA_VERIFY_SWEEP_FALLBACK_GRID;
-		*grid_len = ARRAY_LEN(SIGMA_VERIFY_SWEEP_FALLBACK_GRID);
-		return 1;
-	}
-	fprintf(stderr,
-		"ERR: E8_SIGMA_VERIFY_SWEEP_GRID must be default or fallback,"
-		" got '%s'\n", env);
-	return 0;
-}
-
-static int
 parse_seed_env(const char *name, uint64_t def_value, uint64_t *value)
 {
 	const char *env = getenv(name);
@@ -400,6 +338,23 @@ env_flag_requested(const char *name)
 	const char *env = getenv(name);
 
 	return env != NULL && env[0] != 0 && strcmp(env, "0") != 0;
+}
+
+static double
+sigma_smooth_full_signing_space(unsigned logn, unsigned eps_bits)
+{
+	size_t n = (size_t)1 << logn;
+	double log_eps = (double)eps_bits * log(2.0);
+
+	/* Diagnostic threshold for 2M_n ~= (4E8)^(n/4), not a scheme parameter. */
+	return (2.0 / E8_SIGMA_SMOOTH_PI)
+		* sqrt(log(60.0 * (double)n) + log_eps);
+}
+
+static double
+ceil_3dp(double x)
+{
+	return ceil(x * 1000.0) / 1000.0;
 }
 
 static uint64_t
@@ -616,7 +571,7 @@ selected_e8_sampler_config(unsigned logn,
 		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 		return 1;
 	case 9:
-		*threads = 16;
+		*threads = 12;
 		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 		return 1;
 	case 10:
@@ -880,11 +835,13 @@ static void
 write_sigma_verify_sweep_header(FILE *fp)
 {
 	fprintf(fp,
-		"logn,n,eta,sigma_sign,sigma_verify,trials,"
+		"logn,n,eta,sigma_sign,sigma_verify,verify_bound,trials,"
+		"accepted_signatures,total_attempts,rejected_attempts,"
+		"rejection_rate,max_attempts_per_signature,"
+		"verifier_failures,coset_failures,norm_mismatches,"
 		"success_count,failure_count,verification_reject_count,"
 		"pnorm_mean,e8_verify_norm_mean,pnorm_min,pnorm_max,"
-		"threshold,mean_attempts,max_attempts,"
-		"mean_signing_cycles,mean_signing_ns,status\n");
+		"mean_attempts,mean_signing_cycles,mean_signing_ns,status\n");
 }
 
 static const char *
@@ -919,28 +876,45 @@ write_sigma_verify_sweep_row(FILE *fp, const run_param *param,
 	uint64_t accounted = success_count + verification_reject_count;
 	uint64_t failure_count = row->trials >= accounted
 		? row->trials - accounted : 0;
+	uint64_t accepted_signatures = row->accepted;
+	uint64_t total_attempts = row->total_attempts;
+	uint64_t rejected_attempts = total_attempts >= accepted_signatures
+		? total_attempts - accepted_signatures : 0;
+	/*
+	 * HAWK-style restart pressure: probability that one full candidate
+	 * signing attempt is rejected by the full-signature norm bound before
+	 * any signature is output.
+	 */
+	double rejection_rate = total_attempts == 0 ? 0.0
+		: (double)rejected_attempts / (double)total_attempts;
 	double mean_attempts = row->trials == 0 ? 0.0
-		: (double)row->total_attempts / (double)row->trials;
+		: (double)total_attempts / (double)row->trials;
 
 	fprintf(fp,
-		"%u,%u,%u,%.3f,%.3f,%u,"
+		"%u,%u,%u,%.3f,%.3f,%lld,%u,"
+		"%llu,%llu,%llu,%.17g,%u,"
+		"%llu,%llu,%llu,"
 		"%llu,%llu,%llu,"
 		"%.17g,%.17g,%lld,%lld,"
-		"%lld,%.17g,%u,"
-		"%.17g,%.17g,%s\n",
+		"%.17g,%.17g,%.17g,%s\n",
 		param->logn, (unsigned)n, eta_for_logn(param->logn),
-		param->sigma_sign, param->sigma_verify, row->trials,
+		param->sigma_sign, param->sigma_verify, (long long)verify_bound,
+		row->trials,
+		(unsigned long long)accepted_signatures,
+		(unsigned long long)total_attempts,
+		(unsigned long long)rejected_attempts,
+		rejection_rate, row->max_observed_attempts,
+		(unsigned long long)row->verify_failures,
+		(unsigned long long)row->coset_failures,
+		(unsigned long long)row->norm_mismatch_failures,
 		(unsigned long long)success_count,
 		(unsigned long long)failure_count,
 		(unsigned long long)verification_reject_count,
 		row->pnorm.mean, row->qnorm.mean,
 		(long long)stat_i64_min(&row->pnorm),
 		(long long)stat_i64_max(&row->pnorm),
-		(long long)verify_bound,
-		mean_attempts, row->max_observed_attempts,
-		row->cycles_sign_call.mean,
-		row->wall_ns_sign_call.mean,
-		status);
+		mean_attempts, row->cycles_sign_call.mean,
+		row->wall_ns_sign_call.mean, status);
 }
 
 static uint64_t
@@ -959,13 +933,10 @@ run_sigma_verify_sweep(void)
 {
 	unsigned trials, logn_filter;
 	uint64_t base_seed;
-	const sigma_verify_sweep_grid *grid;
-	size_t grid_len;
 	int setup_status = 0;
 
 	if (!parse_unsigned_env("E8_SIGMA_VERIFY_SWEEP_TRIALS",
 			DEFAULT_SIGMA_VERIFY_SWEEP_TRIALS, &trials)
-		|| !parse_sigma_verify_sweep_grid(&grid, &grid_len)
 		|| !parse_logn_filter_env("E8_SIGMA_VERIFY_SWEEP_LOGN",
 			1, &logn_filter)
 		|| !parse_seed_env("E8_SIGMA_VERIFY_SWEEP_SEED",
@@ -975,36 +946,36 @@ run_sigma_verify_sweep(void)
 	}
 
 	write_sigma_verify_sweep_header(stdout);
-	for (size_t gi = 0; gi < grid_len; gi ++) {
-		if (logn_filter != 0 && grid[gi].logn != logn_filter) {
+	for (size_t gi = 0; gi < ARRAY_LEN(SIGMA_VERIFY_SWEEP_DEFAULTS); gi ++) {
+		const sigma_verify_sweep_param *sweep =
+			&SIGMA_VERIFY_SWEEP_DEFAULTS[gi];
+		run_param param;
+		summary_row row;
+		int64_t verify_bound = 0;
+		uint64_t rng_state;
+
+		if (logn_filter != 0 && sweep->logn != logn_filter) {
 			continue;
 		}
-		for (size_t vi = 0; vi < grid[gi].sigma_verify_len; vi ++) {
-			run_param param;
-			summary_row row;
-			int64_t verify_bound = 0;
-			uint64_t rng_state;
-
-			param.logn = grid[gi].logn;
-			param.sigma_sign = grid[gi].sigma_sign;
-			param.sigma_verify = grid[gi].sigma_verify[vi];
-			param.max_attempts = SIGMA_VERIFY_SWEEP_MAX_ATTEMPTS;
-			memset(&row, 0, sizeof row);
-			row.trials = trials;
-			(void)e8_verify_bound_from_sigma(param.logn,
-				param.sigma_verify, &verify_bound);
-			rng_state = sigma_verify_sweep_seed(base_seed, param.logn, vi);
-			if (!collect_one_key_stats(&param, 0, trials,
-					&rng_state, &row, &verify_bound))
-			{
-				write_sigma_verify_sweep_row(stdout, &param,
-					&row, verify_bound, "setup_failed");
-				setup_status = 1;
-				continue;
-			}
+		param.logn = sweep->logn;
+		param.sigma_sign = sweep->sigma_sign;
+		param.sigma_verify = sweep->sigma_verify;
+		param.max_attempts = SIGMA_VERIFY_SWEEP_MAX_ATTEMPTS;
+		memset(&row, 0, sizeof row);
+		row.trials = trials;
+		(void)e8_verify_bound_from_sigma(param.logn,
+			param.sigma_verify, &verify_bound);
+		rng_state = sigma_verify_sweep_seed(base_seed, param.logn, gi);
+		if (!collect_one_key_stats(&param, 0, trials,
+				&rng_state, &row, &verify_bound))
+		{
 			write_sigma_verify_sweep_row(stdout, &param, &row,
-				verify_bound, sigma_verify_sweep_status(&row));
+				verify_bound, "setup_failed");
+			setup_status = 1;
+			continue;
 		}
+		write_sigma_verify_sweep_row(stdout, &param, &row,
+			verify_bound, sigma_verify_sweep_status(&row));
 	}
 
 	return setup_status;
@@ -1012,9 +983,16 @@ run_sigma_verify_sweep(void)
 
 typedef struct {
 	unsigned logn;
+	unsigned eps_bits;
+	double sigma_smooth;
 	double sigma_sign;
+	double sigma_verify;
+	int64_t verify_bound;
 	unsigned block_trials_per_label;
 	unsigned sign_trials;
+	uint64_t accepted;
+	uint64_t attempts;
+	uint64_t rejected;
 	uint64_t block_samples;
 	stat_u64 block_norm;
 	uint64_t block_norm_p50;
@@ -1360,10 +1338,10 @@ collect_sigma_sign_signature_stats(sigma_sign_sweep_result *res,
 		accepted = e8_sign_sampler_trace_timed_uncompressed(logn,
 			sig, sig_len, &sc_data, hpub, hpub_len,
 			f, g, F, G, salt,
-			res->sigma_sign, SIGMA_SIGN_SWEEP_VERIFY_LOOSE,
+			res->sigma_sign, res->sigma_verify,
 			SIGMA_SIGN_SWEEP_MAX_ATTEMPTS, summary_rng,
 			rng_state, z0, z1, &pnorm, &attempts, &trace);
-		(void)attempts;
+		res->attempts += attempts;
 		if (e8_sampler_profile_get(&profile)) {
 			stat_u64_add(&res->profile_cycles_block_sample,
 				profile.cycles_block_sample);
@@ -1371,8 +1349,13 @@ collect_sigma_sign_signature_stats(sigma_sign_sweep_result *res,
 				profile.wall_ns_block_sample);
 		}
 		if (!accepted) {
+			res->rejected += attempts;
 			ok = 0;
 			continue;
+		}
+		res->accepted ++;
+		if (attempts > 0) {
+			res->rejected += (uint64_t)attempts - 1;
 		}
 		sign_norms[res->sign_norm.count] = (uint64_t)pnorm;
 		stat_u64_add(&res->sign_norm, (uint64_t)pnorm);
@@ -1422,7 +1405,9 @@ static void
 write_sigma_sign_sweep_header(FILE *fp)
 {
 	fprintf(fp,
-		"logn,n,eta,sigma_sign,block_trials_per_label,"
+		"sweep_kind,logn,n,eta,eps_bits,sigma_smooth,sigma_sign,"
+		"sigma_verify,verify_bound,sign_trials,accepted,attempts,"
+		"rejected,rejection_rate,block_trials_per_label,"
 		"block_samples,block_norm_mean,block_norm_variance,block_norm_std,"
 		"block_norm_p50,block_norm_p90,block_norm_p99,block_norm_max,"
 		"block_min_shell_mass,block_first2_shell_mass,"
@@ -1433,7 +1418,7 @@ write_sigma_sign_sweep_header(FILE *fp)
 		"per_label_worst_min_shell_mass,"
 		"per_label_worst_first3_shell_mass,"
 		"pred_component_entropy_bits,emp_component_entropy_bits,"
-		"component_relerr_max,sign_trials,sign_norm_mean,sign_norm_std,"
+		"component_relerr_max,sign_norm_mean,sign_norm_std,"
 		"sign_norm_p50,sign_norm_p90,sign_norm_p99,sign_norm_max,"
 		"sig_coeff_abs_mean,sig_coeff_abs_p99,sig_coeff_abs_max,"
 		"sampler_profile_cycles_block_sample_mean,"
@@ -1449,10 +1434,19 @@ write_sigma_sign_sweep_row(FILE *fp, const sigma_sign_sweep_result *res)
 	int have_coeffs = res->sig_coeff_abs.count != 0;
 	double block_var = stat_u64_variance(&res->block_norm);
 	double sign_var = stat_u64_variance(&res->sign_norm);
+	double rejection_rate = res->attempts == 0 ? 0.0
+		: (double)res->rejected / (double)res->attempts;
 
-	fprintf(fp, "%u,%u,%u,%.3f,%u",
+	fprintf(fp,
+		"smoothing_full_signing_space,%u,%u,%u,%u,"
+		"%.17g,%.3f,%.17g,%lld,%u,%llu,%llu,%llu,%.17g,%u",
 		res->logn, (unsigned)n, eta_for_logn(res->logn),
-		res->sigma_sign, res->block_trials_per_label);
+		res->eps_bits, res->sigma_smooth, res->sigma_sign,
+		res->sigma_verify, (long long)res->verify_bound,
+		res->sign_trials, (unsigned long long)res->accepted,
+		(unsigned long long)res->attempts,
+		(unsigned long long)res->rejected, rejection_rate,
+		res->block_trials_per_label);
 	fprintf(fp, ",%llu", (unsigned long long)res->block_samples);
 	fputc(',', fp); csv_double(fp, res->block_norm.mean, have_blocks);
 	fputc(',', fp); csv_double(fp, block_var, have_blocks);
@@ -1481,7 +1475,6 @@ write_sigma_sign_sweep_row(FILE *fp, const sigma_sign_sweep_result *res)
 		have_blocks);
 	fputc(',', fp); csv_double(fp, res->component_relerr_max,
 		res->pred_component_available && have_blocks);
-	fprintf(fp, ",%u", res->sign_trials);
 	fputc(',', fp); csv_double(fp, res->sign_norm.mean, have_signs);
 	fputc(',', fp); csv_double(fp, sqrt(sign_var), have_signs);
 	fputc(',', fp); csv_u64(fp, res->sign_norm_p50, have_signs);
@@ -1501,7 +1494,7 @@ write_sigma_sign_sweep_row(FILE *fp, const sigma_sign_sweep_result *res)
 static int
 run_sigma_sign_sweep(void)
 {
-	unsigned block_trials_per_label, sign_trials, logn_filter;
+	unsigned block_trials_per_label, sign_trials, eps_bits, logn_filter;
 	uint64_t base_seed;
 	int status = 0;
 
@@ -1510,6 +1503,8 @@ run_sigma_sign_sweep(void)
 			&block_trials_per_label)
 		|| !parse_unsigned_env("E8_SIGMA_SIGN_SWEEP_SIGN_TRIALS",
 			DEFAULT_SIGMA_SIGN_SWEEP_SIGN_TRIALS, &sign_trials)
+		|| !parse_unsigned_env("E8_SIGMA_SIGN_SWEEP_EPS_BITS",
+			DEFAULT_SIGMA_SIGN_SWEEP_EPS_BITS, &eps_bits)
 		|| !parse_logn_filter_env("E8_SIGMA_SIGN_SWEEP_LOGN",
 			1, &logn_filter)
 		|| !parse_seed_env("E8_SIGMA_SIGN_SWEEP_SEED",
@@ -1519,28 +1514,42 @@ run_sigma_sign_sweep(void)
 	}
 
 	write_sigma_sign_sweep_header(stdout);
-	for (size_t gi = 0; gi < ARRAY_LEN(SIGMA_SIGN_SWEEP_GRID); gi ++) {
-		const sigma_sign_sweep_grid *grid = &SIGMA_SIGN_SWEEP_GRID[gi];
+	for (size_t gi = 0; gi < ARRAY_LEN(SIGMA_SIGN_SWEEP_LOGN); gi ++) {
+		unsigned logn = SIGMA_SIGN_SWEEP_LOGN[gi];
+		double sigma_smooth = sigma_smooth_full_signing_space(logn,
+			eps_bits);
 
-		if (logn_filter != 0 && grid->logn != logn_filter) {
+		if (logn_filter != 0 && logn != logn_filter) {
 			continue;
 		}
-		for (size_t si = 0; si < grid->sigma_sign_len; si ++) {
+		for (size_t si = 0; si < SIGMA_SIGN_SWEEP_POINTS; si ++) {
 			sigma_sign_sweep_result res;
 			uint64_t block_rng;
 			uint64_t sign_rng;
 			int block_ok, sign_ok;
 
 			memset(&res, 0, sizeof res);
-			res.logn = grid->logn;
-			res.sigma_sign = grid->sigma_sign[si];
+			res.logn = logn;
+			res.eps_bits = eps_bits;
+			res.sigma_smooth = sigma_smooth;
+			res.sigma_sign = ceil_3dp(sigma_smooth
+				+ (double)si * SIGMA_SIGN_SWEEP_STEP);
+			res.sigma_verify = SIGMA_SIGN_SWEEP_SIGMA_VERIFY;
 			res.block_trials_per_label = block_trials_per_label;
 			res.sign_trials = sign_trials;
 			strcpy(res.status, "ok");
+			if (!e8_verify_bound_from_sigma(res.logn,
+					res.sigma_verify, &res.verify_bound))
+			{
+				strcpy(res.status, "verify_bound_failed");
+				write_sigma_sign_sweep_row(stdout, &res);
+				status = 1;
+				continue;
+			}
 			block_rng = sigma_sign_sweep_seed(base_seed,
-				grid->logn, si, 0);
+				logn, si, 0);
 			sign_rng = sigma_sign_sweep_seed(base_seed,
-				grid->logn, si, 1);
+				logn, si, 1);
 			block_ok = collect_sigma_sign_block_stats(&res,
 				&block_rng);
 			sign_ok = collect_sigma_sign_signature_stats(&res,
@@ -1565,7 +1574,6 @@ sigma_verify_sweep_mode_requested(void)
 {
 	return env_flag_requested("E8_SIGMA_VERIFY_SWEEP")
 		|| getenv("E8_SIGMA_VERIFY_SWEEP_TRIALS") != NULL
-		|| getenv("E8_SIGMA_VERIFY_SWEEP_GRID") != NULL
 		|| getenv("E8_SIGMA_VERIFY_SWEEP_LOGN") != NULL
 		|| getenv("E8_SIGMA_VERIFY_SWEEP_SEED") != NULL;
 }
@@ -1576,6 +1584,7 @@ sigma_sign_sweep_mode_requested(void)
 	return env_flag_requested("E8_SIGMA_SIGN_SWEEP")
 		|| getenv("E8_SIGMA_SIGN_SWEEP_BLOCK_TRIALS_PER_LABEL") != NULL
 		|| getenv("E8_SIGMA_SIGN_SWEEP_SIGN_TRIALS") != NULL
+		|| getenv("E8_SIGMA_SIGN_SWEEP_EPS_BITS") != NULL
 		|| getenv("E8_SIGMA_SIGN_SWEEP_LOGN") != NULL
 		|| getenv("E8_SIGMA_SIGN_SWEEP_SEED") != NULL;
 }

@@ -121,7 +121,7 @@ bench_selected_e8_sampler_config(unsigned logn,
 		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 		return 1;
 	case 9:
-		*threads = 16;
+		*threads = 12;
 		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 		return 1;
 	case 10:
@@ -310,9 +310,9 @@ static double
 e8_sigma_sign(unsigned logn)
 {
 	switch (logn) {
-	case 8: return 1.26;
-	case 9: return 1.278;
-	default: return 1.299;
+	case 8: return 3.592;
+	case 9: return 3.631;
+	default: return 3.669;
 	}
 }
 
@@ -320,9 +320,9 @@ static double
 e8_sigma_verify_sign(unsigned logn)
 {
 	switch (logn) {
-	case 8: return 0.73;
-	case 9: return 0.72;
-	default: return 0.71;
+	case 8: return 2.03;
+	case 9: return 1.99;
+	default: return 1.95;
 	}
 }
 

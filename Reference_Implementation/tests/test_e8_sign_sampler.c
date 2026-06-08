@@ -23,9 +23,9 @@ typedef struct {
  * they are not final parameter calibration claims.
  */
 static const e8_sign_param PARAMS[] = {
-	{ 8,  3, 3, 1.26,  0.73, 1000 },
-	{ 9,  2, 2, 1.278, 0.72, 1000 },
-	{ 10, 2, 2, 1.299, 0.71, 1000 }
+	{ 8,  3, 3, 3.592, 2.03, 1000 },
+	{ 9,  2, 2, 3.631, 1.99, 1000 },
+	{ 10, 2, 2, 3.669, 1.95, 1000 }
 };
 
 static uint64_t

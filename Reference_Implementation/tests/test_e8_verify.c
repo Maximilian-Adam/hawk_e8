@@ -39,9 +39,9 @@ static double
 sigma_sign_default(unsigned logn)
 {
 	switch (logn) {
-	case 8: return 1.26;
-	case 9: return 1.278;
-	default: return 1.299;
+	case 8: return 3.592;
+	case 9: return 3.631;
+	default: return 3.669;
 	}
 }
 
@@ -422,7 +422,7 @@ test_completion_norm(unsigned logn,
 static int
 test_verify_bound_helper(unsigned logn)
 {
-	static const int64_t EXPECTED[] = { 1091, 2123, 4129 };
+	static const int64_t EXPECTED[] = { 8439, 16220, 31150 };
 	double sigma_verify;
 	int64_t bound;
 

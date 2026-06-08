@@ -19,7 +19,7 @@
 #include "../hawk_sign.c"
 
 #define MAXN                    1024
-#define SAMPLE_SIGMA            1.26
+#define SAMPLE_SIGMA            3.592
 #define SHELL_TAU_LABELS        256u
 #define SHELL_SAMPLES_PER_TAU   100000u
 #define SHELL_ENUM_LO           (-3)
@@ -98,9 +98,9 @@ static double
 e8_stability_sigma(unsigned logn)
 {
 	switch (logn) {
-	case 8: return 1.260;
-	case 9: return 1.278;
-	default: return 1.299;
+	case 8: return 3.592;
+	case 9: return 3.631;
+	default: return 3.669;
 	}
 }
 

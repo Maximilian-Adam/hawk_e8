@@ -199,9 +199,9 @@ Current sampler-backed tests, histogram diagnostics, rejection summaries, and
 stability diagnostics use:
 
 ```text
-n=256:  sigma_sign = 1.260, sigma_verify = 0.73
-n=512:  sigma_sign = 1.278, sigma_verify = 0.72
-n=1024: sigma_sign = 1.299, sigma_verify = 0.71
+n=256:  sigma_sign = 3.592, sigma_verify = 2.03
+n=512:  sigma_sign = 3.631, sigma_verify = 1.99
+n=1024: sigma_sign = 3.669, sigma_verify = 1.95
 ```
 
 `max_attempts` defaults to `1000` in the sampler-backed signing tests and CSV
@@ -330,6 +330,20 @@ Sigma sweeps are available through:
 ```sh
 make -C Reference_Implementation e8-sigma-verify-sweep
 make -C Reference_Implementation e8-sigma-sign-sweep
+```
+
+These write `Reference_Implementation/e8_sigma_verify_sweep.csv` and
+`Reference_Implementation/e8_sigma_sign_sweep.csv`.  The verify sweep uses the
+rounded up smoothing `sigma_sign` values and tests `sigma_verify`.  The sign
+sweep starts at the full signing space smoothing threshold with `eps_bits=32`,
+rounds the tested `sigma_sign` up to 3 decimal places, and steps upward by
+`0.05`.
+
+To run more trials:
+
+```sh
+E8_SIGMA_VERIFY_SWEEP_TRIALS=100 make -C Reference_Implementation e8-sigma-verify-sweep
+E8_SIGMA_SIGN_SWEEP_SIGN_TRIALS=100 make -C Reference_Implementation e8-sigma-sign-sweep
 ```
 
 Validation summaries:

@@ -7,7 +7,7 @@
 #include "../hawk_e8_inner.h"
 
 #define MAXN             1024
-#define SAMPLE_SIGMA     1.26
+#define SAMPLE_SIGMA     3.592
 #define FULL_SAMPLES     2
 #define CM_BLOCK_SAMPLES 8
 
@@ -153,7 +153,7 @@ full_norm_from_apply(unsigned logn, const int32_t *z0, const int32_t *z1)
 static int
 test_sigma_convention(void)
 {
-	double sigma = 1.26;
+	double sigma = 3.592;
 	double s = e8_sigma_to_rho_s(sigma);
 	double norm2 = 12.0;
 	double c_weight = exp(-norm2 / (2.0 * sigma * sigma));
@@ -178,7 +178,7 @@ mass_close(double a, double b, double rel_tol, double abs_tol)
 static int
 test_cache_1d_masses(void)
 {
-	static const double sigmas[] = { 1.26, 1.278, 1.299 };
+	static const double sigmas[] = { 3.592, 3.631, 3.669 };
 	static const int64_t centers_num32[] = {
 		-96, -65, -33, -17, -8, -1, 0,
 		1, 7, 8, 17, 33, 64, 96
