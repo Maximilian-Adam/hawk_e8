@@ -112,16 +112,20 @@ checked inverse.  Debug builds check parity, coset membership, syndrome, and
 norm consistency.
 
 The implementation uses floating-point finite-tail tables and runtime caches
-keyed by the exact `sigma_sign` bit pattern.  The cache stores component
-masses/CDFs, one-dimensional centre classes, hot six-value CDFs, ordered tail
-fallback data, base blocks, base norms, and affine reconstruction deltas.
+keyed by the exact `sigma_sign` bit pattern.  Cached probability tables,
+component masses, prefixes, totals, normalisers, and tail CDFs use `double`;
+hot component and six-value CDF thresholds use 64-bit integer thresholds.
+The cache also stores one-dimensional centre classes, ordered tail fallback
+data, base blocks, base norms, and affine reconstruction deltas.
 
 Serial mode is the reference path.  The full sampler can also use a small
 pthread spin/yield worker pool over independent block ranges.  Parallelism is
 controlled by `e8_sampler_set_thread_count()`,
 `HAWK_E8_SAMPLER_THREADS`, or the compile-time `HAWK_E8_SAMPLER_THREADS`
 macro.  RNG mode is either per-block SHAKE streams or per-worker SHAKE streams.
-The compile-time default is serial.
+The compile-time default is serial.  The selected benchmark/signing diagnostic
+configuration uses 8, 8, and 16 sampler threads for n=256, 512, and 1024,
+respectively.
 
 All sampler paths are floating-point, data-dependent, and non-constant-time.
 
@@ -266,6 +270,13 @@ Histogram diagnostics:
 ```sh
 make -C Reference_Implementation e8-histograms
 ```
+supports:
+
+```text
+E8_HIST_KEYS=<positive integer>
+E8_HIST_TRIALS=<positive integer>
+```
+
 
 writes:
 
@@ -295,7 +306,7 @@ make -C Reference_Implementation bin/e8_sampler_bench
 Reference_Implementation/bin/e8_sampler_bench --selected-configs --trials 50 --warmups 1
 Reference_Implementation/bin/e8_sampler_bench --isolated-matrix --trials 50 --warmups 1
 Reference_Implementation/bin/e8_sampler_bench --single-hawk-sampler --logn 10 --trials 50
-Reference_Implementation/bin/e8_sampler_bench --single-config --logn 10 --threads 8 --worker-mode spin --rng-mode per_worker --trials 50 --warmups 1
+Reference_Implementation/bin/e8_sampler_bench --single-config --logn 10 --threads 16 --worker-mode spin --rng-mode per_worker --trials 50 --warmups 1
 ```
 
 Signature timing:
@@ -306,7 +317,7 @@ make -C Reference_Implementation profile-sign-bench
 ```
 
 `sign-bench` writes `Reference_Implementation/e8_sign_bench.csv`.
-`profile-sign-bench` builds the same benchmark with
+`profile-sign-bench` builds the dedicated signature benchmark with
 `HAWK_E8_PROFILE_SIGN=1` and prints per-stage E8 signing timings to the
 terminal.
 

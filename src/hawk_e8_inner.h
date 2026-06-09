@@ -274,9 +274,10 @@ double e8_sigma_to_rho_s(double sigma);
  * zblk[i] = bit_i(tau) mod 2, and norm2 is ||P zblk||^2.
  *
  * The default sampler uses a runtime cache of one-dimensional shifted
- * Gaussian tables and tau/component selection masses.  It remains an
- * experimental, floating-point, data-dependent research sampler; the cache
- * is an optimisation only and is not constant-time hardened.
+ * Gaussian tables and tau/component selection masses.  Cached probability
+ * tables and finite Gaussian normalisers are held in double, while runtime
+ * hot-path CDF thresholds are 64-bit integers.  It remains an
+ * experimental, floating-point, data-dependent research sampler.
  */
 int e8_sampler_warm_cache(double sigma_sign);
 

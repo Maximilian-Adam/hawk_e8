@@ -66,3 +66,4 @@ Reference_Implementation/data
 **/NIST/
 
 .vscode/
+Reference_Implementation/tests/*.py

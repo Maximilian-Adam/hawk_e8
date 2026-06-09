@@ -28,8 +28,6 @@
 #define E8_MASTER_SEED_BYTES   32
 #define E8_MAX_FULL_BLOCKS     (1u << (10 - 2))
 #define E8_SAMPLER_MAX_THREADS 24
-#define E8_UINT128_MAX \
-	(((__uint128_t)UINT64_MAX << 64) | (__uint128_t)UINT64_MAX)
 
 #ifndef HAWK_E8_DEBUG_CHECKS
 #define HAWK_E8_DEBUG_CHECKS   1
@@ -109,7 +107,7 @@ typedef struct {
 	uint8_t tiny_len;
 	size_t tail_len;
 	int32_t tiny_value[E8_1D_TINY_VALUES];
-	__uint128_t tiny_cdf[E8_1D_TINY_VALUES];
+	uint64_t tiny_cdf[E8_1D_TINY_VALUES];
 	int32_t *tail_value;
 	double *tail_cdf;
 } e8_1d_hot_row;
@@ -130,7 +128,7 @@ struct e8_ca_sigma_cache_s {
 	size_t table_cap;
 	e8_1d_integer_table *tables;
 	e8_1d_hot_row *hot_rows;
-	__uint128_t component_cdf[E8_CA_TAUS][E8_CA_COSETS];
+	uint64_t component_cdf[E8_CA_TAUS][E8_CA_COSETS];
 	uint8_t component_fallback[E8_CA_TAUS];
 	int32_t base_z[E8_CA_TAUS][E8_CA_COSETS][E8_BLOCK_DIM];
 	int64_t base_norm2[E8_CA_TAUS][E8_CA_COSETS];
@@ -249,15 +247,6 @@ rng_stream_u64(e8_rng_stream *stream)
 	return x;
 }
 
-static __uint128_t
-rng_stream_u128(e8_rng_stream *stream)
-{
-	__uint128_t hi = (__uint128_t)rng_stream_u64(stream);
-	__uint128_t lo = (__uint128_t)rng_stream_u64(stream);
-
-	return (hi << 64) | lo;
-}
-
 static double
 rng_stream_double(e8_rng_stream *stream)
 {
@@ -266,48 +255,32 @@ rng_stream_double(e8_rng_stream *stream)
 	return (double)(x >> 11) * 0x1.0p-53;
 }
 
-static __uint128_t
-e8_cdf_threshold_u128(long double prefix, long double total)
+static uint64_t
+e8_cdf_threshold_u64(double prefix, double total)
 {
 	/*
-	 * The sampling CDFs are stored as 128-bit fixed-point thresholds and
-	 * compared with a 128-bit uniform target.  The conceptual scale is
-	 * 2^128, but that value is one past the largest __uint128_t value, so
-	 * conversion is done a 64-bit limb at a time and full CDFs are
-	 * saturated to E8_UINT128_MAX.  This reduces CDF discretisation error
-	 * from roughly 32-bit to roughly 128-bit precision.  It does not make
-	 * this floating-point prototype a production constant-time sampler.
+	 * Hot CDFs are stored as 64-bit fixed-point thresholds and compared
+	 * with a 64-bit uniform target.  The conceptual scale is 2^64, one
+	 * past UINT64_MAX, so full CDFs are saturated to UINT64_MAX.
 	 */
 	static const long double two64 = 0x1.0p64L;
-	long double ratio, scaled_hi, scaled_lo;
-	uint64_t hi, lo;
+	long double ratio, scaled;
 
-	if (!(prefix > 0.0L) || !(total > 0.0L)) {
+	if (!(prefix > 0.0) || !(total > 0.0)) {
 		return 0;
 	}
 	if (prefix >= total) {
-		return E8_UINT128_MAX;
+		return UINT64_MAX;
 	}
-	ratio = prefix / total;
+	ratio = (long double)prefix / (long double)total;
 	if (!(ratio < 1.0L)) {
-		return E8_UINT128_MAX - 1;
+		return UINT64_MAX - 1;
 	}
-	scaled_hi = ratio * two64;
-	if (!(scaled_hi < two64)) {
-		return E8_UINT128_MAX - 1;
+	scaled = ratio * two64;
+	if (!(scaled < two64)) {
+		return UINT64_MAX - 1;
 	}
-	hi = (uint64_t)scaled_hi;
-	scaled_lo = (scaled_hi - (long double)hi) * two64;
-	if (!(scaled_lo < two64)) {
-		if (hi == UINT64_MAX) {
-			return E8_UINT128_MAX - 1;
-		}
-		hi ++;
-		lo = 0;
-	} else {
-		lo = (uint64_t)scaled_lo;
-	}
-	return ((__uint128_t)hi << 64) | (__uint128_t)lo;
+	return (uint64_t)scaled;
 }
 
 #if HAWK_E8_PROFILE_SAMPLER
@@ -711,27 +684,22 @@ make_u8_block(int32_t *blk, uint8_t bits)
 }
 
 /*
- * The cached sampler tables are still stored in their existing double and
- * integer formats, but their finite Gaussian weights and normalisers are
- * accumulated with long double to reduce construction-time rounding.  This
- * is a numerical refinement only; it is not a formal distributional-distance
- * bound for the experimental sampler.
+ * Finite Gaussian weights, normalisers, and cached probability tables are
+ * built and held in double.  Runtime hot component and tiny-value CDF
+ * thresholds use 64-bit integer thresholds in the hot path.
  */
 static int
-sample_1d_integer_bounds(long double center, long double sigma, int *lo, int *hi)
+sample_1d_integer_bounds(double center, double sigma, int *lo, int *hi)
 {
-	if (!(sigma > 0.0L)) {
+	if (!(sigma > 0.0)) {
 		return 0;
 	}
 
-	long double radius = (long double)E8_1D_TAIL_SIGMAS * sigma
-		+ (long double)E8_1D_TAIL_FLOOR;
-	long double lo_d = floorl(center - radius);
-	long double hi_d = ceill(center + radius);
+	double radius = E8_1D_TAIL_SIGMAS * sigma + E8_1D_TAIL_FLOOR;
+	double lo_d = floor(center - radius);
+	double hi_d = ceil(center + radius);
 
-	if (lo_d < (long double)INT32_MIN
-		|| hi_d > (long double)INT32_MAX)
-	{
+	if (lo_d < (double)INT32_MIN || hi_d > (double)INT32_MAX) {
 		return 0;
 	}
 
@@ -740,28 +708,27 @@ sample_1d_integer_bounds(long double center, long double sigma, int *lo, int *hi
 	return *lo <= *hi;
 }
 
-static long double
-sample_1d_integer_mass_range(long double center, long double sigma,
-	int lo, int hi)
+static double
+sample_1d_integer_mass_range(double center, double sigma, int lo, int hi)
 {
-	long double inv_2sigma2 = 1.0L / (2.0L * sigma * sigma);
-	long double total = 0.0L;
+	double inv_2sigma2 = 1.0 / (2.0 * sigma * sigma);
+	double total = 0.0;
 
 	for (int x = lo; x <= hi; x ++) {
-		long double d = (long double)x - center;
-		total += expl(-(d * d) * inv_2sigma2);
+		double d = (double)x - center;
+		total += exp(-(d * d) * inv_2sigma2);
 	}
 
 	return total;
 }
 
-static long double
-sample_1d_integer_mass(long double center, long double sigma)
+static double
+sample_1d_integer_mass(double center, double sigma)
 {
 	int lo, hi;
 
 	if (!sample_1d_integer_bounds(center, sigma, &lo, &hi)) {
-		return 0.0L;
+		return 0.0;
 	}
 	return sample_1d_integer_mass_range(center, sigma, lo, hi);
 }
@@ -779,11 +746,11 @@ sample_1d_hot_row_free(e8_1d_hot_row *row)
 
 static int
 sample_1d_integer_table_build_tail(e8_1d_hot_row *row,
-	const e8_1d_integer_table *table, const long double *weights)
+	const e8_1d_integer_table *table, const double *weights)
 {
 	unsigned char *used;
 	size_t tail_cap = 0;
-	long double tail_mass = 0.0L;
+	double tail_mass = 0.0;
 
 	if (row == NULL || table == NULL || weights == NULL) {
 		return 0;
@@ -799,7 +766,7 @@ sample_1d_integer_table_build_tail(e8_1d_hot_row *row,
 		}
 	}
 	for (size_t i = 0; i < table->len; i ++) {
-		if (!used[i] && weights[i] > 0.0L) {
+		if (!used[i] && weights[i] > 0.0) {
 			tail_cap ++;
 		}
 	}
@@ -822,7 +789,7 @@ sample_1d_integer_table_build_tail(e8_1d_hot_row *row,
 
 	for (size_t out = 0; out < tail_cap; out ++) {
 		size_t best = table->len;
-		long double best_weight = 0.0L;
+		double best_weight = 0.0;
 
 		for (size_t i = 0; i < table->len; i ++) {
 			if (!used[i] && weights[i] > best_weight) {
@@ -830,32 +797,32 @@ sample_1d_integer_table_build_tail(e8_1d_hot_row *row,
 				best_weight = weights[i];
 			}
 		}
-		if (best == table->len || !(best_weight > 0.0L)) {
+		if (best == table->len || !(best_weight > 0.0)) {
 			break;
 		}
 		used[best] = 1;
 		tail_mass += best_weight;
 		row->tail_value[row->tail_len] = (int32_t)(table->lo + (int)best);
-		row->tail_cdf[row->tail_len] = (double)tail_mass;
+		row->tail_cdf[row->tail_len] = tail_mass;
 		row->tail_len ++;
 	}
 	free(used);
-	row->tail_mass = (double)tail_mass;
-	return row->tail_len > 0 && tail_mass > 0.0L;
+	row->tail_mass = tail_mass;
+	return row->tail_len > 0 && tail_mass > 0.0;
 }
 
 static int
 sample_1d_integer_table_build_tiny(e8_1d_hot_row *row,
-	const e8_1d_integer_table *table, const long double *weights,
-	long double total)
+	const e8_1d_integer_table *table, const double *weights,
+	double total)
 {
 	size_t chosen[E8_1D_TINY_VALUES];
 	unsigned chosen_len = 0;
-	long double tiny_mass = 0.0L;
-	long double prefix = 0.0L;
+	double tiny_mass = 0.0;
+	double prefix = 0.0;
 
 	if (row == NULL || table == NULL || weights == NULL || table->len == 0
-		|| !(total > 0.0L))
+		|| !(total > 0.0))
 	{
 		return 0;
 	}
@@ -864,7 +831,7 @@ sample_1d_integer_table_build_tiny(e8_1d_hot_row *row,
 
 	for (unsigned out = 0; out < E8_1D_TINY_VALUES; out ++) {
 		size_t best = table->len;
-		long double best_weight = 0.0L;
+		double best_weight = 0.0;
 
 		for (size_t i = 0; i < table->len; i ++) {
 			int used = 0;
@@ -877,7 +844,7 @@ sample_1d_integer_table_build_tiny(e8_1d_hot_row *row,
 				best_weight = weights[i];
 			}
 		}
-		if (best == table->len || !(best_weight > 0.0L)) {
+		if (best == table->len || !(best_weight > 0.0)) {
 			break;
 		}
 		chosen[chosen_len ++] = best;
@@ -886,10 +853,10 @@ sample_1d_integer_table_build_tiny(e8_1d_hot_row *row,
 	unsigned table_len = 0;
 	for (unsigned i = 0; i < chosen_len; i ++) {
 		size_t idx = chosen[i];
-		__uint128_t q;
+		uint64_t q;
 
 		prefix = tiny_mass + weights[idx];
-		q = e8_cdf_threshold_u128(prefix, total);
+		q = e8_cdf_threshold_u64(prefix, total);
 		if (table_len > 0 && q <= row->tiny_cdf[table_len - 1]) {
 			continue;
 		}
@@ -899,15 +866,15 @@ sample_1d_integer_table_build_tiny(e8_1d_hot_row *row,
 		table_len ++;
 	}
 	row->tiny_len = (uint8_t)table_len;
-	row->tiny_mass = (double)tiny_mass;
-	if (table_len == 0 || !(tiny_mass > 0.0L)) {
+	row->tiny_mass = tiny_mass;
+	if (table_len == 0 || !(tiny_mass > 0.0)) {
 		return 0;
 	}
 	if (!sample_1d_integer_table_build_tail(row, table, weights)) {
 		return 0;
 	}
 	if (!(row->tail_mass > 0.0)) {
-		row->tiny_cdf[row->tiny_len - 1] = E8_UINT128_MAX;
+		row->tiny_cdf[row->tiny_len - 1] = UINT64_MAX;
 	}
 	return 1;
 }
@@ -916,13 +883,11 @@ static int
 sample_1d_integer_table_build(e8_1d_integer_table *table,
 	e8_1d_hot_row *row, int64_t center_num32, double sigma)
 {
-	long double center = (long double)center_num32
-		/ (long double)E8_CA_PRODUCT_NORM2;
-	long double sigma_ld = (long double)sigma;
+	double center = (double)center_num32 / E8_CA_PRODUCT_NORM2;
 	int lo, hi;
 
 	if (table == NULL || row == NULL
-		|| !sample_1d_integer_bounds(center, sigma_ld, &lo, &hi))
+		|| !sample_1d_integer_bounds(center, sigma, &lo, &hi))
 	{
 		return 0;
 	}
@@ -936,24 +901,24 @@ sample_1d_integer_table_build(e8_1d_integer_table *table,
 	if (cdf == NULL) {
 		return 0;
 	}
-	long double *weights = malloc(len * sizeof *weights);
+	double *weights = malloc(len * sizeof *weights);
 	if (weights == NULL) {
 		free(cdf);
 		return 0;
 	}
 
-	long double inv_2sigma2 = 1.0L / (2.0L * sigma_ld * sigma_ld);
-	long double total = 0.0L;
+	double inv_2sigma2 = 1.0 / (2.0 * sigma * sigma);
+	double total = 0.0;
 	for (size_t i = 0; i < len; i ++) {
 		int x = lo + (int)i;
-		long double d = (long double)x - center;
-		long double w = expl(-(d * d) * inv_2sigma2);
+		double d = (double)x - center;
+		double w = exp(-(d * d) * inv_2sigma2);
 
 		weights[i] = w;
 		total += w;
-		cdf[i] = (double)total;
+		cdf[i] = total;
 	}
-	if (!(total > 0.0L)) {
+	if (!(total > 0.0)) {
 		free(weights);
 		free(cdf);
 		return 0;
@@ -964,7 +929,7 @@ sample_1d_integer_table_build(e8_1d_integer_table *table,
 	table->lo = lo;
 	table->hi = hi;
 	table->len = len;
-	table->total = (double)total;
+	table->total = total;
 	table->cdf = cdf;
 	int ok = sample_1d_integer_table_build_tiny(row, table,
 		weights, total);
@@ -990,7 +955,7 @@ sample_1d_integer_gaussian_hot(int32_t *out,
 		return 0;
 	}
 
-	__uint128_t target = rng_stream_u128(rng_stream);
+	uint64_t target = rng_stream_u64(rng_stream);
 	for (unsigned i = 0; i < row->tiny_len; i ++) {
 		if (target <= row->tiny_cdf[i]) {
 			*out = row->tiny_value[i];
@@ -1194,11 +1159,11 @@ e8_ca_component_center_num32(const int32_t *offset, unsigned coord)
 	return -dot;
 }
 
-static long double
+static double
 e8_ca_component_center(const int32_t *offset, unsigned coord)
 {
-	return (long double)e8_ca_component_center_num32(offset, coord)
-		/ (long double)E8_CA_PRODUCT_NORM2;
+	return (double)e8_ca_component_center_num32(offset, coord)
+		/ E8_CA_PRODUCT_NORM2;
 }
 
 static void
@@ -1274,7 +1239,7 @@ e8_ca_cache_get_1d_table(e8_ca_sigma_cache *cache,
 
 static int
 e8_ca_component_cdf_build(e8_ca_sigma_cache *cache, unsigned tau,
-	const long double *prefix, long double total)
+	const double *prefix, double total)
 {
 	uint8_t fallback = 0;
 	int have_fallback = 0;
@@ -1282,17 +1247,17 @@ e8_ca_component_cdf_build(e8_ca_sigma_cache *cache, unsigned tau,
 	if (cache == NULL || prefix == NULL || tau >= E8_CA_TAUS) {
 		return 0;
 	}
-	if (!(total > 0.0L)) {
+	if (!(total > 0.0)) {
 		return 0;
 	}
 
 	for (unsigned component = 0; component < E8_CA_COSETS; component ++) {
-		__uint128_t q = e8_cdf_threshold_u128(
+		uint64_t q = e8_cdf_threshold_u64(
 			prefix[component], total);
 
 		cache->component_cdf[tau][component] = q;
 		if (prefix[component] > (component == 0
-			? 0.0L : prefix[component - 1]))
+			? 0.0 : prefix[component - 1]))
 		{
 			fallback = (uint8_t)component;
 			have_fallback = 1;
@@ -1301,7 +1266,7 @@ e8_ca_component_cdf_build(e8_ca_sigma_cache *cache, unsigned tau,
 	if (!have_fallback) {
 		return 0;
 	}
-	cache->component_cdf[tau][E8_CA_COSETS - 1] = E8_UINT128_MAX;
+	cache->component_cdf[tau][E8_CA_COSETS - 1] = UINT64_MAX;
 	cache->component_fallback[tau] = fallback;
 	return 1;
 }
@@ -1314,14 +1279,14 @@ e8_ca_sigma_cache_build(e8_ca_sigma_cache *cache)
 	}
 
 	for (unsigned tau = 0; tau < E8_CA_TAUS; tau ++) {
-		long double prefix[E8_CA_COSETS];
-		long double total = 0.0L;
+		double prefix[E8_CA_COSETS];
+		double total = 0.0;
 
 		for (unsigned component = 0;
 			component < E8_CA_COSETS; component ++)
 		{
 			int32_t offset[E8_BLOCK_DIM];
-			long double mass = 1.0L;
+			double mass = 1.0;
 			int64_t base_norm2 = 0;
 
 			e8_ca_component_offset_cm(offset,
@@ -1351,17 +1316,17 @@ e8_ca_sigma_cache_build(e8_ca_sigma_cache *cache)
 				}
 				cache->coord_class[tau][component][coord]
 					= (uint8_t)table_index;
-				mass *= (long double)cache->tables[table_index].total;
+				mass *= cache->tables[table_index].total;
 			}
-			cache->component[tau].masses[component] = (double)mass;
+			cache->component[tau].masses[component] = mass;
 			total += mass;
 			prefix[component] = total;
-			cache->component[tau].prefix[component] = (double)total;
+			cache->component[tau].prefix[component] = total;
 		}
-		if (!(total > 0.0L)) {
+		if (!(total > 0.0)) {
 			return 0;
 		}
-		cache->component[tau].total = (double)total;
+		cache->component[tau].total = total;
 		if (!e8_ca_component_cdf_build(cache, tau, prefix, total)) {
 			return 0;
 		}
@@ -1415,9 +1380,8 @@ e8_ca_component_mass_cm(uint8_t tau, uint8_t component_codeword,
 {
 	uint8_t component;
 	int32_t offset[E8_BLOCK_DIM];
-	long double sigma_coord = (long double)sigma_sign
-		/ sqrtl((long double)E8_CA_PRODUCT_NORM2);
-	long double mass = 1.0L;
+	double sigma_coord = sigma_sign / sqrt(E8_CA_PRODUCT_NORM2);
+	double mass = 1.0;
 
 	if (!(sigma_sign > 0.0)
 		|| !rm13_codeword_index(component_codeword, &component))
@@ -1427,15 +1391,15 @@ e8_ca_component_mass_cm(uint8_t tau, uint8_t component_codeword,
 
 	e8_ca_component_offset_cm(offset, tau, component);
 	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		long double center = e8_ca_component_center(offset, u);
-		long double m = sample_1d_integer_mass(center, sigma_coord);
+		double center = e8_ca_component_center(offset, u);
+		double m = sample_1d_integer_mass(center, sigma_coord);
 
-		if (!(m > 0.0L)) {
+		if (!(m > 0.0)) {
 			return 0.0;
 		}
 		mass *= m;
 	}
-	return (double)mass;
+	return mass;
 }
 
 static int
@@ -1465,8 +1429,8 @@ e8_ca_select_component_cm_cached(uint8_t *component,
 		return 0;
 	}
 
-	const __uint128_t *cdf = cache->component_cdf[tau];
-	__uint128_t target = rng_stream_u128(rng_stream);
+	const uint64_t *cdf = cache->component_cdf[tau];
+	uint64_t target = rng_stream_u64(rng_stream);
 	for (unsigned u = 0; u < E8_CA_COSETS; u ++) {
 		if (target <= cdf[u]) {
 			*component = (uint8_t)u;
@@ -1491,10 +1455,8 @@ e8_sampler_cache_compare_1d_mass(double sigma_sign,
 		return 0;
 	}
 
-	long double sigma_coord = (long double)sigma_sign
-		/ sqrtl((long double)E8_CA_PRODUCT_NORM2);
-	long double center = (long double)center_num32
-		/ (long double)E8_CA_PRODUCT_NORM2;
+	double sigma_coord = sigma_sign / sqrt(E8_CA_PRODUCT_NORM2);
+	double center = (double)center_num32 / E8_CA_PRODUCT_NORM2;
 	e8_ca_sigma_cache *cache = e8_ca_get_sigma_cache(sigma_sign);
 	size_t table_index;
 
@@ -1504,7 +1466,7 @@ e8_sampler_cache_compare_1d_mass(double sigma_sign,
 	{
 		return 0;
 	}
-	*reference_mass = (double)sample_1d_integer_mass(center, sigma_coord);
+	*reference_mass = sample_1d_integer_mass(center, sigma_coord);
 	*cached_mass = cache->tables[table_index].total;
 	return 1;
 }
