@@ -103,12 +103,33 @@ e8_coset_f2_prepare(e8_coset_f2_basis *basis,
 	size_t n)
 {
 	const int8_t *src[4] = { f, g, F, G };
+	unsigned logn;
+
+	if (basis == NULL) {
+		return;
+	}
+	basis->magic = 0;
+	basis->logn = 0;
+	switch (n) {
+	case 256: logn = 8; break;
+	case 512: logn = 9; break;
+	case 1024: logn = 10; break;
+	default: return;
+	}
+	if (f == NULL || g == NULL || F == NULL || G == NULL) {
+		return;
+	}
+#if HAWK_E8_DEBUG_CHECKS
+	basis->basis_digest = e8_basis_debug_digest(f, g, F, G, n);
+#endif
 
 	for (unsigned u = 0; u < 4; u ++) {
 		e8_f2_pack_i8_mod2(basis->packed[u], src[u], n);
 		e8_f2_window_prepare(&basis->table[u], basis->packed[u], n);
 	}
 	/* Four 16-row tables use 8 KB at n=1024; packed inputs add 512 B. */
+	basis->logn = logn;
+	basis->magic = E8_COSET_F2_MAGIC;
 }
 
 /* see hawk_e8_inner.h */

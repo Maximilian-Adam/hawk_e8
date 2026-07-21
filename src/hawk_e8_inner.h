@@ -170,8 +170,33 @@ extern const e8_ntt_prime E8_NTT_PRIMES[E8_NTT_PRIME_COUNT];
 #define E8_INVERSE_W_NTT_PRIMES   1
 #define E8_NTT_MAXN               1024
 #define E8_F2_MAXW                 16
+#define E8_INVERSE_W_NTT_MAGIC     UINT32_C(0x45384E54)
+#define E8_COSET_F2_MAGIC           UINT32_C(0x45384632)
+
+#if HAWK_E8_DEBUG_CHECKS
+static inline uint64_t
+e8_basis_debug_digest(const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G, size_t n)
+{
+	const int8_t *src[4] = { f, g, F, G };
+	uint64_t h = UINT64_C(1469598103934665603) ^ (uint64_t)n;
+
+	for (unsigned v = 0; v < 4; v ++) {
+		for (size_t u = 0; u < n; u ++) {
+			h ^= (uint8_t)src[v][u];
+			h *= UINT64_C(1099511628211);
+		}
+	}
+	return h;
+}
+#endif
 
 typedef struct {
+	uint32_t magic;
+	uint32_t logn;
+#if HAWK_E8_DEBUG_CHECKS
+	uint64_t basis_digest;
+#endif
 	uint32_t gm[E8_INVERSE_W_NTT_PRIMES][E8_NTT_MAXN];
 	uint32_t igm[E8_INVERSE_W_NTT_PRIMES][E8_NTT_MAXN];
 	uint32_t ni[E8_INVERSE_W_NTT_PRIMES];
@@ -186,6 +211,11 @@ typedef struct {
 } e8_f2_window_table;
 
 typedef struct {
+	uint32_t magic;
+	uint32_t logn;
+#if HAWK_E8_DEBUG_CHECKS
+	uint64_t basis_digest;
+#endif
 	uint64_t packed[4][E8_F2_MAXW];
 	e8_f2_window_table table[4];
 } e8_coset_f2_basis;

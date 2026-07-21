@@ -315,6 +315,20 @@ e8_inverse_w_ntt_prepare(e8_inverse_w_ntt_basis *basis,
 	const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G, unsigned logn)
 {
+	if (basis == NULL) {
+		return;
+	}
+	basis->magic = 0;
+	basis->logn = 0;
+	if (logn < 8 || logn > 10 || f == NULL || g == NULL
+		|| F == NULL || G == NULL)
+	{
+		return;
+	}
+#if HAWK_E8_DEBUG_CHECKS
+	basis->basis_digest = e8_basis_debug_digest(
+		f, g, F, G, (size_t)1 << logn);
+#endif
 	for (unsigned u = 0; u < E8_INVERSE_W_NTT_PRIMES; u ++) {
 		const e8_ntt_prime *prime = &E8_NTT_PRIMES[u];
 		uint32_t p = prime->p;
@@ -341,6 +355,8 @@ e8_inverse_w_ntt_prepare(e8_inverse_w_ntt_basis *basis,
 		ntt_to_monty(logn, basis->F[u], prime);
 		ntt_to_monty(logn, basis->G[u], prime);
 	}
+	basis->logn = logn;
+	basis->magic = E8_INVERSE_W_NTT_MAGIC;
 }
 
 static uint32_t
@@ -375,6 +391,13 @@ e8_compute_inverse_w_ntt(int64_t *w0, int64_t *w1,
 	const e8_inverse_w_ntt_basis *basis,
 	const int32_t *z0, const int32_t *z1, unsigned logn)
 {
+	if (logn < 8 || logn > 10 || w0 == NULL || w1 == NULL
+		|| z0 == NULL || z1 == NULL || basis == NULL
+		|| basis->magic != E8_INVERSE_W_NTT_MAGIC
+		|| basis->logn != logn)
+	{
+		return 0;
+	}
 	size_t n = (size_t)1 << logn;
 	const e8_ntt_prime *prime = &E8_NTT_PRIMES[0];
 	uint32_t p = prime->p;
@@ -652,12 +675,27 @@ e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 		|| sig == NULL || sc_data == NULL || hpub == NULL
 		|| f == NULL || g == NULL || F == NULL || G == NULL
 		|| basis_ntt == NULL || basis_f2 == NULL || salt == NULL
+		|| basis_ntt->magic != E8_INVERSE_W_NTT_MAGIC
+		|| basis_f2->magic != E8_COSET_F2_MAGIC
+		|| basis_ntt->logn != logn || basis_f2->logn != logn
 		|| sigma_sign <= 0.0 || sigma_verify <= 0.0
 		|| max_attempts == 0 || rng == NULL)
 	{
 		return 0;
 	}
 	n = (size_t)1 << logn;
+#if HAWK_E8_DEBUG_CHECKS
+	{
+		uint64_t digest = e8_basis_debug_digest(f, g, F, G, n);
+		int basis_ok = basis_ntt->basis_digest == digest
+			&& basis_f2->basis_digest == digest;
+
+		assert(basis_ok);
+		if (!basis_ok) {
+			return 0;
+		}
+	}
+#endif
 #if HAWK_E8_PROFILE_SIGN
 	if (trace_timing != NULL) {
 		sign_profile_stage_start(&sign_c0, &sign_w0);
