@@ -15,6 +15,7 @@
 
 #define E8_MAXN   1024
 #define E8_DEBUG_INVERSE_CHECK_ATTEMPTS   4
+#define E8_INVERSE_W_ABS_LIMIT   INT64_C(140000000)
 
 static uint64_t
 trace_wall_ns(void)
@@ -352,15 +353,15 @@ static int
 center_checked_single_prime(int64_t *d, const uint32_t *a, size_t n,
 	uint32_t p)
 {
-	const int64_t limit = INT64_C(1) << 30;
-
 	for (size_t u = 0; u < n; u ++) {
 		int64_t x = a[u] > (p >> 1)
 			? (int64_t)a[u] - (int64_t)p
 			: (int64_t)a[u];
 		uint64_t ax = x < 0 ? (uint64_t)(-x) : (uint64_t)x;
+		int in_range = ax < (uint64_t)E8_INVERSE_W_ABS_LIMIT;
 
-		if (ax >= (uint64_t)limit) {
+		assert(in_range);
+		if (!in_range) {
 			return 0;
 		}
 		d[u] = x;
@@ -381,14 +382,14 @@ e8_compute_inverse_w_ntt(int64_t *w0, int64_t *w1,
 	uint32_t rw0[E8_MAXN], rw1[E8_MAXN];
 
 	/*
-	 * Stage-1 range diagnostics saw:
-	 *   n=256:  max |z0,z1| = 20,12 and max |w0,w1| = 2051,445
-	 *   n=512:  max |z0,z1| = 22,13 and max |w0,w1| = 5339,794
-	 *   n=1024: max |z0,z1| = 22,13 and max |w0,w1| = 17416,1702
-	 * Even the conservative int8 bound gives
-	 * 2*1024*127*22 < 2^23 for each reconstructed coefficient.  Prime
-	 * p0 has a centered interval just below +/-2^30; after reduction we
-	 * fail safely if a coefficient reaches |w| >= 2^30.
+	 * Reconstruction is called only after pnorm <= 31150, the largest
+	 * supported verify threshold (n=1024, sigma_verify=1.95).  Thus each
+	 * product-coordinate x has |x| <= floor(sqrt(31150)) = 176.  Every
+	 * row of 4*P^{-1} has L1 norm at most 12, hence |z| <= 3*176 = 528.
+	 * Each coefficient of B^{-1}z is the sum of two n-term products, so
+	 * the int8 basis bound gives |w| <= 2*1024*128*528 = 138412032.
+	 * E8_INVERSE_W_ABS_LIMIT adds a small margin and remains far below
+	 * the centered interval of p0, making one-prime reconstruction exact.
 	 */
 	i32_to_ntt_with_gm(logn, tz0, z0, prime, basis->gm[0]);
 	i32_to_ntt_with_gm(logn, tz1, z1, prime, basis->gm[0]);
@@ -740,6 +741,26 @@ e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 			sign_profile_stage_start(&stage_c0, &stage_w0);
 		}
 #endif
+		rejected = pnorm > threshold;
+#if HAWK_E8_PROFILE_SIGN
+		if (trace_timing != NULL) {
+			sign_profile_stage_add(
+				&trace_timing->cycles_norm_check_total,
+				&trace_timing->wall_ns_norm_check_total,
+				stage_c0, stage_w0);
+			if (rejected) {
+				trace_timing->rejections_total ++;
+			}
+		}
+#endif
+		if (rejected) {
+			continue;
+		}
+#if HAWK_E8_PROFILE_SIGN
+		if (trace_timing != NULL) {
+			sign_profile_stage_start(&stage_c0, &stage_w0);
+		}
+#endif
 		sr = compute_s_from_sample(s0, s1, t0, t1, h0b, h1b,
 			basis_ntt, f, g, F, G, z0, z1,
 			logn, n, attempt);
@@ -762,7 +783,7 @@ e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 			sign_profile_stage_start(&stage_c0, &stage_w0);
 		}
 #endif
-		rejected = (sr == 0 || pnorm > threshold);
+		rejected = sr == 0;
 #if HAWK_E8_PROFILE_SIGN
 		if (trace_timing != NULL) {
 			sign_profile_stage_add(
