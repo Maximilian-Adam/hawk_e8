@@ -6,7 +6,11 @@
 
 #define E8_MAXN   1024
 
+#if defined(__SIZEOF_INT128__)
 typedef __int128 e8_i128;
+#else
+#error "E8 experimental path requires 128-bit integer support (GCC/Clang)"
+#endif
 
 static const double E8_SIGMA_VERIFY[] = {
 	2.03, 1.99, 1.95

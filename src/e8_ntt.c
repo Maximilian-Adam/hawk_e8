@@ -4,7 +4,11 @@
 
 #include <limits.h>
 
+#if defined(__SIZEOF_INT128__)
 typedef __int128 e8_s128;
+#else
+#error "E8 experimental path requires 128-bit integer support (GCC/Clang)"
+#endif
 
 /* see hawk_e8_inner.h */
 const e8_ntt_prime E8_NTT_PRIMES[E8_NTT_PRIME_COUNT] = {

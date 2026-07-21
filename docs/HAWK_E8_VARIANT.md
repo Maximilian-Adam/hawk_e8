@@ -68,6 +68,13 @@ Core experimental sources:
 - `src/e8_vrfy.c`: uncompressed signature codec, sign symmetry break, and
   E8 completion-norm verifier.
 
+The experimental E8 path targets GCC or Clang and is not strict
+`-std=c99 -pedantic` code: exact CRT/reference accumulations use `__int128`,
+and sampler parallelism uses pthreads and GNU `__sync` builtins.  Compilation
+fails with a clear diagnostic when 128-bit integer support is unavailable.
+These extensions are confined to the gated E8 path; ordinary HAWK retains its
+existing portability profile.
+
 The corresponding files under `Reference_Implementation/` are the reference
 test/build copies.
 
