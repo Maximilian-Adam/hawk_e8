@@ -261,13 +261,8 @@ i8_to_ntt(unsigned logn, uint32_t *d,
 	const int8_t *a, const e8_ntt_prime *prime, const uint32_t *gm)
 {
 	size_t n = (size_t)1 << logn;
-	int32_t tmp[E8_MAXN];
-
 	for (size_t u = 0; u < n; u ++) {
-		tmp[u] = a[u];
-	}
-	for (size_t u = 0; u < n; u ++) {
-		d[u] = e8_mp_set_i32(tmp[u], prime->p);
+		d[u] = e8_mp_set_i32(a[u], prime->p);
 	}
 	e8_ntt(logn, d, gm, prime->p, prime->p0i);
 }

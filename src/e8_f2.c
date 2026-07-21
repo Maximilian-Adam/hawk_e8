@@ -103,6 +103,7 @@ e8_coset_f2_prepare(e8_coset_f2_basis *basis,
 	size_t n)
 {
 	const int8_t *src[4] = { f, g, F, G };
+	uint64_t packed[E8_F2_MAXW];
 	unsigned logn;
 
 	if (basis == NULL) {
@@ -124,10 +125,10 @@ e8_coset_f2_prepare(e8_coset_f2_basis *basis,
 #endif
 
 	for (unsigned u = 0; u < 4; u ++) {
-		e8_f2_pack_i8_mod2(basis->packed[u], src[u], n);
-		e8_f2_window_prepare(&basis->table[u], basis->packed[u], n);
+		e8_f2_pack_i8_mod2(packed, src[u], n);
+		e8_f2_window_prepare(&basis->table[u], packed, n);
 	}
-	/* Four 16-row tables use 8 KB at n=1024; packed inputs add 512 B. */
+	/* Four 16-row tables use 8 KB at n=1024. */
 	basis->logn = logn;
 	basis->magic = E8_COSET_F2_MAGIC;
 }

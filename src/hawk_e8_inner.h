@@ -216,7 +216,6 @@ typedef struct {
 #if HAWK_E8_DEBUG_CHECKS
 	uint64_t basis_digest;
 #endif
-	uint64_t packed[4][E8_F2_MAXW];
 	e8_f2_window_table table[4];
 } e8_coset_f2_basis;
 

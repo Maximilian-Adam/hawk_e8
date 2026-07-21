@@ -167,16 +167,17 @@ B^{-1} = [ G  -F ]
 
 The target-coset computation `t = B h mod 2` keeps the public input/output
 layout as one byte per coefficient, but internally packs each polynomial into
-64-bit words and performs the F2 negacyclic products as portable
-shift-and-XOR word operations.  Since `-1 == 1` over F2, negacyclic wraparound
-is an XOR into the low coefficients.
+64-bit words.  Per-key 4-bit comb tables for `f,g,F,G` reduce each F2
+negacyclic product to a branchless window scan over the changing challenge
+operand.  Since `-1 == 1` over F2, negacyclic wraparound is an XOR into the
+low coefficients.
 
 The inverse-basis reconstruction `w = B^{-1} z` uses the shared internal NTT
-over two 31-bit primes and signed CRT reconstruction.  The signer hoists
-`NTT(f)`, `NTT(g)`, `NTT(F)`, and `NTT(G)` out of the per-attempt loop, then
-transforms `z0,z1` for each attempt and reconstructs exact integer
-coefficients.  Debug-check builds retain the independent schoolbook
-reconstruction as a safety rail.
+over one 31-bit prime with a proven centered reconstruction bound.  The
+caller-owned prepared basis hoists `NTT(f)`, `NTT(g)`, `NTT(F)`, and `NTT(G)`
+out of repeated signing calls; each attempt transforms only `z0,z1`.
+Debug-check builds retain the independent schoolbook reconstruction as a
+safety rail, while the shared CRT helpers remain available to verifier tests.
 
 Before encoding, the signer applies a simple sign symmetry break: compare `w`
 and `-w`, scan `w1` from coefficient 0 upward and then `w0`, and keep the
