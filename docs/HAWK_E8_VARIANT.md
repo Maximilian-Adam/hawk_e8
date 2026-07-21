@@ -131,6 +131,12 @@ The compile-time default is serial.  The selected benchmark/signing diagnostic
 configuration uses 8, 8, and 16 sampler threads for n=256, 512, and 1024,
 respectively.
 
+Cache lookup and publication are protected by a pthread mutex, so concurrent
+cache warm-up cannot corrupt the cache.  Full sampler and signing calls are
+not reentrant across application threads because the worker pool, thread/RNG
+controls, and profiling state are process-global; applications must serialize
+those calls.  This does not affect the sampler's internal block parallelism.
+
 All sampler paths are floating-point, data-dependent, and non-constant-time.
 
 ## Signing And Verification

@@ -138,6 +138,7 @@ struct e8_ca_sigma_cache_s {
 };
 
 static e8_ca_sigma_cache *e8_ca_cache_list = NULL;
+static pthread_mutex_t e8_ca_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static unsigned e8_sampler_thread_override = UINT_MAX;
 static unsigned e8_sampler_rng_mode = E8_SAMPLER_RNG_PER_BLOCK;
 static e8_sampler_profile e8_sampler_last_profile;
@@ -1340,18 +1341,23 @@ e8_ca_get_sigma_cache(double sigma_sign)
 	if (!(sigma_sign > 0.0)) {
 		return NULL;
 	}
+	if (pthread_mutex_lock(&e8_ca_cache_mutex) != 0) {
+		return NULL;
+	}
 
 	uint64_t sigma_bits = double_bits(sigma_sign);
 	for (e8_ca_sigma_cache *cur = e8_ca_cache_list;
 		cur != NULL; cur = cur->next)
 	{
 		if (cur->sigma_sign_bits == sigma_bits) {
+			(void)pthread_mutex_unlock(&e8_ca_cache_mutex);
 			return cur;
 		}
 	}
 
 	e8_ca_sigma_cache *cache = calloc(1, sizeof *cache);
 	if (cache == NULL) {
+		(void)pthread_mutex_unlock(&e8_ca_cache_mutex);
 		return NULL;
 	}
 	cache->sigma_sign = sigma_sign;
@@ -1360,10 +1366,12 @@ e8_ca_get_sigma_cache(double sigma_sign)
 	cache->sigma_coord_bits = double_bits(cache->sigma_coord);
 	if (!e8_ca_sigma_cache_build(cache)) {
 		e8_ca_sigma_cache_free(cache);
+		(void)pthread_mutex_unlock(&e8_ca_cache_mutex);
 		return NULL;
 	}
 	cache->next = e8_ca_cache_list;
 	e8_ca_cache_list = cache;
+	(void)pthread_mutex_unlock(&e8_ca_cache_mutex);
 	return cache;
 }
 

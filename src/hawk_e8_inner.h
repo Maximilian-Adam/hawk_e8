@@ -416,6 +416,11 @@ double e8_sigma_to_rho_s(double sigma);
  * tables and finite Gaussian normalisers are held in double, while runtime
  * hot-path CDF thresholds are 64-bit integers.  It remains an
  * experimental, floating-point, data-dependent research sampler.
+ *
+ * Cache lookup and publication are mutex-protected.  The sampler as a whole
+ * is not reentrant across application threads because its worker pool,
+ * controls, and profiling state are process-global.  Applications must
+ * serialize full sampler/signing calls; internal block parallelism is safe.
  */
 int e8_sampler_warm_cache(double sigma_sign);
 
