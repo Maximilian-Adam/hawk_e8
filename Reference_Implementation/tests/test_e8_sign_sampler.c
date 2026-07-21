@@ -7,6 +7,7 @@
 #include "../hawk_e8_inner.h"
 
 #define MAXN   1024
+#define RANGE_DIAGNOSTIC_TRIALS   1000
 
 typedef struct {
 	unsigned logn;
@@ -16,6 +17,21 @@ typedef struct {
 	double sigma_verify;
 	unsigned max_attempts;
 } e8_sign_param;
+
+typedef struct {
+	unsigned logn;
+	uint8_t digest[32];
+} fixed_vector_digest;
+
+typedef struct {
+	unsigned signatures;
+	unsigned total_attempts;
+	unsigned max_seen_attempts;
+	uint64_t max_abs_z0;
+	uint64_t max_abs_z1;
+	uint64_t max_abs_w0;
+	uint64_t max_abs_w1;
+} range_diagnostic_stats;
 
 /*
  * Prototype-only values for the experimental Construction-A CM sampler.  They
@@ -28,12 +44,45 @@ static const e8_sign_param PARAMS[] = {
 	{ 10, 2, 2, 3.669, 1.95, 1000 }
 };
 
+static const fixed_vector_digest FIXED_VECTOR_DIGESTS[] = {
+	{ 8, {
+		0x3C, 0x8E, 0xD6, 0x8E, 0xD4, 0x78, 0x3E, 0xD8,
+		0x7C, 0xE5, 0xC8, 0x98, 0x0B, 0x95, 0xED, 0xD8,
+		0x1D, 0xC2, 0xFE, 0x52, 0x3A, 0xCC, 0x92, 0x09,
+		0x86, 0x83, 0x92, 0xD0, 0xDC, 0x8E, 0xBB, 0x6A
+	} },
+	{ 9, {
+		0x48, 0x98, 0x86, 0x54, 0x57, 0x94, 0x1A, 0xF0,
+		0x42, 0x39, 0xF6, 0x2B, 0xA0, 0x8F, 0xE9, 0xB8,
+		0x11, 0x92, 0xFD, 0x53, 0xD4, 0x32, 0xAD, 0xCA,
+		0x3E, 0x81, 0x68, 0x46, 0xA4, 0x8B, 0xE1, 0x07
+	} },
+	{ 10, {
+		0x85, 0xE9, 0x3B, 0xE4, 0x47, 0xDB, 0x1C, 0x65,
+		0x30, 0xC4, 0xF8, 0xBF, 0xB5, 0x64, 0x4F, 0x5B,
+		0x8C, 0x56, 0xE1, 0x7F, 0xD8, 0x2D, 0x59, 0x52,
+		0xB3, 0x59, 0xFA, 0xBE, 0x1A, 0xF8, 0x12, 0x24
+	} }
+};
+
 static uint64_t
 rng_next_u64(uint64_t *state)
 {
 	*state = *state * UINT64_C(6364136223846793005)
 		+ UINT64_C(1442695040888963407);
 	return *state;
+}
+
+static uint64_t
+abs_i32_u64(int32_t x)
+{
+	return x < 0 ? (uint64_t)(-(int64_t)x) : (uint64_t)x;
+}
+
+static uint64_t
+abs_i64_u64(int64_t x)
+{
+	return x < 0 ? (uint64_t)(-(x + 1)) + 1u : (uint64_t)x;
 }
 
 static void
@@ -66,6 +115,23 @@ make_message_context(shake_context *sc_data,
 	buf[1] = (uint8_t)keynum;
 	buf[2] = (uint8_t)trial;
 	buf[3] = (uint8_t)variant;
+	shake_init(sc_data, 256);
+	shake_inject(sc_data, prefix, sizeof prefix - 1);
+	shake_inject(sc_data, buf, sizeof buf);
+}
+
+static void
+make_range_message_context(shake_context *sc_data,
+	unsigned logn, unsigned trial)
+{
+	static const char prefix[] = "experimental e8 range diagnostic";
+	uint8_t buf[5];
+
+	buf[0] = (uint8_t)logn;
+	buf[1] = (uint8_t)trial;
+	buf[2] = (uint8_t)(trial >> 8);
+	buf[3] = (uint8_t)(trial >> 16);
+	buf[4] = (uint8_t)(trial >> 24);
 	shake_init(sc_data, 256);
 	shake_inject(sc_data, prefix, sizeof prefix - 1);
 	shake_inject(sc_data, buf, sizeof buf);
@@ -202,6 +268,42 @@ make_salt(uint8_t *salt, size_t salt_len,
 	for (size_t u = 0; u < salt_len; u ++) {
 		salt[u] = (uint8_t)(0xB5u + 29u * u
 			+ 7u * keynum + trial + 3u * logn);
+	}
+}
+
+static void
+hash_signature(uint8_t digest[32], const uint8_t *sig, size_t sig_len)
+{
+	shake_context sc;
+
+	shake_init(&sc, 256);
+	shake_inject(&sc, sig, sig_len);
+	shake_flip(&sc);
+	shake_extract(&sc, digest, 32);
+}
+
+static void
+print_digest(const uint8_t digest[32])
+{
+	for (unsigned u = 0; u < 32; u ++) {
+		fprintf(stderr, "%s0x%02X", u == 0 ? "" : ", ", digest[u]);
+	}
+	fprintf(stderr, "\n");
+}
+
+static void
+make_range_salt(uint8_t *salt, size_t salt_len,
+	unsigned logn, unsigned trial)
+{
+	uint64_t rng_state = UINT64_C(0xE856A11E9A110000)
+		+ ((uint64_t)logn << 40)
+		+ (uint64_t)trial * UINT64_C(0x9E3779B97F4A7C15);
+
+	for (size_t u = 0; u < salt_len; u ++) {
+		if ((u & 7u) == 0) {
+			(void)rng_next_u64(&rng_state);
+		}
+		salt[u] = (uint8_t)(rng_state >> ((u & 7u) << 3));
 	}
 }
 
@@ -426,6 +528,249 @@ check_sampler_trace(const e8_sign_param *param,
 }
 
 static int
+record_sample_range(const e8_sign_param *param,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G,
+	const uint8_t *hpub, const uint8_t *salt,
+	const shake_context *sc_data,
+	const int32_t *z0, const int32_t *z1,
+	range_diagnostic_stats *stats, unsigned trial)
+{
+	unsigned logn = param->logn;
+	size_t n = (size_t)1 << logn;
+	size_t salt_len = e8_salt_len(logn);
+	uint8_t h[256], h0b[MAXN], h1b[MAXN];
+	uint8_t t0[MAXN], t1[MAXN];
+	int64_t w0[MAXN], w1[MAXN];
+
+	hash_to_h(logn, h, sc_data, hpub, salt, salt_len);
+	for (size_t u = 0; u < n; u ++) {
+		h0b[u] = (uint8_t)get_bit(h, u);
+		h1b[u] = (uint8_t)get_bit(h, n + u);
+	}
+	compute_t_mod2(t0, t1, f, g, F, G, h0b, h1b, n);
+	for (size_t u = 0; u < n; u ++) {
+		uint64_t az0 = abs_i32_u64(z0[u]);
+		uint64_t az1 = abs_i32_u64(z1[u]);
+
+		if ((((uint32_t)z0[u]) & 1u) != t0[u]
+			|| (((uint32_t)z1[u]) & 1u) != t1[u])
+		{
+			fprintf(stderr,
+				"ERR: range diagnostic z parity mismatch"
+				" logn=%u trial=%u coeff=%u\n",
+				logn, trial, (unsigned)u);
+			return 0;
+		}
+		if (az0 > stats->max_abs_z0) {
+			stats->max_abs_z0 = az0;
+		}
+		if (az1 > stats->max_abs_z1) {
+			stats->max_abs_z1 = az1;
+		}
+	}
+
+	compute_inverse_w(w0, w1, f, g, F, G, z0, z1, n);
+	for (size_t u = 0; u < n; u ++) {
+		uint64_t aw0 = abs_i64_u64(w0[u]);
+		uint64_t aw1 = abs_i64_u64(w1[u]);
+
+		if ((((uint64_t)w0[u]) & 1u) != h0b[u]
+			|| (((uint64_t)w1[u]) & 1u) != h1b[u])
+		{
+			fprintf(stderr,
+				"ERR: range diagnostic w parity mismatch"
+				" logn=%u trial=%u coeff=%u\n",
+				logn, trial, (unsigned)u);
+			return 0;
+		}
+		if (aw0 > stats->max_abs_w0) {
+			stats->max_abs_w0 = aw0;
+		}
+		if (aw1 > stats->max_abs_w1) {
+			stats->max_abs_w1 = aw1;
+		}
+	}
+	return 1;
+}
+
+static int
+run_range_diagnostic_logn(const e8_sign_param *param)
+{
+	unsigned logn = param->logn;
+	size_t sig_len = e8_sig_uncompressed_size(logn);
+	size_t salt_len = e8_salt_len(logn);
+	size_t hpub_len = (size_t)1 << (logn - 4);
+	uint64_t rng_state = UINT64_C(0xE856A11E4AD10000) + logn;
+	int8_t f[MAXN], g[MAXN], F[MAXN], G[MAXN];
+	uint8_t sig[40 + 4 * MAXN];
+	uint8_t hpub[64], salt[40];
+	int32_t z0[MAXN], z1[MAXN];
+	range_diagnostic_stats stats;
+
+	memset(&stats, 0, sizeof stats);
+	if (!make_basis(logn, f, g, F, G, &rng_state)) {
+		fprintf(stderr,
+			"ERR: range diagnostic keygen failed logn=%u\n",
+			logn);
+		return 0;
+	}
+	make_hpub(hpub, hpub_len, logn, 0);
+	e8_sampler_set_thread_count(1);
+	e8_sampler_set_rng_mode(E8_SAMPLER_RNG_PER_BLOCK);
+
+	for (unsigned trial = 0; trial < RANGE_DIAGNOSTIC_TRIALS; trial ++) {
+		shake_context sc_data;
+		int64_t pnorm;
+		unsigned attempts;
+
+		make_range_salt(salt, salt_len, logn, trial);
+		make_range_message_context(&sc_data, logn, trial);
+		if (!e8_sign_sampler_trace_uncompressed(logn,
+			sig, sig_len, &sc_data, hpub, hpub_len,
+			f, g, F, G, salt,
+			param->sigma_sign, param->sigma_verify,
+			param->max_attempts, test_rng, &rng_state,
+			z0, z1, &pnorm, &attempts))
+		{
+			fprintf(stderr,
+				"ERR: range diagnostic signing failed"
+				" logn=%u trial=%u\n", logn, trial);
+			return 0;
+		}
+		if (!record_sample_range(param, f, g, F, G, hpub, salt,
+			&sc_data, z0, z1, &stats, trial))
+		{
+			return 0;
+		}
+		stats.signatures ++;
+		stats.total_attempts += attempts;
+		if (attempts > stats.max_seen_attempts) {
+			stats.max_seen_attempts = attempts;
+		}
+		(void)pnorm;
+	}
+
+	printf("E8 sampler range diagnostic n=%u: signatures=%u"
+		" max_abs_z0=%llu max_abs_z1=%llu"
+		" max_abs_w0=%llu max_abs_w1=%llu"
+		" total_attempts=%u max_seen_attempts=%u\n",
+		1u << logn, stats.signatures,
+		(unsigned long long)stats.max_abs_z0,
+		(unsigned long long)stats.max_abs_z1,
+		(unsigned long long)stats.max_abs_w0,
+		(unsigned long long)stats.max_abs_w1,
+		stats.total_attempts, stats.max_seen_attempts);
+	return 1;
+}
+
+static int
+run_range_diagnostic(void)
+{
+	for (size_t u = 0; u < sizeof PARAMS / sizeof PARAMS[0]; u ++) {
+		if (!run_range_diagnostic_logn(&PARAMS[u])) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static const fixed_vector_digest *
+find_fixed_vector_digest(unsigned logn)
+{
+	for (size_t u = 0;
+		u < sizeof FIXED_VECTOR_DIGESTS / sizeof FIXED_VECTOR_DIGESTS[0];
+		u ++)
+	{
+		if (FIXED_VECTOR_DIGESTS[u].logn == logn) {
+			return &FIXED_VECTOR_DIGESTS[u];
+		}
+	}
+	return NULL;
+}
+
+static int
+test_fixed_seed_vector_logn(const e8_sign_param *param)
+{
+	unsigned logn = param->logn;
+	size_t sig_len = e8_sig_uncompressed_size(logn);
+	size_t salt_len = e8_salt_len(logn);
+	size_t hpub_len = (size_t)1 << (logn - 4);
+	uint64_t key_rng = UINT64_C(0xE856F17ED51A0000) + logn;
+	uint64_t sign_rng = UINT64_C(0xE856F17ED51A8000) + logn;
+	const fixed_vector_digest *expected;
+	int8_t f[MAXN], g[MAXN], F[MAXN], G[MAXN];
+	int32_t q00[MAXN], q01[MAXN], q10[MAXN], q11[MAXN];
+	int32_t z0[MAXN], z1[MAXN];
+	uint8_t sig[40 + 4 * MAXN], hpub[64], salt[40];
+	uint8_t digest[32];
+	shake_context sc_data;
+	int64_t pnorm;
+	unsigned attempts;
+
+	expected = find_fixed_vector_digest(logn);
+	if (expected == NULL) {
+		fprintf(stderr,
+			"ERR: no sampled E8 fixed vector digest logn=%u\n",
+			logn);
+		return 0;
+	}
+	if (!make_basis(logn, f, g, F, G, &key_rng)) {
+		fprintf(stderr,
+			"ERR: fixed-vector keygen failed logn=%u\n", logn);
+		return 0;
+	}
+	e8_compute_qform(q00, q01, q10, q11, f, g, F, G, logn);
+	make_hpub(hpub, hpub_len, logn, 0x5Au);
+	make_salt(salt, salt_len, logn, 0x5Au, 0x33u);
+	make_message_context(&sc_data, logn, 0x5Au, 0x33u, 0);
+
+	e8_sampler_set_thread_count(1);
+	e8_sampler_set_rng_mode(E8_SAMPLER_RNG_PER_BLOCK);
+	if (!e8_sign_sampler_trace_uncompressed(logn,
+		sig, sig_len, &sc_data, hpub, hpub_len,
+		f, g, F, G, salt,
+		param->sigma_sign, param->sigma_verify,
+		param->max_attempts, test_rng, &sign_rng,
+		z0, z1, &pnorm, &attempts))
+	{
+		fprintf(stderr,
+			"ERR: fixed-vector signing failed logn=%u\n", logn);
+		return 0;
+	}
+
+	make_message_context(&sc_data, logn, 0x5Au, 0x33u, 0);
+	if (!e8_verify_uncompressed_with_sigma(logn,
+		sig, sig_len, &sc_data, hpub, hpub_len,
+		q00, q01, q10, q11, param->sigma_verify))
+	{
+		fprintf(stderr,
+			"ERR: fixed-vector verifier rejected logn=%u\n", logn);
+		return 0;
+	}
+	if (!check_sampler_trace(param, f, g, F, G,
+		q00, q01, q10, q11, hpub, salt,
+		sig, sig_len, z0, z1, pnorm, 0x5Au, 0x33u))
+	{
+		return 0;
+	}
+
+	hash_signature(digest, sig, sig_len);
+	if (memcmp(digest, expected->digest, sizeof digest) != 0) {
+		fprintf(stderr,
+			"ERR: fixed-vector signature digest mismatch logn=%u\n"
+			"got: ", logn);
+		print_digest(digest);
+		fprintf(stderr, "expected: ");
+		print_digest(expected->digest);
+		return 0;
+	}
+	printf("E8 sampler fixed vector n=%u: attempts=%u pnorm=%lld\n",
+		1u << logn, attempts, (long long)pnorm);
+	return 1;
+}
+
+static int
 test_unsupported_logn(const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G)
 {
@@ -583,9 +928,19 @@ test_sampler_signing_logn(const e8_sign_param *param)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
+	if (argc == 2 && strcmp(argv[1], "--range-diagnostic") == 0) {
+		return run_range_diagnostic() ? 0 : 1;
+	}
+	if (argc != 1) {
+		fprintf(stderr, "usage: %s [--range-diagnostic]\n", argv[0]);
+		return 1;
+	}
 	for (size_t u = 0; u < sizeof PARAMS / sizeof PARAMS[0]; u ++) {
+		if (!test_fixed_seed_vector_logn(&PARAMS[u])) {
+			return 1;
+		}
 		if (!test_sampler_signing_logn(&PARAMS[u])) {
 			return 1;
 		}

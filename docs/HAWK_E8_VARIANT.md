@@ -59,6 +59,10 @@ Core experimental sources:
 
 - `src/hawk_e8_inner.h`: gated internal E8 declarations.
 - `src/e8_math.c`: `P_n`, `S_n`, `Delta_n`, and `Q_E8` helpers.
+- `src/e8_f2.c`: bit-packed F2 negacyclic arithmetic used for the signing
+  target coset.
+- `src/e8_ntt.c`: shared internal NTT, inverse NTT, modular multiplication,
+  and CRT helpers for verifier/signing arithmetic.
 - `src/e8_sampler.c`: coset-matched Construction-A CM E8 sampler.
 - `src/e8_sign.c`: dummy E8 signers and sampler-backed uncompressed signer.
 - `src/e8_vrfy.c`: uncompressed signature codec, sign symmetry break, and
@@ -147,6 +151,19 @@ with:
 B^{-1} = [ G  -F ]
          [ -g  f ]
 ```
+
+The target-coset computation `t = B h mod 2` keeps the public input/output
+layout as one byte per coefficient, but internally packs each polynomial into
+64-bit words and performs the F2 negacyclic products as portable
+shift-and-XOR word operations.  Since `-1 == 1` over F2, negacyclic wraparound
+is an XOR into the low coefficients.
+
+The inverse-basis reconstruction `w = B^{-1} z` uses the shared internal NTT
+over two 31-bit primes and signed CRT reconstruction.  The signer hoists
+`NTT(f)`, `NTT(g)`, `NTT(F)`, and `NTT(G)` out of the per-attempt loop, then
+transforms `z0,z1` for each attempt and reconstructs exact integer
+coefficients.  Debug-check builds retain the independent schoolbook
+reconstruction as a safety rail.
 
 Before encoding, the signer applies a simple sign symmetry break: compare `w`
 and `-w`, scan `w1` from coefficient 0 upward and then `w0`, and keep the
@@ -256,11 +273,13 @@ Current E8 tests:
 
 ```text
 test_e8_math          P_n/S_n/Delta_n helpers
+test_e8_arith         packed F2 and NTT/CRT differential arithmetic tests
 test_e8_public        expanded Q_E8 public form algebra
 test_e8_verify        uncompressed verifier and norm equivalence
 test_e8_sign          dummy E8 signing algebra and encoding
 test_e8_sampler       block/full sampler support, cosets, and norms
-test_e8_sign_sampler  sampler-backed uncompressed sign/verify
+test_e8_sign_sampler  sampler-backed uncompressed sign/verify, dynamic-range
+                      diagnostic, and fixed-seed signature regression
 ```
 
 ## Diagnostics And CSV Outputs
@@ -319,7 +338,11 @@ make -C Reference_Implementation profile-sign-bench
 `sign-bench` writes `Reference_Implementation/e8_sign_bench.csv`.
 `profile-sign-bench` builds the dedicated signature benchmark with
 `HAWK_E8_PROFILE_SIGN=1` and prints per-stage E8 signing timings to the
-terminal.
+terminal.  For optimization timing, build profile runs with
+`HAWK_E8_DEBUG_CHECKS=0`; debug-check builds deliberately retain schoolbook
+cross-checks for the reconstructed signer coefficients.  The final symmetric
+HAWK/E8 accounting, methods, and reproduction commands are recorded in
+`docs/perf_comparison_final.md`.
 
 Rejection and norm summaries:
 

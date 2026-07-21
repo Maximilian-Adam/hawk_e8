@@ -12,19 +12,6 @@ static const double E8_SIGMA_VERIFY[] = {
 	2.03, 1.99, 1.95
 };
 
-typedef struct {
-	uint32_t p;
-	uint32_t p0i;
-	uint32_t g;
-} e8_prime;
-
-static const e8_prime E8_NTT_PRIMES[] = {
-	{ 2147473409, 2042615807, 1790111537 },
-	{ 2147389441, 1862176767,  677655126 },
-	{ 2147387393, 1472104447,  563781659 },
-	{ 2147377153, 3690881023,  978644358 }
-};
-
 static int
 e8_param_salt_len(unsigned logn, size_t *salt_len)
 {
@@ -54,143 +41,26 @@ e8_param_verify_bound(unsigned logn, int64_t *bound)
 	return e8_verify_bound_from_sigma(logn, sigma_verify, bound);
 }
 
-static uint32_t
-e8_mp_montymul(uint32_t a, uint32_t b, uint32_t p, uint32_t p0i)
-{
-	uint64_t z = (uint64_t)a * (uint64_t)b;
-	uint32_t w = (uint32_t)z * p0i;
-	uint32_t d = (uint32_t)((z + (uint64_t)w * (uint64_t)p) >> 32) - p;
-	return d + (p & tbmask(d));
-}
-
-static uint32_t
-e8_mp_add(uint32_t a, uint32_t b, uint32_t p)
-{
-	uint32_t d = a + b;
-	return d >= p ? d - p : d;
-}
-
-static uint32_t
-e8_mp_mul(uint32_t a, uint32_t b, uint32_t p)
-{
-	return (uint32_t)(((uint64_t)a * b) % p);
-}
-
-static uint32_t
-e8_mp_pow(uint32_t x, uint32_t e, uint32_t p)
-{
-	uint32_t y = 1;
-
-	while (e != 0) {
-		if ((e & 1) != 0) {
-			y = e8_mp_mul(y, x, p);
-		}
-		x = e8_mp_mul(x, x, p);
-		e >>= 1;
-	}
-	return y;
-}
-
-static uint32_t
-e8_mp_set_i32(int32_t x, uint32_t p)
-{
-	int64_t y = x % (int64_t)p;
-
-	if (y < 0) {
-		y += p;
-	}
-	return (uint32_t)y;
-}
-
-static size_t
-e8_bitrev(size_t x, unsigned logn)
-{
-	size_t y = 0;
-
-	for (unsigned u = 0; u < logn; u ++) {
-		y = (y << 1) | (x & 1);
-		x >>= 1;
-	}
-	return y;
-}
-
-static void
-e8_mkgm(unsigned logn, uint32_t *gm,
-	uint32_t g, uint32_t p, uint32_t p0i)
-{
-	size_t n = (size_t)1 << logn;
-
-	for (unsigned u = logn; u < 10; u ++) {
-		g = e8_mp_montymul(g, g, p, p0i);
-	}
-
-	uint32_t x = (uint32_t)(UINT64_C(0x100000000) % p);
-	for (size_t u = 0; u < n; u ++) {
-		gm[e8_bitrev(u, logn)] = x;
-		x = e8_mp_montymul(x, g, p, p0i);
-	}
-}
-
-static void
-e8_ntt(unsigned logn, uint32_t *a,
-	const uint32_t *gm, uint32_t p, uint32_t p0i)
-{
-	size_t t = (size_t)1 << logn;
-
-	for (unsigned lm = 0; lm < logn; lm ++) {
-		size_t m = (size_t)1 << lm;
-		size_t ht = t >> 1;
-		size_t v0 = 0;
-		for (size_t u = 0; u < m; u ++) {
-			uint32_t s = gm[u + m];
-			for (size_t v = 0; v < ht; v ++) {
-				size_t k1 = v0 + v;
-				size_t k2 = k1 + ht;
-				uint32_t x1 = a[k1];
-				uint32_t x2 = e8_mp_montymul(a[k2], s, p, p0i);
-				a[k1] = e8_mp_add(x1, x2, p);
-				a[k2] = x1 >= x2 ? x1 - x2 : x1 + p - x2;
-			}
-			v0 += t;
-		}
-		t = ht;
-	}
-}
-
-static void
-e8_poly_to_ntt(unsigned logn, uint32_t *d, const int32_t *a,
-	uint32_t p, uint32_t p0i, const uint32_t *gm)
-{
-	size_t n = (size_t)1 << logn;
-
-	for (size_t u = 0; u < n; u ++) {
-		d[u] = e8_mp_set_i32(a[u], p);
-	}
-	e8_ntt(logn, d, gm, p, p0i);
-}
-
 static int
 e8_completion_half_mod(uint32_t *half,
 	const int32_t *q00, const int32_t *q01,
 	const int32_t *w0, const int32_t *w1,
-	unsigned logn, const e8_prime *prime)
+	unsigned logn, const e8_ntt_prime *prime)
 {
 	size_t n = (size_t)1 << logn;
 	size_t hn = n >> 1;
-	uint32_t gm[E8_MAXN];
 	uint32_t tq00[E8_MAXN], tq01[E8_MAXN], tw0[E8_MAXN], tw1[E8_MAXN];
 	uint32_t tdelta[E8_MAXN], td[E8_MAXN], te[E8_MAXN];
 	int32_t delta[E8_MAXN];
 	uint32_t acc = 0;
 	uint32_t p = prime->p;
 
-	e8_mkgm(logn, gm, prime->g, p, prime->p0i);
 	e8_make_delta(delta, logn);
-	e8_poly_to_ntt(logn, tq00, q00, p, prime->p0i, gm);
-	e8_poly_to_ntt(logn, tq01, q01, p, prime->p0i, gm);
-	e8_poly_to_ntt(logn, tw0, w0, p, prime->p0i, gm);
-	e8_poly_to_ntt(logn, tw1, w1, p, prime->p0i, gm);
-	e8_poly_to_ntt(logn, tdelta, delta, p, prime->p0i, gm);
+	e8_ntt_to_ntt(logn, tq00, q00, prime);
+	e8_ntt_to_ntt(logn, tq01, q01, prime);
+	e8_ntt_to_ntt(logn, tw0, w0, prime);
+	e8_ntt_to_ntt(logn, tw1, w1, prime);
+	e8_ntt_to_ntt(logn, tdelta, delta, prime);
 
 	for (size_t u = 0; u < n; u ++) {
 		if (tq00[u] == 0) {

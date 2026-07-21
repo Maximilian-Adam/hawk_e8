@@ -33,6 +33,14 @@
 #define e8_apply_S     Zh(e8_apply_S)
 #define e8_make_delta  Zh(e8_make_delta)
 #define e8_compute_qform  Zh(e8_compute_qform)
+#define e8_f2_pack  Zh(e8_f2_pack)
+#define e8_f2_pack_i8_mod2  Zh(e8_f2_pack_i8_mod2)
+#define e8_f2_window_prepare  Zh(e8_f2_window_prepare)
+#define e8_f2_window_mul_add  Zh(e8_f2_window_mul_add)
+#define e8_f2_unpack  Zh(e8_f2_unpack)
+#define e8_coset_f2_prepare  Zh(e8_coset_f2_prepare)
+#define e8_compute_t_mod2_prepared  Zh(e8_compute_t_mod2_prepared)
+#define e8_compute_t_mod2  Zh(e8_compute_t_mod2)
 #define e8_salt_len  Zh(e8_salt_len)
 #define e8_sig_uncompressed_size  Zh(e8_sig_uncompressed_size)
 #define e8_encode_sig_uncompressed  Zh(e8_encode_sig_uncompressed)
@@ -46,15 +54,32 @@
 #define e8_verify_uncompressed_with_sigma  Zh(e8_verify_uncompressed_with_sigma)
 #define e8_sign_dummy_uncompressed  Zh(e8_sign_dummy_uncompressed)
 #define e8_sign_dummy_offset_uncompressed  Zh(e8_sign_dummy_offset_uncompressed)
+#define e8_inverse_w_ntt_prepare  Zh(e8_inverse_w_ntt_prepare)
+#define e8_compute_inverse_w_ntt  Zh(e8_compute_inverse_w_ntt)
 #define e8_sign_sampler_uncompressed  Zh(e8_sign_sampler_uncompressed)
 #define e8_sign_sampler_trace_uncompressed  Zh(e8_sign_sampler_trace_uncompressed)
 #define e8_sign_sampler_trace_timed_uncompressed  Zh(e8_sign_sampler_trace_timed_uncompressed)
+#define e8_sign_sampler_trace_timed_uncompressed_prepared  Zh(e8_sign_sampler_trace_timed_uncompressed_prepared)
 #define e8_extract_tau  Zh(e8_extract_tau)
 #define e8_write_block  Zh(e8_write_block)
 #define e8_read_block  Zh(e8_read_block)
 #define e8_block_apply_P  Zh(e8_block_apply_P)
 #define e8_block_norm2  Zh(e8_block_norm2)
 #define e8_block_solve_P_checked  Zh(e8_block_solve_P_checked)
+#define E8_NTT_PRIMES  Zh(E8_NTT_PRIMES)
+#define e8_mp_montymul  Zh(e8_mp_montymul)
+#define e8_mp_add  Zh(e8_mp_add)
+#define e8_mp_mul  Zh(e8_mp_mul)
+#define e8_mp_pow  Zh(e8_mp_pow)
+#define e8_mp_set_i32  Zh(e8_mp_set_i32)
+#define e8_bitrev  Zh(e8_bitrev)
+#define e8_mkgm  Zh(e8_mkgm)
+#define e8_ntt  Zh(e8_ntt)
+#define e8_intt  Zh(e8_intt)
+#define e8_ntt_to_ntt  Zh(e8_ntt_to_ntt)
+#define e8_ntt_from_ntt  Zh(e8_ntt_from_ntt)
+#define e8_ntt_mul_add  Zh(e8_ntt_mul_add)
+#define e8_ntt_crt_reconstruct  Zh(e8_ntt_crt_reconstruct)
 #define e8_rm13_codeword  Zh(e8_rm13_codeword)
 #define e8_rm13_syndrome  Zh(e8_rm13_syndrome)
 #define e8_sigma_to_rho_s  Zh(e8_sigma_to_rho_s)
@@ -132,6 +157,39 @@ typedef struct {
 	uint64_t wall_ns_reduction;
 } e8_sampler_profile;
 
+#define E8_NTT_PRIME_COUNT   4
+
+typedef struct {
+	uint32_t p;
+	uint32_t p0i;
+	uint32_t g;
+} e8_ntt_prime;
+
+extern const e8_ntt_prime E8_NTT_PRIMES[E8_NTT_PRIME_COUNT];
+
+#define E8_INVERSE_W_NTT_PRIMES   1
+#define E8_NTT_MAXN               1024
+#define E8_F2_MAXW                 16
+
+typedef struct {
+	uint32_t gm[E8_INVERSE_W_NTT_PRIMES][E8_NTT_MAXN];
+	uint32_t igm[E8_INVERSE_W_NTT_PRIMES][E8_NTT_MAXN];
+	uint32_t ni[E8_INVERSE_W_NTT_PRIMES];
+	uint32_t f[E8_INVERSE_W_NTT_PRIMES][E8_NTT_MAXN];
+	uint32_t g[E8_INVERSE_W_NTT_PRIMES][E8_NTT_MAXN];
+	uint32_t F[E8_INVERSE_W_NTT_PRIMES][E8_NTT_MAXN];
+	uint32_t G[E8_INVERSE_W_NTT_PRIMES][E8_NTT_MAXN];
+} e8_inverse_w_ntt_basis;
+
+typedef struct {
+	uint64_t row[16][E8_F2_MAXW];
+} e8_f2_window_table;
+
+typedef struct {
+	uint64_t packed[4][E8_F2_MAXW];
+	e8_f2_window_table table[4];
+} e8_coset_f2_basis;
+
 void e8_apply_P(int32_t *out0, int32_t *out1,
 	const int32_t *z0, const int32_t *z1, unsigned logn);
 
@@ -143,6 +201,30 @@ void e8_make_delta(int32_t *delta, unsigned logn);
 void e8_compute_qform(int32_t *q00, int32_t *q01,
 	int32_t *q10, int32_t *q11, const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G, unsigned logn);
+
+void e8_f2_pack(uint64_t *d, const uint8_t *a, size_t n);
+
+void e8_f2_pack_i8_mod2(uint64_t *d, const int8_t *a, size_t n);
+
+void e8_f2_window_prepare(e8_f2_window_table *table,
+	const uint64_t *b, size_t n);
+
+void e8_f2_window_mul_add(uint64_t *d, const uint64_t *a,
+	const e8_f2_window_table *table, size_t n);
+
+void e8_f2_unpack(uint8_t *d, const uint64_t *a, size_t n);
+
+void e8_coset_f2_prepare(e8_coset_f2_basis *basis,
+	const int8_t *f, const int8_t *g, const int8_t *F, const int8_t *G,
+	size_t n);
+
+void e8_compute_t_mod2_prepared(uint8_t *t0, uint8_t *t1,
+	const e8_coset_f2_basis *basis,
+	const uint8_t *h0, const uint8_t *h1, size_t n);
+
+void e8_compute_t_mod2(uint8_t *t0, uint8_t *t1,
+	const int8_t *f, const int8_t *g, const int8_t *F, const int8_t *G,
+	const uint8_t *h0, const uint8_t *h1, size_t n);
 
 size_t e8_salt_len(unsigned logn);
 
@@ -207,6 +289,14 @@ int e8_sign_dummy_offset_uncompressed(unsigned logn,
 	const int8_t *F, const int8_t *G, const uint8_t *salt,
 	const int32_t *r0, const int32_t *r1);
 
+void e8_inverse_w_ntt_prepare(e8_inverse_w_ntt_basis *basis,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G, unsigned logn);
+
+int e8_compute_inverse_w_ntt(int64_t *w0, int64_t *w1,
+	const e8_inverse_w_ntt_basis *basis,
+	const int32_t *z0, const int32_t *z1, unsigned logn);
+
 /*
  * Experimental sampler-backed uncompressed signing.  This uses the
  * coset-matched Construction-A CM sampler and is non-constant-time research
@@ -241,6 +331,19 @@ int e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 	int64_t *trace_pnorm, unsigned *trace_attempts,
 	e8_sign_trace_timing *trace_timing);
 
+int e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
+	void *sig, size_t sig_len, const shake_context *sc_data,
+	const void *hpub, size_t hpub_len,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G,
+	const e8_inverse_w_ntt_basis *basis_ntt,
+	const e8_coset_f2_basis *basis_f2, const uint8_t *salt,
+	double sigma_sign, double sigma_verify,
+	unsigned max_attempts, hawk_rng rng, void *rng_context,
+	int32_t *trace_z0, int32_t *trace_z1,
+	int64_t *trace_pnorm, unsigned *trace_attempts,
+	e8_sign_trace_timing *trace_timing);
+
 /*
  * Experimental E8 sampler helpers.  These are floating-point,
  * data-dependent, non-constant-time research functions and are not
@@ -261,6 +364,41 @@ int64_t e8_block_norm2(const int32_t *zblk);
 
 int e8_block_solve_P_checked(int32_t *zblk,
 	const int32_t *xblk, uint8_t tau);
+
+uint32_t e8_mp_montymul(uint32_t a, uint32_t b,
+	uint32_t p, uint32_t p0i);
+
+uint32_t e8_mp_add(uint32_t a, uint32_t b, uint32_t p);
+
+uint32_t e8_mp_mul(uint32_t a, uint32_t b, uint32_t p);
+
+uint32_t e8_mp_pow(uint32_t x, uint32_t e, uint32_t p);
+
+uint32_t e8_mp_set_i32(int32_t x, uint32_t p);
+
+size_t e8_bitrev(size_t x, unsigned logn);
+
+void e8_mkgm(unsigned logn, uint32_t *gm,
+	uint32_t g, uint32_t p, uint32_t p0i);
+
+void e8_ntt(unsigned logn, uint32_t *a,
+	const uint32_t *gm, uint32_t p, uint32_t p0i);
+
+void e8_intt(unsigned logn, uint32_t *a,
+	const uint32_t *igm, uint32_t p, uint32_t p0i);
+
+void e8_ntt_to_ntt(unsigned logn, uint32_t *d,
+	const int32_t *a, const e8_ntt_prime *prime);
+
+void e8_ntt_from_ntt(unsigned logn, uint32_t *a,
+	const e8_ntt_prime *prime);
+
+void e8_ntt_mul_add(unsigned logn, uint32_t *d,
+	const uint32_t *a, const uint32_t *b,
+	const e8_ntt_prime *prime);
+
+int e8_ntt_crt_reconstruct(int32_t *d, const uint32_t *const residues[],
+	const e8_ntt_prime *const primes[], unsigned num_primes, size_t n);
 
 uint8_t e8_rm13_codeword(unsigned u);
 

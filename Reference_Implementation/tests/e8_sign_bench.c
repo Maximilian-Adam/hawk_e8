@@ -27,6 +27,7 @@
 
 #define MAXN                         1024
 #define DEFAULT_SIGN_BENCH_TRIALS    16
+#define DEFAULT_KEY_REUSE            1000
 #define MAX_BENCH_TRIALS             1000000
 
 #if HAWK_E8_PROFILE_SIGN
@@ -61,8 +62,36 @@ typedef struct {
 
 typedef struct {
 	unsigned trials;
+	unsigned key_reuse;
 	int no_header;
 } sign_bench_options;
+
+typedef struct {
+	unsigned signature_bytes;
+	uint64_t cycles_per_attempt;
+	uint64_t key_expand_cycles;
+	uint64_t salt_derivation_cycles;
+	uint64_t basis_ntt_prepare_cycles;
+	uint64_t coset_f2_prepare_cycles;
+} bench_accounting;
+
+typedef struct {
+	uint64_t signs;
+	uint64_t attempts;
+	uint64_t cycles;
+	uint64_t key_expand_cycles;
+	uint64_t salt_derivation_cycles;
+	uint64_t basis_ntt_prepare_cycles;
+	uint64_t coset_f2_prepare_cycles;
+	unsigned signature_bytes;
+	unsigned threads;
+} comparison_totals;
+
+#define COMP_HAWK          0
+#define COMP_E8_SERIAL     1
+#define COMP_E8_THREADED   2
+
+static comparison_totals comparison[3][11];
 
 typedef struct {
 	const char *label;
@@ -73,6 +102,12 @@ typedef struct {
 	const char *label;
 	unsigned mode;
 } bench_mode_case;
+
+typedef struct {
+	bench_rng_state rng;
+	size_t salt_len;
+	unsigned attempts;
+} hawk_bench_rng_state;
 
 static const bench_thread_case E8_THREAD_CASES[] = {
 	{ "1", 1 },
@@ -206,6 +241,17 @@ bench_rng(void *ctx, void *dst, size_t len)
 }
 
 static void
+bench_hawk_rng(void *ctx, void *dst, size_t len)
+{
+	hawk_bench_rng_state *rng = ctx;
+
+	if (len == rng->salt_len) {
+		rng->attempts ++;
+	}
+	bench_rng(&rng->rng, dst, len);
+}
+
+static void
 bench_rng_init(bench_rng_state *rng,
 	unsigned sampler_id, unsigned logn, unsigned trial_index)
 {
@@ -216,6 +262,125 @@ bench_rng_init(bench_rng_state *rng,
 	seed ^= (uint64_t)trial_index * UINT64_C(0xD1B54A32D192ED03);
 	rng->state = seed;
 	(void)bench_rng_next(rng);
+}
+
+static size_t
+bench_salt_len(unsigned logn)
+{
+	switch (logn) {
+	case 8: return 14;
+	case 9: return 24;
+	case 10: return 40;
+	default: return 0;
+	}
+}
+
+static void
+bench_derive_salt(uint8_t *salt, size_t salt_len,
+	const uint8_t hm[64], const void *key, size_t key_len,
+	uint32_t counter)
+{
+	shake_context scd;
+	uint8_t tbuf[4];
+
+	enc32le(tbuf, counter);
+	shake_init(&scd, 256);
+	shake_inject(&scd, hm, 64);
+	shake_inject(&scd, key, key_len);
+	shake_inject(&scd, tbuf, sizeof tbuf);
+	shake_inject(&scd, salt, salt_len);
+	shake_flip(&scd);
+	shake_extract(&scd, salt, salt_len);
+}
+
+static uint64_t
+average_u64(uint64_t total, uint64_t count)
+{
+	return count == 0 ? 0 : total / count;
+}
+
+static void
+comparison_add(unsigned which, unsigned logn, unsigned threads,
+	unsigned attempts, uint64_t cycles,
+	const bench_accounting *accounting)
+{
+	comparison_totals *total;
+
+	if (which > COMP_E8_THREADED || logn > 10 || accounting == NULL) {
+		return;
+	}
+	total = &comparison[which][logn];
+	total->signs ++;
+	total->attempts += attempts;
+	total->cycles += cycles;
+	if (which == COMP_HAWK) {
+		total->key_expand_cycles += accounting->key_expand_cycles
+			* attempts;
+		total->salt_derivation_cycles += accounting->salt_derivation_cycles
+			* attempts;
+	} else {
+		total->salt_derivation_cycles +=
+			accounting->salt_derivation_cycles;
+	}
+	total->basis_ntt_prepare_cycles +=
+		accounting->basis_ntt_prepare_cycles;
+	total->coset_f2_prepare_cycles +=
+		accounting->coset_f2_prepare_cycles;
+	total->signature_bytes = accounting->signature_bytes;
+	total->threads = threads;
+}
+
+static void
+comparison_print(unsigned key_reuse)
+{
+	static const char *const SCHEME[] = { "HAWK", "E8", "E8" };
+	static const char *const MODE[] = { "serial", "serial", "threaded" };
+
+	fprintf(stderr,
+		"\nHAWK_E8_SYMMETRIC_ACCOUNTING key_reuse=%u\n"
+		"scheme,mode,logn,threads,signatures,attempts,attempts_per_sign,"
+		"signature_bytes,amortized_cycles_per_sign,"
+		"amortized_cycles_per_attempt,all_in_cycles_per_sign,"
+		"all_in_cycles_per_attempt\n",
+		key_reuse);
+	for (unsigned logn = 8; logn <= 10; logn ++) {
+		for (unsigned which = COMP_HAWK;
+			which <= COMP_E8_THREADED; which ++)
+		{
+			const comparison_totals *total = &comparison[which][logn];
+			uint64_t amortized, all_in;
+
+			if (total->signs == 0 || total->attempts == 0) {
+				continue;
+			}
+			if (which == COMP_HAWK) {
+				uint64_t setup = total->key_expand_cycles
+					+ total->salt_derivation_cycles;
+				amortized = total->cycles > setup
+					? total->cycles - setup : 0;
+				all_in = total->cycles;
+			} else {
+				uint64_t prep = total->basis_ntt_prepare_cycles
+					+ total->coset_f2_prepare_cycles;
+				amortized = total->cycles;
+				all_in = total->cycles
+					+ prep / key_reuse
+					+ total->salt_derivation_cycles;
+			}
+			fprintf(stderr,
+				"%s,%s,%u,%u,%llu,%llu,%.6f,%u,"
+				"%llu,%llu,%llu,%llu\n",
+				SCHEME[which], MODE[which], logn, total->threads,
+				(unsigned long long)total->signs,
+				(unsigned long long)total->attempts,
+				(double)total->attempts / (double)total->signs,
+				total->signature_bytes,
+				(unsigned long long)average_u64(amortized, total->signs),
+				(unsigned long long)average_u64(amortized, total->attempts),
+				(unsigned long long)average_u64(all_in, total->signs),
+				(unsigned long long)average_u64(all_in, total->attempts));
+		}
+	}
 }
 
 static double
@@ -331,7 +496,7 @@ static void
 usage(const char *prog)
 {
 	fprintf(stderr,
-		"usage: %s [--trials N] [--no-header]\n",
+		"usage: %s [--trials N] [--key-reuse N] [--no-header]\n",
 		prog);
 }
 
@@ -340,6 +505,7 @@ parse_options(int argc, char **argv, sign_bench_options *opts)
 {
 	memset(opts, 0, sizeof *opts);
 	opts->trials = get_trials();
+	opts->key_reuse = DEFAULT_KEY_REUSE;
 	if (opts->trials == 0) {
 		return 0;
 	}
@@ -357,6 +523,13 @@ parse_options(int argc, char **argv, sign_bench_options *opts)
 				1, MAX_BENCH_TRIALS, &opts->trials))
 			{
 				fprintf(stderr, "ERR: invalid --trials\n");
+				return 0;
+			}
+		} else if (strcmp(arg, "--key-reuse") == 0) {
+			if (++ i >= argc || !parse_unsigned_arg(argv[i],
+				1, MAX_BENCH_TRIALS, &opts->key_reuse))
+			{
+				fprintf(stderr, "ERR: invalid --key-reuse\n");
 				return 0;
 			}
 		} else {
@@ -439,7 +612,7 @@ profile_print_summary(void)
 {
 	fprintf(stderr,
 		"\nHAWK_E8_PROFILE_SIGN summary "
-		"(e8_sign_sampler_trace_timed_uncompressed)\n");
+		"(threaded E8 prepared path)\n");
 	for (unsigned logn = 8; logn <= 10; logn ++) {
 		const bench_sign_profile_totals *total =
 			&sign_profile_totals[logn];
@@ -525,7 +698,9 @@ write_header(void)
 		"profile_master_seed_wall_ns,"
 		"profile_block_rng_init_wall_ns,profile_block_sample_wall_ns,"
 		"profile_worker_dispatch_wall_ns,profile_worker_wait_wall_ns,"
-		"profile_reduction_wall_ns,notes\n");
+		"profile_reduction_wall_ns,signature_bytes,cycles_per_attempt,"
+		"key_expand_cycles,salt_derivation_cycles,"
+		"basis_ntt_prepare_cycles,coset_f2_prepare_cycles,notes\n");
 }
 
 static void
@@ -537,13 +712,14 @@ write_row_threads(const char *sampler_type, const char *scope,
 	uint64_t wall_ns_per_signature,
 	const char *threads_requested, unsigned threads_used,
 	const char *worker_mode, const char *rng_mode,
+	const bench_accounting *accounting,
 	const char *notes)
 {
 	size_t n = (size_t)1 << logn;
 
 	printf("%s,%s,%u,%u,%u,%.17g,%d,%u,"
 		"%llu,%llu,%llu,%llu,%s,%u,%s,%s,0.000000,"
-		"0,0,0,0,0,0,0,0,0,0,0,0,%s\n",
+		"0,0,0,0,0,0,0,0,0,0,0,0,%u,%llu,%llu,%llu,%llu,%llu,%s\n",
 		sampler_type, scope, logn, (unsigned)n,
 		trial_index, sigma, accepted, attempts,
 		(unsigned long long)cycles_total,
@@ -554,6 +730,17 @@ write_row_threads(const char *sampler_type, const char *scope,
 		threads_used,
 		worker_mode != NULL ? worker_mode : "",
 		rng_mode != NULL ? rng_mode : "",
+		accounting != NULL ? accounting->signature_bytes : 0,
+		(unsigned long long)(accounting != NULL
+			? accounting->cycles_per_attempt : 0),
+		(unsigned long long)(accounting != NULL
+			? accounting->key_expand_cycles : 0),
+		(unsigned long long)(accounting != NULL
+			? accounting->salt_derivation_cycles : 0),
+		(unsigned long long)(accounting != NULL
+			? accounting->basis_ntt_prepare_cycles : 0),
+		(unsigned long long)(accounting != NULL
+			? accounting->coset_f2_prepare_cycles : 0),
 		notes);
 }
 
@@ -564,12 +751,13 @@ write_row(const char *sampler_type, const char *scope,
 	uint64_t cycles_total,
 	uint64_t cycles_per_signature, uint64_t wall_ns_total,
 	uint64_t wall_ns_per_signature,
+	const bench_accounting *accounting,
 	const char *notes)
 {
 	write_row_threads(sampler_type, scope, logn,
 		trial_index, sigma, accepted, attempts,
 		cycles_total, cycles_per_signature, wall_ns_total,
-		wall_ns_per_signature, "", 0, "", "", notes);
+		wall_ns_per_signature, "", 0, "", "", accounting, notes);
 }
 
 static void
@@ -589,18 +777,31 @@ bench_make_hawk_message_context(shake_context *sc_data,
 static void
 bench_hawk_sign(unsigned logn, unsigned trial_index)
 {
+	size_t n = (size_t)1 << logn;
+	size_t salt_len = bench_salt_len(logn);
+	size_t seed_len = 8 + ((size_t)1 << (logn - 5));
+	size_t hpub_len = (size_t)1 << (logn - 4);
 	uint8_t priv[HAWK_PRIVKEY_SIZE(10)];
 	uint8_t pub[HAWK_PUBKEY_SIZE(10)];
 	uint8_t sig[HAWK_SIG_SIZE(10)];
 	uint8_t tmp_keygen[HAWK_TMPSIZE_KEYGEN(10)];
 	uint8_t tmp_sign[HAWK_TMPSIZE_SIGN(10)];
+	uint8_t hm[64], salt[40];
+	int8_t f[MAXN], g[MAXN];
 	shake_context sc_data;
-	bench_rng_state key_rng, sign_rng;
+	shake_context scd;
+	bench_rng_state key_rng;
+	hawk_bench_rng_state sign_rng;
+	bench_accounting accounting;
 	uint64_t c0, c1, w0, w1, cycles_total, wall_ns_total;
+	unsigned attempts;
 	int accepted;
 
 	bench_rng_init(&key_rng, 5, logn, trial_index);
-	bench_rng_init(&sign_rng, 6, logn, trial_index);
+	bench_rng_init(&sign_rng.rng, 6, logn, trial_index);
+	sign_rng.salt_len = salt_len;
+	sign_rng.attempts = 0;
+	memset(&accounting, 0, sizeof accounting);
 	bench_make_hawk_message_context(&sc_data, logn, trial_index);
 	memset(sig, 0, sizeof sig);
 
@@ -609,24 +810,48 @@ bench_hawk_sign(unsigned logn, unsigned trial_index)
 	{
 		write_row("hawk_sign", "signature", logn, trial_index,
 			hawk_sigma_sign(logn), 0, 0, 0, 0, 0, 0,
+			NULL,
 			"keygen_setup_failed");
 		return;
 	}
 
 	c0 = bench_cycles_start();
+	Hawk_regen_fg(logn, f, g, priv);
+	c1 = bench_cycles_end();
+	accounting.key_expand_cycles = bench_cycles_delta(c0, c1);
+	scd = sc_data;
+	shake_inject(&scd, priv + seed_len + (n >> 2), hpub_len);
+	shake_flip(&scd);
+	shake_extract(&scd, hm, sizeof hm);
+	bench_rng(&key_rng, salt, salt_len);
+	c0 = bench_cycles_start();
+	bench_derive_salt(salt, salt_len, hm, priv, seed_len, 0);
+	c1 = bench_cycles_end();
+	accounting.salt_derivation_cycles = bench_cycles_delta(c0, c1);
+	accounting.signature_bytes = HAWK_SIG_SIZE(logn);
+
+	c0 = bench_cycles_start();
 	w0 = bench_wall_ns();
-	accepted = hawk_sign_finish(logn, bench_rng, &sign_rng,
+	accepted = hawk_sign_finish(logn, bench_hawk_rng, &sign_rng,
 		sig, &sc_data, priv, tmp_sign, HAWK_TMPSIZE_SIGN(logn));
 	w1 = bench_wall_ns();
 	c1 = bench_cycles_end();
 
 	cycles_total = bench_cycles_delta(c0, c1);
 	wall_ns_total = bench_wall_delta(w0, w1);
+	/* At logn=10, sig_gauss() and salt generation both request 40 bytes. */
+	attempts = sign_rng.attempts / (logn == 10 ? 2u : 1u);
+	accounting.cycles_per_attempt = accepted && attempts != 0
+		? cycles_total / attempts : 0;
+	if (accepted) {
+		comparison_add(COMP_HAWK, logn, 1, attempts,
+			cycles_total, &accounting);
+	}
 	write_row("hawk_sign", "signature", logn, trial_index,
-		hawk_sigma_sign(logn), accepted, 1, cycles_total,
+		hawk_sigma_sign(logn), accepted, attempts, cycles_total,
 		accepted ? cycles_total : 0, wall_ns_total,
 		accepted ? wall_ns_total : 0,
-		"ordinary_hawk_sign_finish_encoded_private_key");
+		&accounting, "ordinary_hawk_sign_finish_encoded_private_key");
 }
 
 static void
@@ -706,20 +931,26 @@ bench_e8_sampler_warmup(unsigned logn, unsigned trial_index,
 }
 
 static void
-bench_e8_sign_sampler(unsigned logn, unsigned trial_index)
+bench_e8_sign_sampler(unsigned logn, unsigned trial_index,
+	unsigned sampler_threads, unsigned comparison_index,
+	const char *sampler_type)
 {
 	size_t sig_len = e8_sig_uncompressed_size(logn);
 	size_t salt_len = e8_salt_len(logn);
 	size_t hpub_len = (size_t)1 << (logn - 4);
+	size_t seed_len = 8 + ((size_t)1 << (logn - 5));
 	int8_t f[MAXN], g[MAXN], F[MAXN], G[MAXN];
-	uint8_t hpub[64], salt[40], sig[40 + 4 * MAXN];
-	shake_context sc_data;
+	uint8_t hpub[64], salt[40], salt_key[40], hm[64];
+	uint8_t sig[40 + 4 * MAXN];
+	shake_context sc_data, scd;
+	e8_inverse_w_ntt_basis basis_ntt;
+	e8_coset_f2_basis basis_f2;
 	bench_rng_state key_rng, sign_rng;
 	e8_sign_trace_timing timing;
+	bench_accounting accounting;
 	uint64_t c0, c1, w0, w1, cycles_total, wall_ns_total;
 	unsigned attempts = 0;
-	unsigned sampler_threads;
-	unsigned sampler_rng_mode;
+	unsigned sampler_rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 	unsigned threads_used = 0;
 	char threads_buf[16];
 	const char *threads_text;
@@ -729,18 +960,11 @@ bench_e8_sign_sampler(unsigned logn, unsigned trial_index)
 	bench_rng_init(&key_rng, 3, logn, trial_index);
 	bench_rng_init(&sign_rng, 4, logn, trial_index);
 	memset(&timing, 0, sizeof timing);
+	memset(&accounting, 0, sizeof accounting);
 	memset(sig, 0, sizeof sig);
 	bench_make_message_context(&sc_data, logn, trial_index);
 	bench_make_hpub(hpub, hpub_len, logn, trial_index);
 	bench_make_salt(salt, salt_len, logn, trial_index);
-	if (!bench_selected_e8_sampler_config(logn,
-			&sampler_threads, &sampler_rng_mode))
-	{
-		write_row("e8_sign_sampler_cached", "signature", logn,
-			trial_index, e8_sigma_sign(logn), 0, 0, 0, 0, 0, 0,
-			"unsupported_logn");
-		return;
-	}
 	threads_text = thread_label(sampler_threads,
 		threads_buf, sizeof threads_buf);
 	rng_text = rng_mode_label(sampler_rng_mode);
@@ -748,24 +972,52 @@ bench_e8_sign_sampler(unsigned logn, unsigned trial_index)
 	e8_sampler_set_rng_mode(sampler_rng_mode);
 	threads_used = e8_sampler_get_thread_count(logn);
 
-	if (!bench_make_basis(logn, f, g, F, G, &key_rng)
-		|| !e8_sampler_warm_cache(e8_sigma_sign(logn))
+	if (!bench_make_basis(logn, f, g, F, G, &key_rng)) {
+		write_row_threads(sampler_type, "signature", logn,
+			trial_index, e8_sigma_sign(logn), 0, 0, 0, 0, 0, 0,
+			threads_text, threads_used,
+			threads_used == 1 ? "serial" : "spin", rng_text,
+			NULL,
+			"setup_failed");
+		return;
+	}
+	c0 = bench_cycles_start();
+	e8_inverse_w_ntt_prepare(&basis_ntt, f, g, F, G, logn);
+	c1 = bench_cycles_end();
+	accounting.basis_ntt_prepare_cycles = bench_cycles_delta(c0, c1);
+	c0 = bench_cycles_start();
+	e8_coset_f2_prepare(&basis_f2, f, g, F, G, (size_t)1 << logn);
+	c1 = bench_cycles_end();
+	accounting.coset_f2_prepare_cycles = bench_cycles_delta(c0, c1);
+	scd = sc_data;
+	shake_inject(&scd, hpub, hpub_len);
+	shake_flip(&scd);
+	shake_extract(&scd, hm, sizeof hm);
+	bench_rng(&key_rng, salt_key, seed_len);
+	c0 = bench_cycles_start();
+	bench_derive_salt(salt, salt_len, hm, salt_key, seed_len, 0);
+	c1 = bench_cycles_end();
+	accounting.salt_derivation_cycles = bench_cycles_delta(c0, c1);
+	accounting.signature_bytes = (unsigned)sig_len;
+	if (!e8_sampler_warm_cache(e8_sigma_sign(logn))
 		|| !bench_e8_sampler_warmup(logn,
 			0xB0000000u + trial_index,
 			sampler_threads, sampler_rng_mode))
 	{
-		write_row_threads("e8_sign_sampler_cached", "signature", logn,
+		write_row_threads(sampler_type, "signature", logn,
 			trial_index, e8_sigma_sign(logn), 0, 0, 0, 0, 0, 0,
 			threads_text, threads_used,
 			threads_used == 1 ? "serial" : "spin", rng_text,
+			NULL,
 			"setup_failed");
 		return;
 	}
 
 	c0 = bench_cycles_start();
 	w0 = bench_wall_ns();
-	accepted = e8_sign_sampler_trace_timed_uncompressed(logn,
-		sig, sig_len, &sc_data, hpub, hpub_len, f, g, F, G, salt,
+	accepted = e8_sign_sampler_trace_timed_uncompressed_prepared(logn,
+		sig, sig_len, &sc_data, hpub, hpub_len,
+		f, g, F, G, &basis_ntt, &basis_f2, salt,
 		e8_sigma_sign(logn), e8_sigma_verify_sign(logn), 1000,
 		bench_rng, &sign_rng, NULL, NULL, NULL, &attempts,
 		&timing);
@@ -775,15 +1027,24 @@ bench_e8_sign_sampler(unsigned logn, unsigned trial_index)
 	cycles_total = bench_cycles_delta(c0, c1);
 	wall_ns_total = bench_wall_delta(w0, w1);
 #if HAWK_E8_PROFILE_SIGN
-	profile_add(logn, accepted, attempts, &timing);
+	if (comparison_index == COMP_E8_THREADED) {
+		profile_add(logn, accepted, attempts, &timing);
+	}
 #endif
-	write_row_threads("e8_sign_sampler_cached", "signature", logn,
+	accounting.cycles_per_attempt = accepted && attempts != 0
+		? cycles_total / attempts : 0;
+	if (accepted) {
+		comparison_add(comparison_index, logn, threads_used, attempts,
+			cycles_total, &accounting);
+	}
+	write_row_threads(sampler_type, "signature", logn,
 		trial_index, e8_sigma_sign(logn), accepted, attempts,
 		cycles_total, accepted ? cycles_total : 0, wall_ns_total,
 		accepted ? wall_ns_total : 0,
 		threads_text, threads_used,
 		threads_used == 1 ? "serial" : "spin", rng_text,
-		"end_to_end_signing_warm_cache");
+		&accounting,
+		"end_to_end_signing_warm_cache_ntt_f2_basis_prepared_per_key");
 }
 
 static int
@@ -793,16 +1054,37 @@ run_sign_bench(const sign_bench_options *opts)
 		write_header();
 	}
 	for (unsigned logn = 8; logn <= 10; logn ++) {
+		unsigned threaded_count;
+		unsigned rng_mode;
+
+		if (!bench_selected_e8_sampler_config(logn,
+			&threaded_count, &rng_mode))
+		{
+			return 1;
+		}
+		(void)rng_mode;
 		for (unsigned trial_index = 0;
 			trial_index < opts->trials; trial_index ++)
 		{
 			bench_hawk_sign(logn, trial_index);
-			bench_e8_sign_sampler(logn, trial_index);
+		}
+		for (unsigned trial_index = 0;
+			trial_index < opts->trials; trial_index ++)
+		{
+			bench_e8_sign_sampler(logn, trial_index, 1,
+				COMP_E8_SERIAL, "e8_sign_sampler_serial");
+		}
+		for (unsigned trial_index = 0;
+			trial_index < opts->trials; trial_index ++)
+		{
+			bench_e8_sign_sampler(logn, trial_index, threaded_count,
+				COMP_E8_THREADED, "e8_sign_sampler_threaded");
 		}
 	}
 #if HAWK_E8_PROFILE_SIGN
 	profile_print_summary();
 #endif
+	comparison_print(opts->key_reuse);
 	return 0;
 }
 

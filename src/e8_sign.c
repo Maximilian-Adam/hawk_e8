@@ -14,6 +14,7 @@
 #endif
 
 #define E8_MAXN   1024
+#define E8_DEBUG_INVERSE_CHECK_ATTEMPTS   4
 
 static uint64_t
 trace_wall_ns(void)
@@ -157,27 +158,6 @@ bits_to_poly(int32_t *d, uint8_t *db,
 }
 
 static void
-poly_mul_mod2_add(uint8_t *d,
-	const int8_t *a, const uint8_t *b, size_t n)
-{
-	for (size_t v = 0; v < n; v ++) {
-		if (b[v] == 0) {
-			continue;
-		}
-		for (size_t u = 0; u < n; u ++) {
-			if ((((uint8_t)a[u]) & 1u) == 0) {
-				continue;
-			}
-			size_t w = u + v;
-			if (w >= n) {
-				w -= n;
-			}
-			d[w] ^= 1;
-		}
-	}
-}
-
-static void
 poly_mul_i8_i32_add_i64(int64_t *d,
 	const int8_t *a, const int32_t *b, size_t n, int sign)
 {
@@ -215,19 +195,6 @@ poly_mul_i8_i32_i32(int32_t *d,
 		d[u] = (int32_t)acc[u];
 	}
 	return 1;
-}
-
-static void
-compute_t_mod2(uint8_t *t0, uint8_t *t1,
-	const int8_t *f, const int8_t *g, const int8_t *F, const int8_t *G,
-	const uint8_t *h0, const uint8_t *h1, size_t n)
-{
-	memset(t0, 0, E8_MAXN);
-	memset(t1, 0, E8_MAXN);
-	poly_mul_mod2_add(t0, f, h0, n);
-	poly_mul_mod2_add(t0, F, h1, n);
-	poly_mul_mod2_add(t1, g, h0, n);
-	poly_mul_mod2_add(t1, G, h1, n);
 }
 
 static int
@@ -274,7 +241,7 @@ dummy_sample_z(int32_t *z0, int32_t *z1,
 }
 
 static void
-compute_inverse_w(int64_t *w0, int64_t *w1,
+compute_inverse_w_schoolbook(int64_t *w0, int64_t *w1,
 	const int8_t *f, const int8_t *g, const int8_t *F, const int8_t *G,
 	const int32_t *z0, const int32_t *z1, size_t n)
 {
@@ -286,6 +253,166 @@ compute_inverse_w(int64_t *w0, int64_t *w1,
 	poly_mul_i8_i32_add_i64(w0, F, z1, n, -1);
 	poly_mul_i8_i32_add_i64(w1, g, z0, n, -1);
 	poly_mul_i8_i32_add_i64(w1, f, z1, n, 1);
+}
+
+static void
+i8_to_ntt(unsigned logn, uint32_t *d,
+	const int8_t *a, const e8_ntt_prime *prime, const uint32_t *gm)
+{
+	size_t n = (size_t)1 << logn;
+	int32_t tmp[E8_MAXN];
+
+	for (size_t u = 0; u < n; u ++) {
+		tmp[u] = a[u];
+	}
+	for (size_t u = 0; u < n; u ++) {
+		d[u] = e8_mp_set_i32(tmp[u], prime->p);
+	}
+	e8_ntt(logn, d, gm, prime->p, prime->p0i);
+}
+
+static void
+ntt_to_monty(unsigned logn, uint32_t *a, const e8_ntt_prime *prime)
+{
+	size_t n = (size_t)1 << logn;
+	uint32_t p = prime->p;
+	uint32_t r = (uint32_t)(UINT64_C(0x100000000) % p);
+	uint32_t r2 = e8_mp_mul(r, r, p);
+
+	for (size_t u = 0; u < n; u ++) {
+		a[u] = e8_mp_montymul(a[u], r2, p, prime->p0i);
+	}
+}
+
+static void
+i32_to_ntt_with_gm(unsigned logn, uint32_t *d,
+	const int32_t *a, const e8_ntt_prime *prime, const uint32_t *gm)
+{
+	size_t n = (size_t)1 << logn;
+
+	for (size_t u = 0; u < n; u ++) {
+		d[u] = e8_mp_set_i32(a[u], prime->p);
+	}
+	e8_ntt(logn, d, gm, prime->p, prime->p0i);
+}
+
+static void
+intt_with_igm(unsigned logn, uint32_t *a,
+	const e8_ntt_prime *prime, const uint32_t *igm, uint32_t ni)
+{
+	size_t n = (size_t)1 << logn;
+
+	e8_intt(logn, a, igm, prime->p, prime->p0i);
+	for (size_t u = 0; u < n; u ++) {
+		a[u] = e8_mp_mul(a[u], ni, prime->p);
+	}
+}
+
+/* see hawk_e8_inner.h */
+void
+e8_inverse_w_ntt_prepare(e8_inverse_w_ntt_basis *basis,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G, unsigned logn)
+{
+	for (unsigned u = 0; u < E8_INVERSE_W_NTT_PRIMES; u ++) {
+		const e8_ntt_prime *prime = &E8_NTT_PRIMES[u];
+		uint32_t p = prime->p;
+		uint32_t r = (uint32_t)(UINT64_C(0x100000000) % p);
+		uint32_t r2 = e8_mp_mul(r, r, p);
+		uint32_t ig = e8_mp_mul(e8_mp_pow(prime->g, p - 2, p), r2, p);
+
+		e8_mkgm(logn, basis->gm[u], prime->g, p, prime->p0i);
+		e8_mkgm(logn, basis->igm[u], ig, p, prime->p0i);
+		basis->ni[u] = e8_mp_pow((uint32_t)1 << logn, p - 2, p);
+		i8_to_ntt(logn, basis->f[u], f, prime, basis->gm[u]);
+		i8_to_ntt(logn, basis->g[u], g, prime, basis->gm[u]);
+		i8_to_ntt(logn, basis->F[u], F, prime, basis->gm[u]);
+		i8_to_ntt(logn, basis->G[u], G, prime, basis->gm[u]);
+		/*
+		 * Forward NTT inputs/outputs are standard residues; gm/igm
+		 * entries are Montgomery roots.  Store only the fixed basis
+		 * transforms as Montgomery residues here.  Per-attempt z
+		 * transforms remain standard, so montymul(basis_monty, z)
+		 * returns a standard pointwise product for the inverse NTT.
+		 */
+		ntt_to_monty(logn, basis->f[u], prime);
+		ntt_to_monty(logn, basis->g[u], prime);
+		ntt_to_monty(logn, basis->F[u], prime);
+		ntt_to_monty(logn, basis->G[u], prime);
+	}
+}
+
+static uint32_t
+mp_sub(uint32_t a, uint32_t b, uint32_t p)
+{
+	return a >= b ? a - b : a + p - b;
+}
+
+static int
+center_checked_single_prime(int64_t *d, const uint32_t *a, size_t n,
+	uint32_t p)
+{
+	const int64_t limit = INT64_C(1) << 30;
+
+	for (size_t u = 0; u < n; u ++) {
+		int64_t x = a[u] > (p >> 1)
+			? (int64_t)a[u] - (int64_t)p
+			: (int64_t)a[u];
+		uint64_t ax = x < 0 ? (uint64_t)(-x) : (uint64_t)x;
+
+		if (ax >= (uint64_t)limit) {
+			return 0;
+		}
+		d[u] = x;
+	}
+	return 1;
+}
+
+/* see hawk_e8_inner.h */
+int
+e8_compute_inverse_w_ntt(int64_t *w0, int64_t *w1,
+	const e8_inverse_w_ntt_basis *basis,
+	const int32_t *z0, const int32_t *z1, unsigned logn)
+{
+	size_t n = (size_t)1 << logn;
+	const e8_ntt_prime *prime = &E8_NTT_PRIMES[0];
+	uint32_t p = prime->p;
+	uint32_t tz0[E8_MAXN], tz1[E8_MAXN];
+	uint32_t rw0[E8_MAXN], rw1[E8_MAXN];
+
+	/*
+	 * Stage-1 range diagnostics saw:
+	 *   n=256:  max |z0,z1| = 20,12 and max |w0,w1| = 2051,445
+	 *   n=512:  max |z0,z1| = 22,13 and max |w0,w1| = 5339,794
+	 *   n=1024: max |z0,z1| = 22,13 and max |w0,w1| = 17416,1702
+	 * Even the conservative int8 bound gives
+	 * 2*1024*127*22 < 2^23 for each reconstructed coefficient.  Prime
+	 * p0 has a centered interval just below +/-2^30; after reduction we
+	 * fail safely if a coefficient reaches |w| >= 2^30.
+	 */
+	i32_to_ntt_with_gm(logn, tz0, z0, prime, basis->gm[0]);
+	i32_to_ntt_with_gm(logn, tz1, z1, prime, basis->gm[0]);
+	for (size_t u = 0; u < n; u ++) {
+		uint32_t gz0 = e8_mp_montymul(
+			basis->G[0][u], tz0[u], p, prime->p0i);
+		uint32_t fz1 = e8_mp_montymul(
+			basis->f[0][u], tz1[u], p, prime->p0i);
+		uint32_t fz1_big = e8_mp_montymul(
+			basis->F[0][u], tz1[u], p, prime->p0i);
+		uint32_t gz0_small = e8_mp_montymul(
+			basis->g[0][u], tz0[u], p, prime->p0i);
+
+		rw0[u] = mp_sub(gz0, fz1_big, p);
+		rw1[u] = mp_sub(fz1, gz0_small, p);
+	}
+	intt_with_igm(logn, rw0, prime, basis->igm[0], basis->ni[0]);
+	intt_with_igm(logn, rw1, prime, basis->igm[0], basis->ni[0]);
+	if (!center_checked_single_prime(w0, rw0, n, p)
+		|| !center_checked_single_prime(w1, rw1, n, p))
+	{
+		return 0;
+	}
+	return 1;
 }
 
 static int
@@ -365,10 +492,21 @@ static int
 compute_s_from_sample(int16_t *s0, int16_t *s1,
 	const uint8_t *t0, const uint8_t *t1,
 	const uint8_t *h0b, const uint8_t *h1b,
+	const e8_inverse_w_ntt_basis *basis_ntt,
 	const int8_t *f, const int8_t *g, const int8_t *F, const int8_t *G,
-	const int32_t *z0, const int32_t *z1, size_t n)
+	const int32_t *z0, const int32_t *z1,
+	unsigned logn, size_t n, unsigned attempt)
 {
 	int64_t w0[E8_MAXN], w1[E8_MAXN];
+#if HAWK_E8_DEBUG_CHECKS
+	int64_t sw0[E8_MAXN], sw1[E8_MAXN];
+#else
+	(void)f;
+	(void)g;
+	(void)F;
+	(void)G;
+	(void)attempt;
+#endif
 
 	for (size_t u = 0; u < n; u ++) {
 		int z_ok = ((((uint32_t)z0[u]) & 1u) == t0[u])
@@ -379,7 +517,23 @@ compute_s_from_sample(int16_t *s0, int16_t *s1,
 		}
 	}
 
-	compute_inverse_w(w0, w1, f, g, F, G, z0, z1, n);
+	if (!e8_compute_inverse_w_ntt(w0, w1, basis_ntt, z0, z1, logn)) {
+		return -1;
+	}
+#if HAWK_E8_DEBUG_CHECKS
+	if (attempt < E8_DEBUG_INVERSE_CHECK_ATTEMPTS) {
+		compute_inverse_w_schoolbook(sw0, sw1,
+			f, g, F, G, z0, z1, n);
+		for (size_t u = 0; u < n; u ++) {
+			int w_ok = w0[u] == sw0[u] && w1[u] == sw1[u];
+
+			assert(w_ok);
+			if (!w_ok) {
+				return -1;
+			}
+		}
+	}
+#endif
 	return compute_s_from_w(s0, s1, h0b, h1b, w0, w1, n);
 }
 
@@ -414,7 +568,7 @@ e8_sign_dummy_offset_uncompressed(unsigned logn,
 	bits_to_poly(h0, h0b, h, 0, n);
 	bits_to_poly(h1, h1b, h, n, n);
 
-	compute_t_mod2(t0, t1, f, g, F, G, h0b, h1b, n);
+	e8_compute_t_mod2(t0, t1, f, g, F, G, h0b, h1b, n);
 
 	/*
 	 * Dummy sampler path only: z = B h + 2*r.  This gives the right
@@ -430,7 +584,7 @@ e8_sign_dummy_offset_uncompressed(unsigned logn,
 		assert((((uint32_t)z1[u]) & 1u) == t1[u]);
 	}
 
-	compute_inverse_w(w0, w1, f, g, F, G, z0, z1, n);
+	compute_inverse_w_schoolbook(w0, w1, f, g, F, G, z0, z1, n);
 	sr = compute_s_from_w(s0, s1, h0b, h1b, w0, w1, n);
 	if (sr != 1) {
 		return 0;
@@ -454,11 +608,13 @@ e8_sign_dummy_uncompressed(unsigned logn,
 
 /* see hawk_e8_inner.h */
 int
-e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
+e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 	void *sig, size_t sig_len, const shake_context *sc_data,
 	const void *hpub, size_t hpub_len,
 	const int8_t *f, const int8_t *g,
-	const int8_t *F, const int8_t *G, const uint8_t *salt,
+	const int8_t *F, const int8_t *G,
+	const e8_inverse_w_ntt_basis *basis_ntt,
+	const e8_coset_f2_basis *basis_f2, const uint8_t *salt,
 	double sigma_sign, double sigma_verify,
 	unsigned max_attempts, hawk_rng rng, void *rng_context,
 	int32_t *trace_z0, int32_t *trace_z1,
@@ -494,7 +650,8 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 		|| hpub_len != ((size_t)1 << (logn - 4))
 		|| sig == NULL || sc_data == NULL || hpub == NULL
 		|| f == NULL || g == NULL || F == NULL || G == NULL
-		|| salt == NULL || sigma_sign <= 0.0 || sigma_verify <= 0.0
+		|| basis_ntt == NULL || basis_f2 == NULL || salt == NULL
+		|| sigma_sign <= 0.0 || sigma_verify <= 0.0
 		|| max_attempts == 0 || rng == NULL)
 	{
 		return 0;
@@ -528,7 +685,7 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 		sign_profile_stage_start(&stage_c0, &stage_w0);
 	}
 #endif
-	compute_t_mod2(t0, t1, f, g, F, G, h0b, h1b, n);
+	e8_compute_t_mod2_prepared(t0, t1, basis_f2, h0b, h1b, n);
 #if HAWK_E8_PROFILE_SIGN
 	if (trace_timing != NULL) {
 		sign_profile_stage_add(&trace_timing->cycles_target_total,
@@ -536,7 +693,6 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 			stage_c0, stage_w0);
 	}
 #endif
-
 	for (unsigned attempt = 0; attempt < max_attempts; attempt ++) {
 		uint64_t sample_c0, sample_c1, sample_w0, sample_w1;
 		uint64_t pnorm_u;
@@ -585,7 +741,8 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 		}
 #endif
 		sr = compute_s_from_sample(s0, s1, t0, t1, h0b, h1b,
-			f, g, F, G, z0, z1, n);
+			basis_ntt, f, g, F, G, z0, z1,
+			logn, n, attempt);
 #if HAWK_E8_PROFILE_SIGN
 		if (trace_timing != NULL) {
 			sign_profile_stage_add(
@@ -665,6 +822,40 @@ e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
 	sign_profile_finish(trace_timing, sign_c0, sign_w0);
 #endif
 	return 0;
+}
+
+/* see hawk_e8_inner.h */
+int
+e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
+	void *sig, size_t sig_len, const shake_context *sc_data,
+	const void *hpub, size_t hpub_len,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G, const uint8_t *salt,
+	double sigma_sign, double sigma_verify,
+	unsigned max_attempts, hawk_rng rng, void *rng_context,
+	int32_t *trace_z0, int32_t *trace_z1,
+	int64_t *trace_pnorm, unsigned *trace_attempts,
+	e8_sign_trace_timing *trace_timing)
+{
+	e8_inverse_w_ntt_basis basis_ntt;
+	e8_coset_f2_basis basis_f2;
+
+	if (trace_timing != NULL) {
+		memset(trace_timing, 0, sizeof *trace_timing);
+	}
+	if (logn < 8 || logn > 10
+		|| f == NULL || g == NULL || F == NULL || G == NULL)
+	{
+		return 0;
+	}
+	e8_inverse_w_ntt_prepare(&basis_ntt, f, g, F, G, logn);
+	e8_coset_f2_prepare(&basis_f2, f, g, F, G, (size_t)1 << logn);
+	return e8_sign_sampler_trace_timed_uncompressed_prepared(logn,
+		sig, sig_len, sc_data, hpub, hpub_len,
+		f, g, F, G, &basis_ntt, &basis_f2, salt,
+		sigma_sign, sigma_verify, max_attempts, rng, rng_context,
+		trace_z0, trace_z1, trace_pnorm, trace_attempts,
+		trace_timing);
 }
 
 /* see hawk_e8_inner.h */
