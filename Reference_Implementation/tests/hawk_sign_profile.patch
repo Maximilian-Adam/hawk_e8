@@ -1,0 +1,478 @@
+diff --git a/src/hawk_sign.c b/src/hawk_sign.c
+index b3fc53f..f6c0e95 100644
+--- a/src/hawk_sign.c
++++ b/src/hawk_sign.c
+@@ -1,3 +1,12 @@
++#if defined HAWK_PROFILE_SIGN && HAWK_PROFILE_SIGN
++#ifndef _GNU_SOURCE
++#define _GNU_SOURCE
++#endif
++#ifndef _POSIX_C_SOURCE
++#define _POSIX_C_SOURCE   200809L
++#endif
++#endif
++
+ #include "hawk_inner.h"
+ 
+ /*
+@@ -6,6 +15,157 @@
+ #define Q   18433
+ #include "modq.h"
+ 
++#ifndef HAWK_PROFILE_SIGN
++#define HAWK_PROFILE_SIGN   0
++#endif
++
++#if HAWK_PROFILE_SIGN
++#include <time.h>
++#if defined(__x86_64__)
++#include <x86intrin.h>
++#endif
++
++typedef struct {
++	uint64_t cycles_sign_total;
++	uint64_t cycles_key_expand;
++	uint64_t cycles_hash_message;
++	uint64_t cycles_salt;
++	uint64_t cycles_challenge;
++	uint64_t cycles_target;
++	uint64_t cycles_sample;
++	uint64_t cycles_norm_check;
++	uint64_t cycles_reconstruct;
++	uint64_t cycles_symbreak;
++	uint64_t cycles_encode;
++	uint64_t wall_ns_sign_total;
++	uint64_t wall_ns_key_expand;
++	uint64_t wall_ns_hash_message;
++	uint64_t wall_ns_salt;
++	uint64_t wall_ns_challenge;
++	uint64_t wall_ns_target;
++	uint64_t wall_ns_sample;
++	uint64_t wall_ns_norm_check;
++	uint64_t wall_ns_reconstruct;
++	uint64_t wall_ns_symbreak;
++	uint64_t wall_ns_encode;
++	uint64_t attempts_total;
++	uint64_t norm_rejections;
++	uint64_t bound_rejections;
++	uint64_t encode_rejections;
++} hawk_sign_profile;
++
++static hawk_sign_profile hawk_sign_profile_current;
++static int hawk_sign_profile_current_valid;
++
++static uint64_t
++hawk_sign_profile_wall_ns(void)
++{
++	struct timespec ts;
++
++#if defined(CLOCK_MONOTONIC_RAW)
++	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
++		return 0;
++	}
++#else
++	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
++		return 0;
++	}
++#endif
++	return (uint64_t)ts.tv_sec * UINT64_C(1000000000)
++		+ (uint64_t)ts.tv_nsec;
++}
++
++static uint64_t
++hawk_sign_profile_cycles_start(void)
++{
++#if defined(__x86_64__)
++	_mm_lfence();
++	return __rdtsc();
++#else
++	return 0;
++#endif
++}
++
++static uint64_t
++hawk_sign_profile_cycles_end(void)
++{
++#if defined(__x86_64__)
++	unsigned int aux;
++	uint64_t x;
++
++	x = __rdtscp(&aux);
++	_mm_lfence();
++	return x;
++#else
++	return 0;
++#endif
++}
++
++static uint64_t
++hawk_sign_profile_delta(uint64_t t0, uint64_t t1)
++{
++	if (t0 == 0 && t1 == 0) {
++		return 0;
++	}
++	if (t1 <= t0) {
++		return 1;
++	}
++	return t1 - t0;
++}
++
++static void
++hawk_sign_profile_reset(void)
++{
++	memset(&hawk_sign_profile_current, 0,
++		sizeof hawk_sign_profile_current);
++	hawk_sign_profile_current_valid = 0;
++}
++
++static int
++hawk_sign_profile_get(hawk_sign_profile *profile)
++{
++	if (profile == NULL || !hawk_sign_profile_current_valid) {
++		return 0;
++	}
++	*profile = hawk_sign_profile_current;
++	return 1;
++}
++
++static void
++hawk_sign_profile_stage_start(uint64_t *cycles_start,
++	uint64_t *wall_start)
++{
++	*cycles_start = hawk_sign_profile_cycles_start();
++	*wall_start = hawk_sign_profile_wall_ns();
++}
++
++static void
++hawk_sign_profile_stage_add(uint64_t *cycles_total,
++	uint64_t *wall_total, uint64_t cycles_start, uint64_t wall_start)
++{
++	uint64_t wall_end = hawk_sign_profile_wall_ns();
++	uint64_t cycles_end = hawk_sign_profile_cycles_end();
++
++	*cycles_total += hawk_sign_profile_delta(cycles_start, cycles_end);
++	*wall_total += hawk_sign_profile_delta(wall_start, wall_end);
++}
++
++static void
++hawk_sign_profile_finish(uint64_t cycles_start, uint64_t wall_start)
++{
++	if (cycles_start != 0 || wall_start != 0) {
++		uint64_t wall_end = hawk_sign_profile_wall_ns();
++		uint64_t cycles_end = hawk_sign_profile_cycles_end();
++
++		hawk_sign_profile_current.cycles_sign_total +=
++			hawk_sign_profile_delta(cycles_start, cycles_end);
++		hawk_sign_profile_current.wall_ns_sign_total +=
++			hawk_sign_profile_delta(wall_start, wall_end);
++		hawk_sign_profile_current_valid = 1;
++	}
++}
++#endif
++
+ #if HAWK_AVX2
+ /*
+  * Binary polynomials (GF(2)[X]); inputs a and b have size N bits;
+@@ -1495,6 +1655,11 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 	void *sig, const shake_context *sc_data,
+ 	const void *priv, size_t priv_len, void *tmp, size_t tmp_len)
+ {
++#if HAWK_PROFILE_SIGN
++	uint64_t profile_sign_c0 = 0, profile_sign_w0 = 0;
++	uint64_t profile_stage_c0 = 0, profile_stage_w0 = 0;
++#endif
++
+ 	/*
+ 	 * Ensure that the tmp[] buffer has proper alignment for 64-bit
+ 	 * access.
+@@ -1564,6 +1729,11 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 	size_t seed_len = 8 + ((size_t)1 << (logn - 5));
+ 	size_t hpub_len = (size_t)1 << (logn - 4);
+ 
++#if HAWK_PROFILE_SIGN
++	hawk_sign_profile_reset();
++	hawk_sign_profile_stage_start(&profile_sign_c0, &profile_sign_w0);
++#endif
++
+ 	/*
+ 	 * Memory layout:
+ 	 *    g    n bytes
+@@ -1586,6 +1756,9 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 	const uint8_t *F2;
+ 	const uint8_t *G2;
+ 	const void *hpub;
++#if HAWK_PROFILE_SIGN
++	hawk_sign_profile_stage_start(&profile_stage_c0, &profile_stage_w0);
++#endif
+ 	if (priv_decoded) {
+ 		f = (int8_t *)priv;
+ 		g = f + n;
+@@ -1599,6 +1772,12 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 		G2 = F2 + (n >> 3);
+ 		hpub = G2 + (n >> 3);
+ 	}
++#if HAWK_PROFILE_SIGN
++	hawk_sign_profile_stage_add(
++		&hawk_sign_profile_current.cycles_key_expand,
++		&hawk_sign_profile_current.wall_ns_key_expand,
++		profile_stage_c0, profile_stage_w0);
++#endif
+ 
+ #if HAWK_DEBUG
+ 	printf("#### Sign (n=%u):\n", 1u << logn);
+@@ -1618,11 +1797,20 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 	/*
+ 	 * hm <- SHAKE256(message || hpub)
+ 	 */
++#if HAWK_PROFILE_SIGN
++	hawk_sign_profile_stage_start(&profile_stage_c0, &profile_stage_w0);
++#endif
+ 	uint8_t hm[64];
+ 	scd = *sc_data;
+ 	shake_inject(&scd, hpub, hpub_len);
+ 	shake_flip(&scd);
+ 	shake_extract(&scd, hm, sizeof hm);
++#if HAWK_PROFILE_SIGN
++	hawk_sign_profile_stage_add(
++		&hawk_sign_profile_current.cycles_hash_message,
++		&hawk_sign_profile_current.wall_ns_hash_message,
++		profile_stage_c0, profile_stage_w0);
++#endif
+ 
+ #if HAWK_DEBUG
+ 	printf("# hm = SHAKE256(message || hpub) (64 bytes)\n");
+@@ -1630,6 +1818,9 @@ sign_finish_inner(unsigned logn, int use_shake,
+ #endif
+ 
+ 	for (uint32_t attempt = 0;; attempt += 2) {
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_current.attempts_total ++;
++#endif
+ 		/*
+ 		 * We get temporary values (of n/8 bytes each) inside ww.
+ 		 *    t0    n/8 bytes
+@@ -1662,6 +1853,10 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 		 *
+ 		 * In alternate mode, as per the API, we use the RNG directly.
+ 		 */
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_start(&profile_stage_c0,
++			&profile_stage_w0);
++#endif
+ 		uint8_t salt[40];
+ 		rng(rng_context, salt, salt_len);
+ 		if (use_shake) {
+@@ -1679,6 +1874,12 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 			shake_flip(&scd);
+ 			shake_extract(&scd, salt, salt_len);
+ 		}
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_add(
++			&hawk_sign_profile_current.cycles_salt,
++			&hawk_sign_profile_current.wall_ns_salt,
++			profile_stage_c0, profile_stage_w0);
++#endif
+ 
+ #if HAWK_DEBUG
+ 		print_blob("salt", salt, salt_len);
+@@ -1687,11 +1888,21 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 		/*
+ 		 * h <- SHAKE256(hm || salt)  (out: 2*n bits)
+ 		 */
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_start(&profile_stage_c0,
++			&profile_stage_w0);
++#endif
+ 		shake_init(&scd, 256);
+ 		shake_inject(&scd, hm, sizeof hm);
+ 		shake_inject(&scd, salt, salt_len);
+ 		shake_flip(&scd);
+ 		shake_extract(&scd, h0, n >> 2);
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_add(
++			&hawk_sign_profile_current.cycles_challenge,
++			&hawk_sign_profile_current.wall_ns_challenge,
++			profile_stage_c0, profile_stage_w0);
++#endif
+ 
+ #if HAWK_DEBUG
+ 		printf("# h = SHAKE256(hm || salt) (2*n bits)\n");
+@@ -1702,9 +1913,19 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 		/*
+ 		 * t <- B*h  (mod 2)
+ 		 */
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_start(&profile_stage_c0,
++			&profile_stage_w0);
++#endif
+ 		extract_lowbit(logn, f2, f);
+ 		extract_lowbit(logn, g2, g);
+ 		basis_m2_mul(logn, t0, t1, h0, h1, f2, g2, F2, G2, xx);
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_add(
++			&hawk_sign_profile_current.cycles_target,
++			&hawk_sign_profile_current.wall_ns_target,
++			profile_stage_c0, profile_stage_w0);
++#endif
+ 
+ #if HAWK_DEBUG
+ 		printf("# t = B*h (mod 2)\n");
+@@ -1723,6 +1944,10 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 		 * maintained even if the RNG source is poor.
+ 		 */
+ 		uint32_t xsn;
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_start(&profile_stage_c0,
++			&profile_stage_w0);
++#endif
+ 		if (use_shake) {
+ 			uint8_t tbuf[4];
+ 			enc32le(tbuf, attempt + 1);
+@@ -1738,13 +1963,34 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 		} else {
+ 			xsn = sig_gauss_alt(logn, rng, rng_context, x0, t0);
+ 		}
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_add(
++			&hawk_sign_profile_current.cycles_sample,
++			&hawk_sign_profile_current.wall_ns_sample,
++			profile_stage_c0, profile_stage_w0);
++#endif
+ #if HAWK_DEBUG
+ 		printf("# (dx0, dx1) = (2*x0, 2*x1)\n");
+ 		print_i8(logn, "dx0", x0);
+ 		print_i8(logn, "dx1", x1);
+ 		printf("l2norm(2*x)^2 = %lu\n", (unsigned long)xsn);
+ #endif
+-		if (xsn > max_xnorm) {
++		int norm_rejected;
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_start(&profile_stage_c0,
++			&profile_stage_w0);
++#endif
++		norm_rejected = xsn > max_xnorm;
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_add(
++			&hawk_sign_profile_current.cycles_norm_check,
++			&hawk_sign_profile_current.wall_ns_norm_check,
++			profile_stage_c0, profile_stage_w0);
++		if (norm_rejected) {
++			hawk_sign_profile_current.norm_rejections ++;
++		}
++#endif
++		if (norm_rejected) {
+ 			continue;
+ 		}
+ 
+@@ -1782,6 +2028,10 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 		 *    x1   n bytes   w3
+ 		 *    f    n bytes   w3
+ 		 */
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_start(&profile_stage_c0,
++			&profile_stage_w0);
++#endif
+ 		uint8_t h1buf[128];
+ 		memcpy(h1buf, h1, n >> 3);
+ 
+@@ -1836,6 +2086,12 @@ sign_finish_inner(unsigned logn, int use_shake,
+ #endif // HAWK_AVX2
+ 		mq18433_iNTT(logn, w3);
+ 		mq18433_poly_snorm(logn, w3);
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_add(
++			&hawk_sign_profile_current.cycles_reconstruct,
++			&hawk_sign_profile_current.wall_ns_reconstruct,
++			profile_stage_c0, profile_stage_w0);
++#endif
+ 
+ #if HAWK_DEBUG
+ 		printf("# w = h1 - 2*s1\n");
+@@ -1851,6 +2107,10 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 		 *
+ 		 * We also enforce a limit on the individual elements of s1.
+ 		 */
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_start(&profile_stage_c0,
++			&profile_stage_w0);
++#endif
+ 		int16_t *s1 = (int16_t *)w3;
+ 		uint32_t ps = poly_symbreak(logn, s1);
+ #if HAWK_DEBUG
+@@ -1887,6 +2147,13 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 			if (!priv_decoded) {
+ 				Hawk_regen_fg(logn, f, g, priv);
+ 			}
++#if HAWK_PROFILE_SIGN
++			hawk_sign_profile_current.bound_rejections ++;
++			hawk_sign_profile_stage_add(
++				&hawk_sign_profile_current.cycles_symbreak,
++				&hawk_sign_profile_current.wall_ns_symbreak,
++				profile_stage_c0, profile_stage_w0);
++#endif
+ 			continue;
+ 		}
+ #else // HAWK_AVX2
+@@ -1908,9 +2175,22 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 			if (!priv_decoded) {
+ 				Hawk_regen_fg(logn, f, g, priv);
+ 			}
++#if HAWK_PROFILE_SIGN
++			hawk_sign_profile_current.bound_rejections ++;
++			hawk_sign_profile_stage_add(
++				&hawk_sign_profile_current.cycles_symbreak,
++				&hawk_sign_profile_current.wall_ns_symbreak,
++				profile_stage_c0, profile_stage_w0);
++#endif
+ 			continue;
+ 		}
+ #endif // HAWK_AVX2
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_add(
++			&hawk_sign_profile_current.cycles_symbreak,
++			&hawk_sign_profile_current.wall_ns_symbreak,
++			profile_stage_c0, profile_stage_w0);
++#endif
+ 
+ #if HAWK_DEBUG
+ 		print_i16(logn, "s1", (int16_t *)s1);
+@@ -1921,6 +2201,10 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 		 * the temporary buffer, and (optionally) into the provided
+ 		 * output buffer.
+ 		 */
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_stage_start(&profile_stage_c0,
++			&profile_stage_w0);
++#endif
+ 		size_t sig_len = HAWK_SIG_SIZE(logn);
+ 		if (encode_sig(logn, tmp, sig_len, salt, salt_len, s1)) {
+ #if HAWK_DEBUG
+@@ -1929,6 +2213,14 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 			if (sig != NULL) {
+ 				memcpy(sig, tmp, sig_len);
+ 			}
++#if HAWK_PROFILE_SIGN
++			hawk_sign_profile_stage_add(
++				&hawk_sign_profile_current.cycles_encode,
++				&hawk_sign_profile_current.wall_ns_encode,
++				profile_stage_c0, profile_stage_w0);
++			hawk_sign_profile_finish(profile_sign_c0,
++				profile_sign_w0);
++#endif
+ 			return 1;
+ 		}
+ #if HAWK_DEBUG
+@@ -1937,6 +2229,13 @@ sign_finish_inner(unsigned logn, int use_shake,
+ 		if (!priv_decoded) {
+ 			Hawk_regen_fg(logn, f, g, priv);
+ 		}
++#if HAWK_PROFILE_SIGN
++		hawk_sign_profile_current.encode_rejections ++;
++		hawk_sign_profile_stage_add(
++			&hawk_sign_profile_current.cycles_encode,
++			&hawk_sign_profile_current.wall_ns_encode,
++			profile_stage_c0, profile_stage_w0);
++#endif
+ 	}
+ }
+ 

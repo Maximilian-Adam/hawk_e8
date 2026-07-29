@@ -14,6 +14,8 @@ E8_HIST_PROGS = bin/e8_histograms
 E8_BENCH_PROGS = bin/e8_sampler_bench
 E8_SIGN_BENCH_PROGS = bin/e8_sign_bench
 E8_PROFILE_SIGN_PROGS = bin/e8_sign_profile_bench
+HAWK_PROFILE_SIGN_PROGS = bin/hawk_sign_profile_bench
+HAWK_PROFILE_SIGN_SOURCE = build/hawk_sign_profile.c
 E8_REJECTION_PROGS = bin/e8_rejection_summary
 E8_VALIDATION_PROGS = bin/e8_validation_summary
 
@@ -21,6 +23,7 @@ HEAD = hawk.h hawk_inner.h hawk_config.h sha3.h
 NG_HEAD = ng_config.h ng_inner.h sha3.h
 E8_CFLAGS = $(CFLAGS) -DHAWK_ENABLE_E8_EXPERIMENTAL=1
 E8_PROFILE_SIGN_CFLAGS = $(E8_CFLAGS) -DHAWK_E8_PROFILE_SIGN=1
+HAWK_PROFILE_SIGN_CFLAGS = $(CFLAGS) -DHAWK_AVX2=0 -DHAWK_PROFILE_SIGN=1
 E8_THREAD_CFLAGS ?= -pthread
 E8_THREAD_LIBS ?= -pthread
 
@@ -43,6 +46,8 @@ sign-bench: build bin $(E8_SIGN_BENCH_PROGS)
 	@printf 'wrote e8_sign_bench.csv\n'
 profile-sign-bench: build bin $(E8_PROFILE_SIGN_PROGS)
 	@./bin/e8_sign_profile_bench > /dev/null
+profile-hawk-sign-bench: build bin $(HAWK_PROFILE_SIGN_PROGS)
+	@./bin/hawk_sign_profile_bench > /dev/null
 e8-rejection-summary: build bin $(E8_REJECTION_PROGS)
 	@./bin/e8_rejection_summary > e8_rejection_summary.csv
 	@printf 'wrote e8_rejection_summary.csv\n'
@@ -61,8 +66,8 @@ build:
 bin:
 	-mkdir -p bin
 clean:
-	-rm -f $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(PROGS) $(E8_PROGS) $(E8_HIST_PROGS) $(E8_BENCH_PROGS) $(E8_SIGN_BENCH_PROGS) $(E8_PROFILE_SIGN_PROGS) $(E8_REJECTION_PROGS) $(E8_VALIDATION_PROGS)
-	-rm -f e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sign_bench.csv e8_rejection_summary.csv e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv e8_sigma_verify_sweep.csv e8_sigma_sign_sweep.csv
+	-rm -f $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(PROGS) $(E8_PROGS) $(E8_HIST_PROGS) $(E8_BENCH_PROGS) $(E8_SIGN_BENCH_PROGS) $(E8_PROFILE_SIGN_PROGS) $(HAWK_PROFILE_SIGN_PROGS) $(HAWK_PROFILE_SIGN_SOURCE) $(E8_REJECTION_PROGS) $(E8_VALIDATION_PROGS)
+	-rm -f e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sign_bench.csv hawk_sign_profile_bench.csv e8_rejection_summary.csv e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv e8_sigma_verify_sweep.csv e8_sigma_sign_sweep.csv
 
 # Binaries:
 
@@ -97,6 +102,8 @@ bin/e8_sign_bench: tests/e8_sign_bench.c hawk_sign.c e8_vrfy.c e8_sign.c hawk_e8
 	$(CC) $(E8_CFLAGS) -o bin/e8_sign_bench tests/e8_sign_bench.c $(filter-out build/hawk_sign.o,$(OBJ)) build/e8_math.o build/e8_f2.o build/e8_ntt.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/e8_sign_profile_bench: tests/e8_sign_bench.c hawk_sign.c e8_vrfy.c e8_sign.c hawk_e8_inner.h $(filter-out build/hawk_sign.o,$(OBJ)) build/e8_math.o build/e8_f2.o build/e8_ntt.o $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_PROFILE_SIGN_CFLAGS) -o bin/e8_sign_profile_bench tests/e8_sign_bench.c $(filter-out build/hawk_sign.o,$(OBJ)) build/e8_math.o build/e8_f2.o build/e8_ntt.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/hawk_sign_profile_bench: tests/hawk_sign_profile_bench.c $(HAWK_PROFILE_SIGN_SOURCE) $(filter-out build/hawk_sign.o,$(OBJ))
+	$(CC) $(HAWK_PROFILE_SIGN_CFLAGS) -I. -o bin/hawk_sign_profile_bench tests/hawk_sign_profile_bench.c $(filter-out build/hawk_sign.o,$(OBJ)) $(LIBS)
 bin/e8_rejection_summary: tests/e8_rejection_summary.c $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) -o bin/e8_rejection_summary tests/e8_rejection_summary.c $(OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/e8_validation_summary: tests/e8_validation_summary.c hawk_sign.c $(filter-out build/hawk_sign.o,$(OBJ)) build/e8_math.o $(E8_SAMPLER_OBJ)
@@ -107,6 +114,8 @@ build/hawk_kgen.o: hawk_kgen.c $(HEAD)
 	$(CC) $(CFLAGS) -c -o build/hawk_kgen.o hawk_kgen.c
 build/hawk_sign.o: hawk_sign.c $(HEAD) modq.h
 	$(CC) $(CFLAGS) -c -o build/hawk_sign.o hawk_sign.c
+$(HAWK_PROFILE_SIGN_SOURCE): ../src/hawk_sign.c tests/hawk_sign_profile.patch
+	patch --silent --fuzz=0 -o $(HAWK_PROFILE_SIGN_SOURCE) ../src/hawk_sign.c tests/hawk_sign_profile.patch
 build/hawk_vrfy.o: hawk_vrfy.c $(HEAD)
 	$(CC) $(CFLAGS) -c -o build/hawk_vrfy.o hawk_vrfy.c
 build/ng_fxp.o: ng_fxp.c $(NG_HEAD)
