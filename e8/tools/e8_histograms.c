@@ -7,12 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#endif
 
 #include "../src/hawk_e8_inner.h"
+#include "cmn_timing.h"
 
 #define MAXN   1024
 #define E8_HIST_DEFAULT_KEYS         3
@@ -75,74 +72,6 @@ static const hist_param PARAMS[] = {
 	{ 9,  3.631, 1.99, 1000 },
 	{ 10, 3.669, 1.95, 1000 }
 };
-
-static uint64_t
-hist_wall_ns(void)
-{
-	struct timespec ts;
-
-#if defined(CLOCK_MONOTONIC_RAW)
-	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
-		return 0;
-	}
-#else
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-		return 0;
-	}
-#endif
-	return (uint64_t)ts.tv_sec * UINT64_C(1000000000)
-		+ (uint64_t)ts.tv_nsec;
-}
-
-static uint64_t
-hist_cycles_start(void)
-{
-#if defined(__x86_64__)
-	_mm_lfence();
-	return __rdtsc();
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-hist_cycles_end(void)
-{
-#if defined(__x86_64__)
-	unsigned int aux;
-	uint64_t x;
-
-	x = __rdtscp(&aux);
-	_mm_lfence();
-	return x;
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-hist_cycles_delta(uint64_t t0, uint64_t t1)
-{
-	if (t0 == 0 && t1 == 0) {
-		return 0;
-	}
-	if (t1 <= t0) {
-		return 1;
-	}
-	return t1 - t0;
-}
-
-static uint64_t
-hist_wall_delta(uint64_t t0, uint64_t t1)
-{
-	if (t0 == 0 && t1 == 0) {
-		return 0;
-	}
-	if (t1 <= t0) {
-		return 1;
-	}
-	return t1 - t0;
-}
 
 static int
 parse_count_override(const char *name, unsigned *value)
@@ -659,15 +588,15 @@ write_verify_case_row(FILE *sig_fp, const hist_param *param,
 		logn, param->sigma_verify, sig, sig_len, sc_data,
 		hpub, hpub_len, q00, q01);
 	norm_equal = have_qnorm && pnorm == qnorm;
-	verify_c0 = hist_cycles_start();
-	verify_w0 = hist_wall_ns();
+	verify_c0 = cmn_tsc_start();
+	verify_w0 = cmn_wall_ns();
 	verify_success = e8_verify_uncompressed_with_sigma(logn,
 		sig, sig_len, sc_data, hpub, hpub_len,
 		q00, q01, q10, q11, param->sigma_verify);
-	verify_w1 = hist_wall_ns();
-	verify_c1 = hist_cycles_end();
-	row_timing.cycles_verify = hist_cycles_delta(verify_c0, verify_c1);
-	row_timing.wall_ns_verify = hist_wall_delta(verify_w0, verify_w1);
+	verify_w1 = cmn_wall_ns();
+	verify_c1 = cmn_tsc_end();
+	row_timing.cycles_verify = cmn_delta(verify_c0, verify_c1);
+	row_timing.wall_ns_verify = cmn_delta(verify_w0, verify_w1);
 
 	write_signature_row(sig_fp, logn, key_index, trial_index,
 		accepted, attempts, param->sigma_sign, param->sigma_verify,
@@ -718,21 +647,21 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	e8_verify_bound_from_sigma(logn, param->sigma_verify, &verify_bound);
 	make_salt(salt, salt_len, logn, key_index, trial_index);
 	make_message_context(&sc_data, logn, key_index, trial_index);
-	sign_c0 = hist_cycles_start();
-	sign_w0 = hist_wall_ns();
+	sign_c0 = cmn_tsc_start();
+	sign_w0 = cmn_wall_ns();
 	accepted = e8_sign_sampler_trace_timed_uncompressed(logn,
 		sig, sig_len, &sc_data, hpub, (size_t)1 << (logn - 4),
 		f, g, F, G, salt, param->sigma_sign, param->sigma_verify,
 		max_attempts, hist_rng, rng_state, z0, z1, &pnorm,
 		&attempts, &sign_trace);
-	sign_w1 = hist_wall_ns();
-	sign_c1 = hist_cycles_end();
+	sign_w1 = cmn_wall_ns();
+	sign_c1 = cmn_tsc_end();
 	timing.cycles_sample_total = sign_trace.cycles_sample_total;
 	timing.cycles_sample_last = sign_trace.cycles_sample_last;
-	timing.cycles_sign_total = hist_cycles_delta(sign_c0, sign_c1);
+	timing.cycles_sign_total = cmn_delta(sign_c0, sign_c1);
 	timing.wall_ns_sample_total = sign_trace.wall_ns_sample_total;
 	timing.wall_ns_sample_last = sign_trace.wall_ns_sample_last;
-	timing.wall_ns_sign_total = hist_wall_delta(sign_w0, sign_w1);
+	timing.wall_ns_sign_total = cmn_delta(sign_w0, sign_w1);
 	if (!accepted) {
 		write_signature_row(sig_fp, logn, key_index, trial_index,
 			0, max_attempts, param->sigma_sign,
@@ -928,15 +857,15 @@ collect(void)
 			int key_ok;
 
 			memset(&key_timing, 0, sizeof key_timing);
-			key_c0 = hist_cycles_start();
-			key_w0 = hist_wall_ns();
+			key_c0 = cmn_tsc_start();
+			key_w0 = cmn_wall_ns();
 			key_ok = make_basis(logn, f, g, F, G, &rng_state);
-			key_w1 = hist_wall_ns();
-			key_c1 = hist_cycles_end();
+			key_w1 = cmn_wall_ns();
+			key_c1 = cmn_tsc_end();
 			key_timing.cycles_keygen =
-				hist_cycles_delta(key_c0, key_c1);
+				cmn_delta(key_c0, key_c1);
 			key_timing.wall_ns_keygen =
-				hist_wall_delta(key_w0, key_w1);
+				cmn_delta(key_w0, key_w1);
 			if (!key_ok) {
 				fprintf(stderr,
 					"ERR: Hawk_keygen failed"
@@ -945,16 +874,16 @@ collect(void)
 				continue;
 			}
 			make_hpub(hpub, hpub_len, logn, key);
-			public_c0 = hist_cycles_start();
-			public_w0 = hist_wall_ns();
+			public_c0 = cmn_tsc_start();
+			public_w0 = cmn_wall_ns();
 			e8_compute_qform(q00, q01, q10, q11,
 				f, g, F, G, logn);
-			public_w1 = hist_wall_ns();
-			public_c1 = hist_cycles_end();
+			public_w1 = cmn_wall_ns();
+			public_c1 = cmn_tsc_end();
 			key_timing.cycles_public_form =
-				hist_cycles_delta(public_c0, public_c1);
+				cmn_delta(public_c0, public_c1);
 			key_timing.wall_ns_public_form =
-				hist_wall_delta(public_w0, public_w1);
+				cmn_delta(public_w0, public_w1);
 			write_public_row(pub_fp, logn, key, q00, q01, q11);
 
 			for (unsigned trial = 0; trial < sig_count; trial ++) {

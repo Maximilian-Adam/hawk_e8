@@ -9,13 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#endif
 
 #include "../src/hawk_e8_inner.h"
+#include "cmn_timing.h"
 
 /*
  * The ordinary HAWK signing sampler is static in hawk_sign.c; hawk_shim
@@ -103,74 +100,6 @@ typedef struct {
 	int worker_mode_set;
 	int worker_mode_spin;
 } bench_options;
-
-static uint64_t
-bench_wall_ns(void)
-{
-	struct timespec ts;
-
-#if defined(CLOCK_MONOTONIC_RAW)
-	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
-		return 0;
-	}
-#else
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-		return 0;
-	}
-#endif
-	return (uint64_t)ts.tv_sec * UINT64_C(1000000000)
-		+ (uint64_t)ts.tv_nsec;
-}
-
-static uint64_t
-bench_cycles_start(void)
-{
-#if defined(__x86_64__)
-	_mm_lfence();
-	return __rdtsc();
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-bench_cycles_end(void)
-{
-#if defined(__x86_64__)
-	unsigned int aux;
-	uint64_t x;
-
-	x = __rdtscp(&aux);
-	_mm_lfence();
-	return x;
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-bench_cycles_delta(uint64_t t0, uint64_t t1)
-{
-	if (t0 == 0 && t1 == 0) {
-		return 0;
-	}
-	if (t1 <= t0) {
-		return 1;
-	}
-	return t1 - t0;
-}
-
-static uint64_t
-bench_wall_delta(uint64_t t0, uint64_t t1)
-{
-	if (t0 == 0 && t1 == 0) {
-		return 0;
-	}
-	if (t1 <= t0) {
-		return 1;
-	}
-	return t1 - t0;
-}
 
 static uint64_t
 bench_per_unit(uint64_t total, unsigned units)
@@ -527,8 +456,7 @@ write_row_threads(const char *sampler_type, const char *scope,
 	}
 
 	printf("%s,%s,%u,%u,%u,%.17g,%d,%u,"
-		"%llu,%llu,%llu,%llu,%s,%u,%s,%s,%.6f,"
-		"%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%s\n",
+		"%llu,%llu,%llu,%llu,%s,%u,%s,%s,%.6f,",
 		sampler_type, scope, logn, (unsigned)n,
 		trial_index, sigma, accepted, attempts,
 		(unsigned long long)cycles_total,
@@ -539,7 +467,9 @@ write_row_threads(const char *sampler_type, const char *scope,
 		threads_used,
 		worker_mode != NULL ? worker_mode : "",
 		rng_mode != NULL ? rng_mode : "",
-		speedup_vs_threads_1,
+		speedup_vs_threads_1);
+#if HAWK_E8_PROFILE_SAMPLER
+	printf("%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%s\n",
 		(unsigned long long)profile->cycles_master_seed,
 		(unsigned long long)profile->cycles_block_rng_init,
 		(unsigned long long)profile->cycles_block_sample,
@@ -553,6 +483,15 @@ write_row_threads(const char *sampler_type, const char *scope,
 		(unsigned long long)profile->wall_ns_worker_wait,
 		(unsigned long long)profile->wall_ns_reduction,
 		notes);
+#else
+	/*
+	 * The sampler profile is compiled out (HAWK_E8_PROFILE_SAMPLER=0,
+	 * the default); its columns are empty. e8_sampler_profile_bench
+	 * fills them.
+	 */
+	(void)profile;
+	printf(",,,,,,,,,,,,%s\n", notes);
+#endif
 }
 
 static void
@@ -586,14 +525,14 @@ bench_hawk_sampler(unsigned logn, unsigned trial_index)
 	fill_hawk_parities(t, t_len, logn, trial_index);
 	bench_rng_init(&rng, 0, logn, trial_index);
 
-	c0 = bench_cycles_start();
-	w0 = bench_wall_ns();
+	c0 = cmn_tsc_start();
+	w0 = cmn_wall_ns();
 	(void)hawk_shim_sig_gauss(logn, bench_rng, &rng, NULL, x, t);
-	w1 = bench_wall_ns();
-	c1 = bench_cycles_end();
+	w1 = cmn_wall_ns();
+	c1 = cmn_tsc_end();
 
-	cycles_total = bench_cycles_delta(c0, c1);
-	wall_ns_total = bench_wall_delta(w0, w1);
+	cycles_total = cmn_delta(c0, c1);
+	wall_ns_total = cmn_delta(w0, w1);
 
 	write_row("hawk_sampler", "amortized_block", logn, trial_index,
 		hawk_sigma_sign(logn), 1, 1, cycles_total,
@@ -654,20 +593,20 @@ bench_e8_sampler_full(unsigned logn, unsigned trial_index,
 	}
 
 	e8_sampler_profile_reset();
-	c0 = bench_cycles_start();
-	w0 = bench_wall_ns();
+	c0 = cmn_tsc_start();
+	w0 = cmn_wall_ns();
 	accepted = e8_sample_z_construction_a_cm(z0, z1, &norm,
 		t0, t1, logn, e8_sigma_sign(logn), bench_rng, &rng,
 		&stats);
-	w1 = bench_wall_ns();
-	c1 = bench_cycles_end();
+	w1 = cmn_wall_ns();
+	c1 = cmn_tsc_end();
 	e8_sampler_profile profile;
 	if (!e8_sampler_profile_get(&profile)) {
 		memset(&profile, 0, sizeof profile);
 	}
 
-	cycles_total = bench_cycles_delta(c0, c1);
-	wall_ns_total = bench_wall_delta(w0, w1);
+	cycles_total = cmn_delta(c0, c1);
+	wall_ns_total = cmn_delta(w0, w1);
 	if (accepted) {
 		if (baseline_cycles != 0 && cycles_total != 0) {
 			speedup = (double)baseline_cycles / (double)cycles_total;

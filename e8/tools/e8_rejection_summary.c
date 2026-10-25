@@ -9,12 +9,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#endif
 
 #include "../src/hawk_e8_inner.h"
+#include "cmn_timing.h"
 
 #define MAXN   1024
 #define DEFAULT_KEYS     2
@@ -97,62 +94,6 @@ static const sigma_verify_sweep_param SIGMA_VERIFY_SWEEP_DEFAULTS[] = {
 static const unsigned SIGMA_SIGN_SWEEP_LOGN[] = {
 	8, 9, 10
 };
-
-static uint64_t
-wall_ns(void)
-{
-	struct timespec ts;
-
-#if defined(CLOCK_MONOTONIC_RAW)
-	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
-		return 0;
-	}
-#else
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-		return 0;
-	}
-#endif
-	return (uint64_t)ts.tv_sec * UINT64_C(1000000000)
-		+ (uint64_t)ts.tv_nsec;
-}
-
-static uint64_t
-cycles_start(void)
-{
-#if defined(__x86_64__)
-	_mm_lfence();
-	return __rdtsc();
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-cycles_end(void)
-{
-#if defined(__x86_64__)
-	unsigned int aux;
-	uint64_t x;
-
-	x = __rdtscp(&aux);
-	_mm_lfence();
-	return x;
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-delta_u64(uint64_t t0, uint64_t t1)
-{
-	if (t0 == 0 && t1 == 0) {
-		return 0;
-	}
-	if (t1 <= t0) {
-		return 1;
-	}
-	return t1 - t0;
-}
 
 static void
 stat_i64_add(stat_i64 *st, int64_t x)
@@ -684,25 +625,25 @@ collect_one_key_stats(const run_param *param, unsigned key_index,
 		make_salt(salt, salt_len, logn, key_index, trial);
 		make_message_context(&sc_data, logn, key_index, trial);
 
-		sign_c0 = cycles_start();
-		sign_w0 = wall_ns();
+		sign_c0 = cmn_tsc_start();
+		sign_w0 = cmn_wall_ns();
 		accepted = e8_sign_sampler_trace_timed_uncompressed(logn,
 			sig, sig_len, &sc_data, hpub, hpub_len,
 			f, g, F, G, salt,
 			param->sigma_sign, param->sigma_verify,
 			param->max_attempts, summary_rng, rng_state,
 			z0, z1, &pnorm, &attempts, &trace);
-		sign_w1 = wall_ns();
-		sign_c1 = cycles_end();
+		sign_w1 = cmn_wall_ns();
+		sign_c1 = cmn_tsc_end();
 
 		row->total_attempts += attempts;
 		if (attempts > row->max_observed_attempts) {
 			row->max_observed_attempts = attempts;
 		}
 		stat_u64_add(&row->cycles_sign_call,
-			delta_u64(sign_c0, sign_c1));
+			cmn_delta(sign_c0, sign_c1));
 		stat_u64_add(&row->wall_ns_sign_call,
-			delta_u64(sign_w0, sign_w1));
+			cmn_delta(sign_w0, sign_w1));
 
 		if (!accepted) {
 			continue;
@@ -711,11 +652,11 @@ collect_one_key_stats(const run_param *param, unsigned key_index,
 		stat_u64_add(&row->cycles_sample_total,
 			trace.cycles_sample_total);
 		stat_u64_add(&row->cycles_sign_total,
-			delta_u64(sign_c0, sign_c1));
+			cmn_delta(sign_c0, sign_c1));
 		stat_u64_add(&row->wall_ns_sample_total,
 			trace.wall_ns_sample_total);
 		stat_u64_add(&row->wall_ns_sign_total,
-			delta_u64(sign_w0, sign_w1));
+			cmn_delta(sign_w0, sign_w1));
 
 		make_message_context(&sc_data, logn, key_index, trial);
 		compute_target_t(t0, t1, logn, f, g, F, G,

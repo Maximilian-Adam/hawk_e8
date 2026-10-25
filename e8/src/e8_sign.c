@@ -8,100 +8,30 @@
 
 #include <assert.h>
 #include <limits.h>
-#include <time.h>
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#endif
+
+#include "cmn_timing.h"
 
 #define E8_MAXN   1024
 #define E8_DEBUG_INVERSE_CHECK_ATTEMPTS   4
 #define E8_INVERSE_W_ABS_LIMIT   INT64_C(140000000)
 
-static uint64_t
-trace_wall_ns(void)
-{
-	struct timespec ts;
-
-#if defined(CLOCK_MONOTONIC_RAW)
-	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
-		return 0;
-	}
-#else
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-		return 0;
-	}
-#endif
-	return (uint64_t)ts.tv_sec * UINT64_C(1000000000)
-		+ (uint64_t)ts.tv_nsec;
-}
-
-static uint64_t
-trace_cycles_start(void)
-{
-#if defined(__x86_64__)
-	_mm_lfence();
-	return __rdtsc();
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-trace_cycles_end(void)
-{
-#if defined(__x86_64__)
-	unsigned int aux;
-	uint64_t x;
-
-	x = __rdtscp(&aux);
-	_mm_lfence();
-	return x;
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-trace_cycles_delta(uint64_t t0, uint64_t t1)
-{
-	if (t0 == 0 && t1 == 0) {
-		return 0;
-	}
-	if (t1 <= t0) {
-		return 1;
-	}
-	return t1 - t0;
-}
-
-static uint64_t
-trace_wall_delta(uint64_t t0, uint64_t t1)
-{
-	if (t0 == 0 && t1 == 0) {
-		return 0;
-	}
-	if (t1 <= t0) {
-		return 1;
-	}
-	return t1 - t0;
-}
-
 #if HAWK_E8_PROFILE_SIGN
 static void
 sign_profile_stage_start(uint64_t *cycles_start, uint64_t *wall_start)
 {
-	*cycles_start = trace_cycles_start();
-	*wall_start = trace_wall_ns();
+	*cycles_start = cmn_tsc_start();
+	*wall_start = cmn_wall_ns();
 }
 
 static void
 sign_profile_stage_add(uint64_t *cycles_total, uint64_t *wall_total,
 	uint64_t cycles_start, uint64_t wall_start)
 {
-	uint64_t wall_end = trace_wall_ns();
-	uint64_t cycles_end = trace_cycles_end();
+	uint64_t wall_end = cmn_wall_ns();
+	uint64_t cycles_end = cmn_tsc_end();
 
-	*cycles_total += trace_cycles_delta(cycles_start, cycles_end);
-	*wall_total += trace_wall_delta(wall_start, wall_end);
+	*cycles_total += cmn_delta(cycles_start, cycles_end);
+	*wall_total += cmn_delta(wall_start, wall_end);
 }
 
 static void
@@ -109,13 +39,13 @@ sign_profile_finish(e8_sign_trace_timing *trace_timing,
 	uint64_t cycles_start, uint64_t wall_start)
 {
 	if (trace_timing != NULL && (cycles_start != 0 || wall_start != 0)) {
-		uint64_t wall_end = trace_wall_ns();
-		uint64_t cycles_end = trace_cycles_end();
+		uint64_t wall_end = cmn_wall_ns();
+		uint64_t cycles_end = cmn_tsc_end();
 
 		trace_timing->cycles_sign_total +=
-			trace_cycles_delta(cycles_start, cycles_end);
+			cmn_delta(cycles_start, cycles_end);
 		trace_timing->wall_ns_sign_total +=
-			trace_wall_delta(wall_start, wall_end);
+			cmn_delta(wall_start, wall_end);
 	}
 }
 #endif
@@ -790,7 +720,7 @@ e8_sign_sampler_core(unsigned logn,
 	}
 #endif
 	for (unsigned attempt = 0; attempt < max_attempts; attempt ++) {
-		uint64_t sample_c0, sample_c1, sample_w0, sample_w1;
+		uint64_t sample_c0 = 0, sample_w0 = 0;
 		uint64_t pnorm_u;
 		int64_t pnorm;
 		int sr;
@@ -848,17 +778,23 @@ e8_sign_sampler_core(unsigned logn,
 			}
 #endif
 		}
-		sample_c0 = trace_cycles_start();
-		sample_w0 = trace_wall_ns();
+		/*
+		 * The per-attempt sampler timestamps are taken only for a
+		 * trace, so that untraced signing has no timers in its path.
+		 */
+		if (trace_timing != NULL) {
+			sample_c0 = cmn_tsc_start();
+			sample_w0 = cmn_wall_ns();
+		}
 		int sample_ok = e8_sample_z_construction_a_cm(z0, z1, &pnorm_u,
 			t0, t1, logn, sigma_sign, rng, rng_context, NULL);
-		sample_w1 = trace_wall_ns();
-		sample_c1 = trace_cycles_end();
 		if (trace_timing != NULL) {
+			uint64_t sample_w1 = cmn_wall_ns();
+			uint64_t sample_c1 = cmn_tsc_end();
 			uint64_t sample_cycles =
-				trace_cycles_delta(sample_c0, sample_c1);
+				cmn_delta(sample_c0, sample_c1);
 			uint64_t sample_wall =
-				trace_wall_delta(sample_w0, sample_w1);
+				cmn_delta(sample_w0, sample_w1);
 
 			trace_timing->cycles_sample_total += sample_cycles;
 			trace_timing->cycles_sample_last = sample_cycles;

@@ -3,6 +3,7 @@
 
 #include "hawk_inner.h"
 #include "hawk_e8.h"
+#include "cmn_rng.h"
 
 #ifndef HAWK_ENABLE_E8_EXPERIMENTAL
 #define HAWK_ENABLE_E8_EXPERIMENTAL   0
@@ -12,8 +13,13 @@
 #define HAWK_E8_PROFILE_SIGN   0
 #endif
 
+/*
+ * Per-stage sampler profile (the cycles_* and wall_ns_* fields of
+ * e8_sampler_profile). Off by default: its timers run inside the timed
+ * sampling call, on every block.
+ */
 #ifndef HAWK_E8_PROFILE_SAMPLER
-#define HAWK_E8_PROFILE_SAMPLER   1
+#define HAWK_E8_PROFILE_SAMPLER   0
 #endif
 
 #if HAWK_ENABLE_E8_EXPERIMENTAL
@@ -96,6 +102,8 @@
 #define e8_sampler_get_rng_mode  Zh(e8_sampler_get_rng_mode)
 #define e8_sampler_profile_reset  Zh(e8_sampler_profile_reset)
 #define e8_sampler_profile_get  Zh(e8_sampler_profile_get)
+#define e8_sampler_rng_counters_get  Zh(e8_sampler_rng_counters_get)
+#define e8_sampler_rng_counters_reset  Zh(e8_sampler_rng_counters_reset)
 #define e8_sampler_cache_compare_1d_mass  Zh(e8_sampler_cache_compare_1d_mass)
 #define e8_sampler_cache_compare_component_mass  Zh(e8_sampler_cache_compare_component_mass)
 
@@ -147,9 +155,17 @@ typedef struct {
 #define E8_SAMPLER_RNG_PER_BLOCK      0u
 #define E8_SAMPLER_RNG_PER_WORKER     1u
 
+/*
+ * Profile of the last e8_sample_z_construction_a_cm() call. worker_mode,
+ * rng_mode and rng (the sampler streams' counters, summed over streams;
+ * see cmn_rng.h) are always set; the cycles_* and wall_ns_* fields only
+ * with HAWK_E8_PROFILE_SAMPLER. The 32-byte master seed drawn from the
+ * caller's RNG is not part of rng.
+ */
 typedef struct {
 	uint64_t worker_mode;
 	uint64_t rng_mode;
+	cmn_rng_counters rng;
 	uint64_t cycles_master_seed;
 	uint64_t cycles_block_rng_init;
 	uint64_t cycles_block_sample;
@@ -503,8 +519,9 @@ int e8_sampler_warm_cache(double sigma_sign);
 
 /*
  * Control full-dimension CM sampler parallelism.  A count of 1 forces the
- * single-thread path.  User-selected counts greater than 1 use the spin/yield
- * worker pool.  A count of 0 requests an automatic worker count, capped by
+ * single-thread path (which joins every pool thread; see cmn_pool.h).
+ * User-selected counts greater than 1 use the shared spin/yield worker pool
+ * (cmn_pool.h).  A count of 0 requests an automatic worker count, capped by
  * the number of E8 blocks and by the sampler's conservative worker limit.
  * If not set here, HAWK_E8_SAMPLER_THREADS is used, then the
  * HAWK_E8_SAMPLER_THREADS environment variable can override it at runtime.
@@ -520,6 +537,16 @@ unsigned e8_sampler_get_rng_mode(void);
 void e8_sampler_profile_reset(void);
 
 int e8_sampler_profile_get(e8_sampler_profile *profile);
+
+/*
+ * Sampler stream counters summed over every
+ * e8_sample_z_construction_a_cm() call since the last reset; a caller
+ * reads them before and after a signature to get the sampler's random
+ * bytes for that signature.
+ */
+void e8_sampler_rng_counters_get(cmn_rng_counters *total);
+
+void e8_sampler_rng_counters_reset(void);
 
 int e8_sample_block_construction_a_cm(int32_t *zblk, uint8_t tau,
 	double sigma_sign, hawk_rng rng, void *rng_context,

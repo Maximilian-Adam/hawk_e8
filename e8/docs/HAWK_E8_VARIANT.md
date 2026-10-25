@@ -84,7 +84,14 @@ existing portability profile.
 
 All E8 code lives under `e8/`, separate from upstream HAWK: sources in
 `e8/src/`, tests in `e8/tests/`, diagnostics in `e8/tools/`, and comparison
-benchmarks in `e8/compare/`.  `e8/Makefile` compiles the E8 code against the
+benchmarks in `e8/compare/`.  The shared measurement modules used by every
+benchmark variant live in `e8/common/`: the SHAKE256 stream RNG
+(`cmn_rng`), the spin/yield worker pool (`cmn_pool`), timing (`cmn_timing`:
+fenced TSC, `CLOCK_MONOTONIC_RAW`, `CLOCK_THREAD_CPUTIME_ID`, and
+`perf_event_open` core cycles) and the CSV writer (`cmn_csv`).  Dependencies
+run one way: `e8/src/` may use `e8/common/`, `e8/compare/` may use both, and
+`e8/common/` uses neither (only upstream `sha3.h` and `hawk.h`), so the
+scheme never depends on the benchmarks.  `e8/Makefile` compiles the E8 code against the
 generated, unmodified HAWK reference sources in `Reference_Implementation/`.
 Benchmarks reach static HAWK internals only through `e8/compare/hawk_shim.c`,
 and `make check-upstream` verifies that the upstream HAWK files are unchanged.
@@ -140,14 +147,42 @@ hot component and six-value CDF thresholds use 64-bit integer thresholds.
 The cache also stores one-dimensional centre classes, ordered tail fallback
 data, base blocks, base norms, and affine reconstruction deltas.
 
-Serial mode is the reference path.  The full sampler can also use a small
-pthread spin/yield worker pool over independent block ranges.  Parallelism is
+Serial mode is the reference path.  The full sampler can also use the shared
+pthread spin/yield worker pool (`e8/common/cmn_pool.c`, moved unchanged from
+this file so that HAWK parallel variants can use the same code) over
+independent block ranges; the calling thread runs worker 0.  Parallelism is
 controlled by `e8_sampler_set_thread_count()`,
 `HAWK_E8_SAMPLER_THREADS`, or the compile-time `HAWK_E8_SAMPLER_THREADS`
 macro.  RNG mode is either per-block SHAKE streams or per-worker SHAKE streams.
 The compile-time default is serial.  The selected benchmark/signing diagnostic
 configuration uses 8, 8, and 16 sampler threads for n=256, 512, and 1024,
-respectively.
+respectively.  A serial call always uses per-block streams, and joins every
+pool thread inside the call; the next threaded call starts its threads again
+inside its own call.
+
+The sampler streams are shared-module streams (`e8/common/cmn_rng.c`):
+SHAKE256 over a domain string, the 32-byte master seed, then a label, read
+through a 128-byte buffer as little-endian 64-bit words:
+
+```text
+per block:  "HAWK-E8-CM block sampler v1"  || seed || u8 logn || u8 tau
+            || u64le(block_index) || u64le(sigma_sign bits)
+per worker: "HAWK-E8-CM worker sampler v1" || seed || u8 logn || u8 worker_id
+            || u64le(range_start) || u64le(range_end) || u64le(sigma_sign bits)
+```
+
+Each block reads one word for the component and one per coordinate (72
+bytes), plus one more word for each coordinate that falls to the tail table.
+The streams' delivered, squeezed and refill counts and Keccak permutations are
+summed per call into `e8_sampler_profile.rng` and cumulatively into
+`e8_sampler_rng_counters_get()`.
+
+The per-stage sampler profile (the `cycles_*` / `wall_ns_*` fields of
+`e8_sampler_profile`) is off by default (`HAWK_E8_PROFILE_SAMPLER=0`), because
+its timers run on every block inside the timed call; only
+`profile-sampler-bench` and the rejection summary build it in.  Likewise,
+`e8_sign_sampler_core()` takes its per-attempt sampler timestamps only when a
+trace is requested.
 
 Cache lookup and publication are protected by a pthread mutex, so concurrent
 cache warm-up cannot corrupt the cache.  Full sampler and signing calls are
@@ -404,6 +439,10 @@ test_e8_sign_sampler  sampler-backed uncompressed sign/verify, dynamic-range
 test_e8_api           public API: keygen/sign (encoded and prepared)/verify
                       round trips, tampering, HAWK salt construction, RNG
                       calls per attempt, and the HAWK prepared-key shim
+test_cmn_common       shared modules: RNG known answer, buffering invariance
+                      and counters; pool coverage, reductions, resizing and
+                      accounting; clock monotonicity and perf unavailability;
+                      CSV writer
 ```
 
 ## Diagnostics And CSV Outputs
@@ -437,12 +476,16 @@ make -C e8 sampler-bench
 or for a proper comparison with checks disabled:
 ```sh
 make -C e8 clean
-make -C e8 sampler-bench E8_CFLAGS='-O2 -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0 -DHAWK_E8_PROFILE_SAMPLER=0'
+make -C e8 sampler-bench CFLAGS='-O2 -DHAWK_E8_DEBUG_CHECKS=0'
 ```
 
 writes `e8/e8_sampler_bench.csv` with ordinary HAWK
-sampler rows and selected E8 sampler rows.  Defined modes are available after
-building the benchmark binary:
+sampler rows and selected E8 sampler rows.  In-path sampler profiling is off
+by default, so the `profile_*` columns are empty; `make -C e8
+profile-sampler-bench` builds the same benchmark against a sampler compiled
+with `HAWK_E8_PROFILE_SAMPLER=1` and writes `e8/e8_sampler_profile_bench.csv`
+with those columns filled (its timings include the profile timers).  Defined
+modes are available after building the benchmark binary:
 
 ```sh
 make -C e8 bin/e8_sampler_bench
@@ -461,11 +504,14 @@ make -C e8 profile-sign-bench
 
 `sign-bench` writes `e8/e8_sign_bench.csv`: HAWK and E8 signed through
 their own `sign_finish` calls under the same two accounting modes (`all_in`,
-`prepared`), one CSV row per signature, every signature verified.
+`prepared`), one CSV row per signature in the shared schema
+(`e8/common/cmn_csv.h`), every signature verified.  Both schemes draw from
+the shared SHAKE256 signing RNG and are timed with the shared timing and pool
+measurement; columns are defined in `e8/docs/perf_comparison_final.md`.
 `profile-sign-bench` builds the same benchmark with `HAWK_E8_PROFILE_SIGN=1`
 and prints per-stage E8 signing timings (including key preparation and salt
-derivation) to the terminal.  For optimization timing, build profile runs with
-`HAWK_E8_DEBUG_CHECKS=0`; debug-check builds deliberately retain schoolbook
+derivation) to the terminal.  For optimization timing, build with
+`CFLAGS='-O2 -DHAWK_E8_DEBUG_CHECKS=0'`; debug-check builds deliberately retain schoolbook
 cross-checks for the reconstructed signer coefficients.  The final symmetric
 HAWK/E8 accounting, methods, and reproduction commands are recorded in
 `e8/docs/perf_comparison_final.md`.

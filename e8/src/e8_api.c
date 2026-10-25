@@ -7,11 +7,9 @@
 #if HAWK_ENABLE_E8_EXPERIMENTAL
 
 #include <assert.h>
+
 #if HAWK_E8_PROFILE_SIGN
-#include <time.h>
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#endif
+#include "cmn_timing.h"
 #endif
 
 /*
@@ -57,52 +55,6 @@ typedef struct {
 typedef char e8_prepared_key_size_check[
 	(sizeof(e8_prepared_key) + 7 <= E8_PRIVKEY_PREPARED_SIZE(10))
 	? 1 : -1];
-
-#if HAWK_E8_PROFILE_SIGN
-static uint64_t
-api_wall_ns(void)
-{
-	struct timespec ts;
-
-#if defined(CLOCK_MONOTONIC_RAW)
-	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
-		return 0;
-	}
-#else
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-		return 0;
-	}
-#endif
-	return (uint64_t)ts.tv_sec * UINT64_C(1000000000)
-		+ (uint64_t)ts.tv_nsec;
-}
-
-static uint64_t
-api_cycles_start(void)
-{
-#if defined(__x86_64__)
-	_mm_lfence();
-	return __rdtsc();
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-api_cycles_end(void)
-{
-#if defined(__x86_64__)
-	unsigned int aux;
-	uint64_t x;
-
-	x = __rdtscp(&aux);
-	_mm_lfence();
-	return x;
-#else
-	return 0;
-#endif
-}
-#endif
 
 static size_t
 kgseed_len(unsigned logn)
@@ -366,8 +318,8 @@ e8_sign_finish_inner(unsigned logn,
 	 */
 	if (priv_len == E8_PRIVKEY_SIZE(logn)) {
 #if HAWK_E8_PROFILE_SIGN
-		uint64_t c0 = api_cycles_start();
-		uint64_t w0 = api_wall_ns();
+		uint64_t c0 = cmn_tsc_start();
+		uint64_t w0 = cmn_wall_ns();
 #endif
 		e8_prepared_key *tpk = tmp_len < E8_TMPSIZE_SIGN(logn)
 			? NULL : align8(tmp, tmp_len, sizeof *tpk);
@@ -376,8 +328,8 @@ e8_sign_finish_inner(unsigned logn,
 			return 0;
 		}
 #if HAWK_E8_PROFILE_SIGN
-		prep_wall_ns = api_wall_ns() - w0;
-		prep_cycles = api_cycles_end() - c0;
+		prep_wall_ns = cmn_wall_ns() - w0;
+		prep_cycles = cmn_tsc_end() - c0;
 #endif
 		pk = tpk;
 		salt_key = priv;

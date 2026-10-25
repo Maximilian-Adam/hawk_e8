@@ -31,6 +31,12 @@ nothing is amortised.
   bound to a real public key.  Both schemes sign the same message set.  Every
   signature is verified with `hawk_verify_finish()` / `e8_verify_finish()`
   outside the timed region; failures are counted and reported.
+- Both schemes use the same signing RNG: the shared SHAKE256 signing RNG
+  (`cmn_sign_rng`, `e8/common/cmn_rng.h`, domain
+  `"HAWK-E8 bench signing RNG v1"`), seeded per trial with
+  `u32le(stream) || u32le(logn) || u32le(index)` and passed to both signers
+  through their `rng` callback; for the same trial both schemes receive the
+  same stream.  Key generation uses the same RNG with its own seeds.
 - Attempts are counted identically: both signers call the RNG exactly twice
   per attempt (salt, then sampler seed), so `attempts = rng_calls / 2`.
 - The E8 sampler thread count is a reported parameter (1, and 8, 8, 16 for
@@ -39,31 +45,92 @@ nothing is amortised.
 - Before each block of signatures (scheme, degree, thread count), one untimed
   signature per accounting mode warms caches, and for E8 the sampler tables
   and worker pool.  Key generation, key preparation and message context setup
-  are outside the timed region.
+  are outside the timed region.  After a threaded block the pool threads are
+  joined, so that no later block runs beside spinning workers.
+- In-path instrumentation is off in the timed build: the E8 sampler's
+  per-stage profile (`HAWK_E8_PROFILE_SAMPLER`) and signing profile
+  (`HAWK_E8_PROFILE_SIGN`) both default to 0, and `e8_sign_sampler_core()`
+  takes no sampler timestamps without a trace.  (Before Step 3 the sampler
+  profile defaulted to 1; on WSL it added about 18% to serial E8 signing.)
 
 The benchmark (`e8/compare/e8_sign_bench.c`) writes one CSV row per
-signature:
+signature, in the shared schema of `e8/common/cmn_csv.h`:
 
 ```text
-kind,scheme,accounting,logn,trial,key_index,attempts,sig_bytes,
-sampler_threads,tsc_cycles,wall_ns,verify_ok
+kind,run_id,scheme,variant,threshold_bits,technique,threads,logn,
+key_index,msg_index,attempts,sig_bytes,rng_bytes,
+tsc_cycles,core_cycles,wall_ns,cpu_ns_all_threads,
+accounting,encoding_included,verify_ok
 ```
 
-with `kind = sign` (or `sign_failed`), plus `kind = keygen` and
-`kind = prepare` rows for the separately timed setup.  The stderr summary
-prints one table per accounting mode (median and mean cycles per signature,
-median wall time, attempts per signature, signature bytes, threads, signing
-and verification failures), then the setup costs.
+| column | definition |
+| --- | --- |
+| `kind` | `sign`, `sign_failed`, or `keygen` / `prepare` for the separately timed setup |
+| `run_id` | UTC start time and a random 32-bit suffix, also printed in the summary |
+| `scheme` | `hawk` or `e8` |
+| `variant` | `ref` (upstream HAWK sampler) or `hot64` (current E8 sampler) |
+| `threshold_bits` | 78 for HAWK, 64 for E8 |
+| `technique` | `ct_full_scan` for HAWK, `vt_hot_table` for E8 |
+| `threads` | sampler threads, caller included (1 = serial) |
+| `key_index`, `msg_index` | key and message of the row (`msg_index` empty for setup rows) |
+| `attempts` | `rng_calls / 2` |
+| `sig_bytes` | `HAWK_SIG_SIZE(logn)` / `E8_SIG_SIZE(logn)` |
+| `rng_bytes` | random bytes consumed by the signature (below) |
+| `tsc_cycles` | fenced TSC over the timed call (`lfence; rdtsc` ... `rdtscp; lfence`) |
+| `core_cycles` | user-space core cycles (`perf_event_open`, `PERF_COUNT_HW_CPU_CYCLES`) of the calling thread plus the pool workers' jobs; empty if the counter is unavailable |
+| `wall_ns` | `CLOCK_MONOTONIC_RAW` over the timed call |
+| `cpu_ns_all_threads` | `CLOCK_THREAD_CPUTIME_ID` of the calling thread over the call, plus each pool worker's thread CPU time for the jobs it ran during the call; worker spinning between dispatches is excluded |
+| `accounting` | `all_in` or `prepared` (empty for `keygen`) |
+| `encoding_included` | 1: both timed calls include signature encoding |
+| `verify_ok` | 1 if the signature verifies (empty for setup rows) |
+
+Empty fields mean "not applicable" or "unavailable", never zero.  The pool
+workers' share of `cpu_ns_all_threads` and `core_cycles` comes from the pool's
+per-worker accounting (each worker reads its thread CPU clock and core-cycle
+counter around each job); it is on by default and applies to every scheme
+that dispatches to the pool.  With `--no-pool-accounting` both fields are
+empty for threaded rows.  Pool idle CPU (spinning between dispatches, for
+example while the main thread verifies or generates the next key) is
+reported per block in the stderr summary, not in any row.
+
+`rng_bytes` is the number of bytes requested from the signing RNG plus the
+bytes the sampler streams deliver to the sampler, summed over all attempts:
+
+- HAWK: `attempts * (salt_len + 40 + 20n)`: the salt, the 40-byte sampler
+  seed, and the exact output of upstream `sig_gauss`'s four SHAKE256
+  instances (40 bytes per four coordinates, 2n coordinates).  Upstream HAWK
+  stays unmodified, so this term is computed, not counted.
+- E8: `attempts * (salt_len + 32) + D`, where `D` is the sampler streams'
+  delivered byte count, read from `e8_sampler_rng_counters_get()`.  Each of
+  the n/4 blocks reads 9 little-endian words (component, then 8
+  coordinates) and one more word per coordinate that falls to the tail
+  table, so `D = attempts * 18n + 8 * tail_draws`.
+
+With `salt_len` = 14, 24, 40, HAWK consumes 5,174 / 10,304 / 20,560 bytes per
+attempt and E8 4,654 / 9,272 / 18,504 bytes per attempt plus 8 bytes per tail
+draw (rare: 13 tail draws in 1,200 E8 signatures per degree on the WSL smoke
+run).  Unused buffered bytes are not counted (at most 127 per stream).
+
+The stderr summary prints the `run_id` and core-cycle counter status, one
+table per accounting mode (median and mean TSC cycles, median core cycles,
+median wall time, median `cpu_ns_all_threads`, attempts and `rng_bytes` per
+signature, signature bytes, threads, signing and verification failures), the
+setup costs, and the pool activity per block (dispatches, threads started and
+joined, job CPU and idle CPU).
 
 ```sh
-make -B -C e8 \
-  E8_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0' \
-  E8_PROFILE_SIGN_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0 -DHAWK_E8_PROFILE_SIGN=1' \
-  bin/e8_sign_bench bin/e8_sign_profile_bench
+make -C e8 clean
+make -C e8 bin/e8_sign_bench bin/e8_sign_profile_bench \
+  CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_E8_DEBUG_CHECKS=0'
 cd e8
 ./bin/e8_sign_bench --trials 1000 > e8_sign_bench.csv 2> e8_sign_bench.txt
 ./bin/e8_sign_profile_bench --trials 1000 > /dev/null 2> e8_sign_profile.txt
 ```
+
+Setting `CFLAGS` applies the same flags to the HAWK, shared and E8 objects
+(the E8 objects add `-DHAWK_ENABLE_E8_EXPERIMENTAL=1`); the in-path profiles
+are off unless a `profile-*` build enables them.  The profile bench's timings
+include its per-stage timers and are not headline figures.
 
 `--sigs-per-key N` (default 1) sets how many signatures share one key; it does
 not change the accounting.  `--logn L` restricts the run to one degree.
@@ -169,6 +236,16 @@ input, with 14, 24, or 40 output bytes.  The `--key-reuse` option controls only
 the amortization of E8's measured NTT and F2 preparation; it defaults to 1000.
 
 ### Reproduction
+
+These commands record how the submitted figures were produced (at the tag
+they ran in `Reference_Implementation/`; `--key-reuse` no longer exists, and
+the current tree uses the commands in "Accounting" above).  They build the
+profile benchmark, and at `paper-v1-submission` the sampler's per-stage
+profile (`HAWK_E8_PROFILE_SAMPLER`) also defaulted to 1 and is not disabled
+here, so the submitted E8 figures include per-block sampler timers (on WSL
+about 18% of serial E8 signing, little for threaded E8) as well as the
+per-stage signing timers.  Reproducing them at the tag without the sampler
+timers needs `-DHAWK_E8_PROFILE_SAMPLER=0` in both flag sets.
 
 ```sh
 make -B -C e8 \

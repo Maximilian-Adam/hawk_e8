@@ -7,9 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "../src/hawk_e8_inner.h"
+#include "cmn_timing.h"
 
 /*
  * The ordinary HAWK signing sampler for the serial stability comparison is
@@ -206,33 +206,6 @@ full_norm_from_apply(unsigned logn, const int32_t *z0, const int32_t *z1)
 		norm2 += a + b;
 	}
 	return norm2;
-}
-
-static uint64_t
-wall_ns(void)
-{
-	struct timespec ts;
-
-#if defined(CLOCK_MONOTONIC_RAW)
-	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
-		return 0;
-	}
-#else
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-		return 0;
-	}
-#endif
-	return (uint64_t)ts.tv_sec * UINT64_C(1000000000)
-		+ (uint64_t)ts.tv_nsec;
-}
-
-static uint64_t
-wall_delta(uint64_t t0, uint64_t t1)
-{
-	if (t0 == 0 && t1 == 0) {
-		return 0;
-	}
-	return t1 > t0 ? t1 - t0 : 1;
 }
 
 static int
@@ -589,10 +562,10 @@ collect_hawk_stability(unsigned logn, uint64_t *samples, unsigned trials)
 
 		memset(x, 0, sizeof x);
 		fill_hawk_parities(t, n >> 2, logn, trial);
-		t0 = wall_ns();
+		t0 = cmn_wall_ns();
 		(void)hawk_shim_sig_gauss(logn, test_rng, &rng_state, NULL, x, t);
-		t1 = wall_ns();
-		samples[trial] = wall_delta(t0, t1);
+		t1 = cmn_wall_ns();
+		samples[trial] = cmn_delta(t0, t1);
 	}
 	return 1;
 }
@@ -620,7 +593,7 @@ collect_e8_serial_stability(unsigned logn, uint64_t *samples, unsigned trials)
 		uint64_t start, end;
 
 		make_random_bits(t0, t1, n, &bit_rng);
-		start = wall_ns();
+		start = cmn_wall_ns();
 		if (!e8_sample_z_construction_a_cm(z0, z1, &norm2,
 			t0, t1, logn, sigma,
 			test_rng, &sample_rng, NULL))
@@ -630,8 +603,8 @@ collect_e8_serial_stability(unsigned logn, uint64_t *samples, unsigned trials)
 				" n=%u trial=%u\n", (unsigned)n, trial);
 			return 0;
 		}
-		end = wall_ns();
-		samples[trial] = wall_delta(start, end);
+		end = cmn_wall_ns();
+		samples[trial] = cmn_delta(start, end);
 	}
 	return 1;
 }

@@ -8,13 +8,12 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <sched.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#endif
+
+#include "cmn_pool.h"
+#include "cmn_rng.h"
+#include "cmn_timing.h"
 
 #define E8_BLOCK_DIM           8
 #define E8_CA_COSETS           16
@@ -24,7 +23,6 @@
 #define E8_1D_TAIL_FLOOR       32.0
 #define E8_TWO_PI              6.28318530717958647692528676655900576839
 #define E8_1D_TINY_VALUES      6
-#define E8_RNG_STREAM_BYTES    128
 #define E8_MASTER_SEED_BYTES   32
 #define E8_MAX_FULL_BLOCKS     (1u << (10 - 2))
 #define E8_SAMPLER_MAX_THREADS 24
@@ -34,7 +32,7 @@
 #endif
 
 #ifndef HAWK_E8_PROFILE_SAMPLER
-#define HAWK_E8_PROFILE_SAMPLER   1
+#define HAWK_E8_PROFILE_SAMPLER   0
 #endif
 
 #ifndef HAWK_E8_SAMPLER_THREADS
@@ -142,51 +140,22 @@ static pthread_mutex_t e8_ca_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static unsigned e8_sampler_thread_override = UINT_MAX;
 static unsigned e8_sampler_rng_mode = E8_SAMPLER_RNG_PER_BLOCK;
 static e8_sampler_profile e8_sampler_last_profile;
+static cmn_rng_counters e8_sampler_rng_total;
 
 typedef struct e8_sample_z_worker_args_s e8_sample_z_worker_args;
 
-typedef struct {
-	unsigned index;
-	volatile int stopping;
-} e8_sampler_spin_worker;
+/*
+ * The sampler streams use the shared RNG module's buffer, which has the
+ * sampler's original 128-byte size.
+ */
+typedef char e8_rng_buffer_size_check[CMN_RNG_BUF_BYTES == 128 ? 1 : -1];
 
-typedef struct {
-	pthread_t threads[E8_SAMPLER_MAX_THREADS];
-	e8_sampler_spin_worker workers[E8_SAMPLER_MAX_THREADS];
-	e8_sample_z_worker_args *args;
-	volatile unsigned generation;
-	volatile unsigned thread_count;
-	volatile unsigned active_threads;
-	volatile unsigned remaining;
-	volatile int initialized;
-	volatile int stopping;
-} e8_sampler_spin_pool;
-
-static e8_sampler_spin_pool e8_sampler_spin_worker_pool = {
-	{ 0 },
-	{ { 0 } },
-	NULL,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0
-};
-
-static int e8_sampler_spin_pool_atexit_registered = 0;
-
-typedef struct {
-	hawk_rng rng;
-	void *rng_context;
-	uint8_t buf[E8_RNG_STREAM_BYTES];
-	size_t pos;
-	size_t len;
-} e8_rng_stream;
-
-typedef struct {
-	shake_context sc;
-} e8_block_rng;
+/*
+ * The caller runs worker 0, so the pool holds at most
+ * E8_SAMPLER_MAX_THREADS - 1 threads.
+ */
+typedef char e8_pool_size_check[
+	E8_SAMPLER_MAX_THREADS - 1 <= CMN_POOL_MAX_THREADS ? 1 : -1];
 
 /*
  * Experimental E8 samplers.
@@ -214,44 +183,19 @@ block_shift_get(const int32_t *a, unsigned u, unsigned shift)
 }
 
 static int
-rng_stream_init(e8_rng_stream *stream, hawk_rng rng, void *rng_context)
+rng_stream_init(cmn_rng *stream, hawk_rng rng, void *rng_context)
 {
 	if (stream == NULL || rng == NULL) {
 		return 0;
 	}
-	stream->rng = rng;
-	stream->rng_context = rng_context;
-	stream->pos = 0;
-	stream->len = 0;
+	cmn_rng_init_source(stream, rng, rng_context);
 	return 1;
 }
 
-static void
-rng_stream_refill(e8_rng_stream *stream)
-{
-	stream->rng(stream->rng_context, stream->buf, sizeof stream->buf);
-	stream->pos = 0;
-	stream->len = sizeof stream->buf;
-}
-
-static uint64_t
-rng_stream_u64(e8_rng_stream *stream)
-{
-	uint64_t x = 0;
-
-	if (stream->len - stream->pos < 8) {
-		rng_stream_refill(stream);
-	}
-	for (unsigned u = 0; u < 8; u ++) {
-		x |= (uint64_t)stream->buf[stream->pos ++] << (u << 3);
-	}
-	return x;
-}
-
 static double
-rng_stream_double(e8_rng_stream *stream)
+rng_stream_double(cmn_rng *stream)
 {
-	uint64_t x = rng_stream_u64(stream);
+	uint64_t x = cmn_rng_read_u64le(stream);
 
 	return (double)(x >> 11) * 0x1.0p-53;
 }
@@ -286,67 +230,22 @@ e8_cdf_threshold_u64(double prefix, double total)
 
 #if HAWK_E8_PROFILE_SAMPLER
 
-static uint64_t
-e8_profile_wall_ns(void)
-{
-	struct timespec ts;
-
-#if defined(CLOCK_MONOTONIC_RAW)
-	if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
-		return 0;
-	}
-#else
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-		return 0;
-	}
-#endif
-	return (uint64_t)ts.tv_sec * UINT64_C(1000000000)
-		+ (uint64_t)ts.tv_nsec;
-}
-
-static uint64_t
-e8_profile_cycles_start(void)
-{
-#if defined(__x86_64__)
-	_mm_lfence();
-	return __rdtsc();
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-e8_profile_cycles_end(void)
-{
-#if defined(__x86_64__)
-	unsigned int aux;
-	uint64_t x = __rdtscp(&aux);
-
-	_mm_lfence();
-	return x;
-#else
-	return 0;
-#endif
-}
-
-static uint64_t
-e8_profile_delta(uint64_t start, uint64_t end)
-{
-	if (start == 0 && end == 0) {
-		return 0;
-	}
-	return end > start ? end - start : 1;
-}
+/*
+ * Per-stage sampler profile (off by default: its timers sit inside the
+ * timed sampling call).
+ */
+#define e8_profile_wall_ns()          cmn_wall_ns()
+#define e8_profile_cycles_start()     cmn_tsc_start()
 
 static void
 e8_profile_add(uint64_t *cycles_total, uint64_t *wall_total,
 	uint64_t cycles_start, uint64_t wall_start)
 {
-	uint64_t wall_end = e8_profile_wall_ns();
-	uint64_t cycles_end = e8_profile_cycles_end();
+	uint64_t wall_end = cmn_wall_ns();
+	uint64_t cycles_end = cmn_tsc_end();
 
-	*cycles_total += e8_profile_delta(cycles_start, cycles_end);
-	*wall_total += e8_profile_delta(wall_start, wall_end);
+	*cycles_total += cmn_delta(cycles_start, cycles_end);
+	*wall_total += cmn_delta(wall_start, wall_end);
 }
 
 #else
@@ -381,6 +280,22 @@ e8_sampler_profile_get(e8_sampler_profile *profile)
 	return 1;
 }
 
+/* see hawk_e8_inner.h */
+void
+e8_sampler_rng_counters_get(cmn_rng_counters *total)
+{
+	if (total != NULL) {
+		*total = e8_sampler_rng_total;
+	}
+}
+
+/* see hawk_e8_inner.h */
+void
+e8_sampler_rng_counters_reset(void)
+{
+	memset(&e8_sampler_rng_total, 0, sizeof e8_sampler_rng_total);
+}
+
 static void
 e8_enc64le(uint8_t *dst, uint64_t x)
 {
@@ -389,62 +304,53 @@ e8_enc64le(uint8_t *dst, uint64_t x)
 	}
 }
 
+/*
+ * Per-block sampler stream:
+ *
+ *   SHAKE256("HAWK-E8-CM block sampler v1" || master_seed
+ *            || u8 logn || u8 tau || u64le(block_index)
+ *            || u64le(sigma_sign bits))
+ */
 static void
-shake_inject_u64le(shake_context *sc, uint64_t x)
-{
-	uint8_t tmp[8];
-
-	e8_enc64le(tmp, x);
-	shake_inject(sc, tmp, sizeof tmp);
-}
-
-static void
-e8_block_rng_read(void *ctx, void *dst, size_t len)
-{
-	e8_block_rng *rng = ctx;
-
-	shake_extract(&rng->sc, dst, len);
-}
-
-static void
-e8_block_rng_init(e8_block_rng *rng,
+e8_block_rng_init(cmn_rng *rng,
 	const uint8_t master_seed[E8_MASTER_SEED_BYTES],
 	unsigned logn, uint64_t block_index, uint8_t tau,
 	uint64_t sigma_sign_bits)
 {
 	static const char domain[] = "HAWK-E8-CM block sampler v1";
-	uint8_t meta[2];
+	uint8_t label[18];
 
-	meta[0] = (uint8_t)logn;
-	meta[1] = tau;
-	shake_init(&rng->sc, 256);
-	shake_inject(&rng->sc, domain, sizeof domain - 1);
-	shake_inject(&rng->sc, master_seed, E8_MASTER_SEED_BYTES);
-	shake_inject(&rng->sc, meta, sizeof meta);
-	shake_inject_u64le(&rng->sc, block_index);
-	shake_inject_u64le(&rng->sc, sigma_sign_bits);
-	shake_flip(&rng->sc);
+	label[0] = (uint8_t)logn;
+	label[1] = tau;
+	e8_enc64le(label + 2, block_index);
+	e8_enc64le(label + 10, sigma_sign_bits);
+	cmn_rng_init(rng, domain, sizeof domain - 1,
+		master_seed, E8_MASTER_SEED_BYTES, label, sizeof label);
 }
 
+/*
+ * Per-worker sampler stream:
+ *
+ *   SHAKE256("HAWK-E8-CM worker sampler v1" || master_seed
+ *            || u8 logn || u8 worker_id || u64le(range_start)
+ *            || u64le(range_end) || u64le(sigma_sign bits))
+ */
 static void
-e8_worker_rng_init(e8_block_rng *rng,
+e8_worker_rng_init(cmn_rng *rng,
 	const uint8_t master_seed[E8_MASTER_SEED_BYTES],
 	unsigned logn, unsigned worker_id, uint64_t range_start,
 	uint64_t range_end, uint64_t sigma_sign_bits)
 {
 	static const char domain[] = "HAWK-E8-CM worker sampler v1";
-	uint8_t meta[2];
+	uint8_t label[26];
 
-	meta[0] = (uint8_t)logn;
-	meta[1] = (uint8_t)worker_id;
-	shake_init(&rng->sc, 256);
-	shake_inject(&rng->sc, domain, sizeof domain - 1);
-	shake_inject(&rng->sc, master_seed, E8_MASTER_SEED_BYTES);
-	shake_inject(&rng->sc, meta, sizeof meta);
-	shake_inject_u64le(&rng->sc, range_start);
-	shake_inject_u64le(&rng->sc, range_end);
-	shake_inject_u64le(&rng->sc, sigma_sign_bits);
-	shake_flip(&rng->sc);
+	label[0] = (uint8_t)logn;
+	label[1] = (uint8_t)worker_id;
+	e8_enc64le(label + 2, range_start);
+	e8_enc64le(label + 10, range_end);
+	e8_enc64le(label + 18, sigma_sign_bits);
+	cmn_rng_init(rng, domain, sizeof domain - 1,
+		master_seed, E8_MASTER_SEED_BYTES, label, sizeof label);
 }
 
 static unsigned
@@ -947,7 +853,7 @@ sample_1d_integer_table_build(e8_1d_integer_table *table,
 static int
 sample_1d_integer_gaussian_hot(int32_t *out,
 	const e8_1d_hot_row *row, const e8_1d_integer_table *table,
-	e8_rng_stream *rng_stream)
+	cmn_rng *rng_stream)
 {
 	if (out == NULL || row == NULL || table == NULL || table->cdf == NULL
 		|| table->len == 0 || !(table->total > 0.0)
@@ -956,7 +862,7 @@ sample_1d_integer_gaussian_hot(int32_t *out,
 		return 0;
 	}
 
-	uint64_t target = rng_stream_u64(rng_stream);
+	uint64_t target = cmn_rng_read_u64le(rng_stream);
 	for (unsigned i = 0; i < row->tiny_len; i ++) {
 		if (target <= row->tiny_cdf[i]) {
 			*out = row->tiny_value[i];
@@ -1429,7 +1335,7 @@ e8_ca_component_mass_cm_cached(double *mass_out, uint8_t tau,
 static int
 e8_ca_select_component_cm_cached(uint8_t *component,
 	uint8_t *component_codeword, uint8_t tau,
-	e8_ca_sigma_cache *cache, e8_rng_stream *rng_stream)
+	e8_ca_sigma_cache *cache, cmn_rng *rng_stream)
 {
 	if (component == NULL || component_codeword == NULL
 		|| cache == NULL || rng_stream == NULL)
@@ -1438,7 +1344,7 @@ e8_ca_select_component_cm_cached(uint8_t *component,
 	}
 
 	const uint64_t *cdf = cache->component_cdf[tau];
-	uint64_t target = rng_stream_u64(rng_stream);
+	uint64_t target = cmn_rng_read_u64le(rng_stream);
 	for (unsigned u = 0; u < E8_CA_COSETS; u ++) {
 		if (target <= cdf[u]) {
 			*component = (uint8_t)u;
@@ -1541,7 +1447,7 @@ e8_ca_reconstruct_z_affine(int32_t *zblk, const int32_t *base_z,
 
 static int
 e8_sample_block_construction_a_cm_inner_cached(int32_t *zblk, uint8_t tau,
-	e8_ca_sigma_cache *cache, e8_rng_stream *rng_stream,
+	e8_ca_sigma_cache *cache, cmn_rng *rng_stream,
 	uint64_t *norm2_out, e8_sampler_stats *stats,
 	e8_ca_sample_trace *trace)
 {
@@ -1658,7 +1564,7 @@ e8_sample_block_construction_a_cm_inner_cached(int32_t *zblk, uint8_t tau,
 
 static int
 e8_sample_block_construction_a_cm_inner(int32_t *zblk, uint8_t tau,
-	double sigma_sign, e8_rng_stream *rng_stream,
+	double sigma_sign, cmn_rng *rng_stream,
 	uint64_t *norm2_out, e8_sampler_stats *stats,
 	e8_ca_sample_trace *trace)
 {
@@ -1679,7 +1585,7 @@ e8_sample_block_construction_a_cm_trace(int32_t *zblk, uint8_t tau,
 	uint64_t *norm2_out, e8_sampler_stats *stats,
 	e8_ca_sample_trace *trace)
 {
-	e8_rng_stream rng_stream;
+	cmn_rng rng_stream;
 
 	if (!rng_stream_init(&rng_stream, rng, rng_context)) {
 		return 0;
@@ -1694,7 +1600,7 @@ e8_sample_block_construction_a_cm(int32_t *zblk, uint8_t tau,
 	double sigma_sign, hawk_rng rng, void *rng_context,
 	uint64_t *norm2_out, e8_sampler_stats *stats)
 {
-	e8_rng_stream rng_stream;
+	cmn_rng rng_stream;
 
 	if (!rng_stream_init(&rng_stream, rng, rng_context)) {
 		return 0;
@@ -1719,15 +1625,15 @@ struct e8_sample_z_worker_args_s {
 	uint64_t norm2;
 	e8_sampler_stats stats;
 	e8_sampler_profile profile;
+	cmn_rng_counters rng;
 	int ok;
 };
 
-static void *
-e8_sample_z_worker_run(void *ctx)
+static void
+e8_sample_z_worker_run(e8_sample_z_worker_args *args)
 {
-	e8_sample_z_worker_args *args = ctx;
-	e8_block_rng worker_rng;
-	e8_rng_stream worker_stream;
+	cmn_rng worker_stream;
+	cmn_rng_counters rng_counters;
 	int use_worker_rng;
 	uint64_t c0, w0;
 
@@ -1735,44 +1641,34 @@ e8_sample_z_worker_run(void *ctx)
 	args->norm2 = 0;
 	memset(&args->stats, 0, sizeof args->stats);
 	memset(&args->profile, 0, sizeof args->profile);
+	memset(&args->rng, 0, sizeof args->rng);
 	use_worker_rng = args->rng_mode == E8_SAMPLER_RNG_PER_WORKER;
 	if (use_worker_rng) {
 		c0 = e8_profile_cycles_start();
 		w0 = e8_profile_wall_ns();
-		e8_worker_rng_init(&worker_rng, args->master_seed,
+		e8_worker_rng_init(&worker_stream, args->master_seed,
 			args->logn, args->worker_id, (uint64_t)args->start,
 			(uint64_t)args->end, args->sigma_sign_bits);
 		e8_profile_add(&args->profile.cycles_block_rng_init,
 			&args->profile.wall_ns_block_rng_init, c0, w0);
-		if (!rng_stream_init(&worker_stream,
-			e8_block_rng_read, &worker_rng))
-		{
-			return NULL;
-		}
 	}
 	for (size_t r = args->start; r < args->end; r ++) {
 		int32_t zblk[E8_BLOCK_DIM];
 		uint64_t n2;
 		uint8_t tau = e8_extract_tau(args->t0, args->t1,
 			r, args->logn);
-		e8_block_rng block_rng;
-		e8_rng_stream rng_stream;
-		e8_rng_stream *stream = &worker_stream;
+		cmn_rng block_stream;
+		cmn_rng *stream = &worker_stream;
 
 		if (!use_worker_rng) {
 			c0 = e8_profile_cycles_start();
 			w0 = e8_profile_wall_ns();
-			e8_block_rng_init(&block_rng, args->master_seed,
+			e8_block_rng_init(&block_stream, args->master_seed,
 				args->logn, (uint64_t)r, tau,
 				args->sigma_sign_bits);
 			e8_profile_add(&args->profile.cycles_block_rng_init,
 				&args->profile.wall_ns_block_rng_init, c0, w0);
-			if (!rng_stream_init(&rng_stream,
-				e8_block_rng_read, &block_rng))
-			{
-				return NULL;
-			}
-			stream = &rng_stream;
+			stream = &block_stream;
 		}
 
 		c0 = e8_profile_cycles_start();
@@ -1782,235 +1678,34 @@ e8_sample_z_worker_run(void *ctx)
 			&n2, &args->stats, NULL);
 		e8_profile_add(&args->profile.cycles_block_sample,
 			&args->profile.wall_ns_block_sample, c0, w0);
+		if (!use_worker_rng) {
+			cmn_rng_counters_get(&block_stream, &rng_counters);
+			cmn_rng_counters_add(&args->rng, &rng_counters);
+		}
 		if (!sample_ok) {
-			return NULL;
+			return;
 		}
 		e8_write_block(args->z0, args->z1, r, zblk, args->logn);
 		if (UINT64_MAX - args->norm2 < n2) {
-			return NULL;
+			return;
 		}
 		args->norm2 += n2;
 	}
+	if (use_worker_rng) {
+		cmn_rng_counters_get(&worker_stream, &args->rng);
+	}
 	args->ok = 1;
-	return NULL;
 }
 
+/*
+ * Pool job (cmn_pool.h): worker w runs the sampler arguments args[w].
+ */
 static void
-e8_sampler_spin_relax(unsigned *spins)
+e8_sample_z_worker_job(void *ctx, unsigned worker)
 {
-#if defined(__x86_64__)
-	_mm_pause();
-#endif
-	(*spins) ++;
-	if ((*spins & 1023u) == 0) {
-		sched_yield();
-	}
-}
+	e8_sample_z_worker_args *args = ctx;
 
-static void *
-e8_sampler_spin_pool_thread_main(void *ctx)
-{
-	e8_sampler_spin_worker *worker = ctx;
-	e8_sampler_spin_pool *pool = &e8_sampler_spin_worker_pool;
-	unsigned seen_generation = 0;
-
-	for (;;) {
-		unsigned spins = 0;
-
-		while (!pool->stopping
-			&& !worker->stopping
-			&& pool->generation == seen_generation)
-		{
-			e8_sampler_spin_relax(&spins);
-		}
-		if (pool->stopping || worker->stopping) {
-			break;
-		}
-		seen_generation = pool->generation;
-		__sync_synchronize();
-		if (worker->index < pool->active_threads) {
-			e8_sample_z_worker_args *args = pool->args;
-
-			(void)e8_sample_z_worker_run(&args[worker->index]);
-			(void)__sync_fetch_and_sub(&pool->remaining, 1);
-		}
-	}
-	return NULL;
-}
-
-static void
-e8_sampler_spin_pool_shutdown(void)
-{
-	e8_sampler_spin_pool *pool = &e8_sampler_spin_worker_pool;
-	pthread_t threads[E8_SAMPLER_MAX_THREADS];
-	unsigned thread_count = 0;
-
-	if (!pool->initialized) {
-		return;
-	}
-	pool->stopping = 1;
-	__sync_synchronize();
-	pool->generation ++;
-	for (unsigned u = 0; u < pool->thread_count; u ++) {
-		threads[u] = pool->threads[u];
-		thread_count ++;
-	}
-	for (unsigned u = 0; u < thread_count; u ++) {
-		(void)pthread_join(threads[u], NULL);
-		pool->threads[u] = (pthread_t)0;
-		pool->workers[u].stopping = 0;
-	}
-	pool->args = NULL;
-	pool->generation = 0;
-	pool->thread_count = 0;
-	pool->active_threads = 0;
-	pool->remaining = 0;
-	pool->initialized = 0;
-	pool->stopping = 0;
-}
-
-static int
-e8_sampler_register_spin_pool_atexit(void)
-{
-	if (e8_sampler_spin_pool_atexit_registered) {
-		return 1;
-	}
-	if (atexit(e8_sampler_spin_pool_shutdown) != 0) {
-		return 0;
-	}
-	e8_sampler_spin_pool_atexit_registered = 1;
-	return 1;
-}
-
-static void
-e8_sampler_spin_pool_reset_state(e8_sampler_spin_pool *pool)
-{
-	pool->args = NULL;
-	pool->generation = 0;
-	pool->thread_count = 0;
-	pool->active_threads = 0;
-	pool->remaining = 0;
-	pool->stopping = 0;
-	for (unsigned u = 0; u < E8_SAMPLER_MAX_THREADS; u ++) {
-		pool->threads[u] = (pthread_t)0;
-		pool->workers[u].index = u;
-		pool->workers[u].stopping = 0;
-	}
-	pool->initialized = 1;
-}
-
-static void
-e8_sampler_spin_pool_shrink(unsigned required_threads)
-{
-	e8_sampler_spin_pool *pool = &e8_sampler_spin_worker_pool;
-	pthread_t threads[E8_SAMPLER_MAX_THREADS];
-	unsigned old_count;
-	unsigned join_count = 0;
-
-	if (!pool->initialized || required_threads >= pool->thread_count) {
-		return;
-	}
-	old_count = pool->thread_count;
-	for (unsigned u = required_threads; u < old_count; u ++) {
-		pool->workers[u].stopping = 1;
-		threads[join_count ++] = pool->threads[u];
-	}
-	__sync_synchronize();
-	pool->generation ++;
-	for (unsigned u = 0; u < join_count; u ++) {
-		(void)pthread_join(threads[u], NULL);
-	}
-	for (unsigned u = required_threads; u < old_count; u ++) {
-		pool->threads[u] = (pthread_t)0;
-		pool->workers[u].stopping = 0;
-	}
-	pool->thread_count = required_threads;
-}
-
-static int
-e8_sampler_spin_pool_ensure(unsigned required_threads)
-{
-	e8_sampler_spin_pool *pool = &e8_sampler_spin_worker_pool;
-	unsigned old_count;
-	unsigned started;
-
-	if (required_threads > E8_SAMPLER_MAX_THREADS) {
-		return 0;
-	}
-	if (!pool->initialized) {
-		e8_sampler_spin_pool_reset_state(pool);
-		if (!e8_sampler_register_spin_pool_atexit()) {
-			pool->initialized = 0;
-			return 0;
-		}
-	}
-	if (pool->remaining != 0) {
-		return 0;
-	}
-	e8_sampler_spin_pool_shrink(required_threads);
-	old_count = pool->thread_count;
-	started = old_count;
-	for (unsigned u = old_count; u < required_threads; u ++) {
-		pool->workers[u].index = u;
-		pool->workers[u].stopping = 0;
-		if (pthread_create(&pool->threads[u], NULL,
-			e8_sampler_spin_pool_thread_main,
-			&pool->workers[u]) != 0)
-		{
-			for (unsigned v = old_count; v < started; v ++) {
-				pool->workers[v].stopping = 1;
-			}
-			__sync_synchronize();
-			pool->generation ++;
-			for (unsigned v = old_count; v < started; v ++) {
-				(void)pthread_join(pool->threads[v], NULL);
-				pool->threads[v] = (pthread_t)0;
-				pool->workers[v].stopping = 0;
-			}
-			pool->thread_count = old_count;
-			return 0;
-		}
-		started ++;
-		pool->thread_count = started;
-	}
-	return 1;
-}
-
-static int
-e8_sampler_spin_pool_dispatch(e8_sample_z_worker_args *args,
-	unsigned active_threads)
-{
-	e8_sampler_spin_pool *pool = &e8_sampler_spin_worker_pool;
-
-	if (active_threads == 0 || active_threads > E8_SAMPLER_MAX_THREADS
-		|| args == NULL || !e8_sampler_spin_pool_ensure(active_threads))
-	{
-		return 0;
-	}
-	pool->args = args;
-	pool->active_threads = active_threads;
-	pool->remaining = active_threads;
-	__sync_synchronize();
-	pool->generation ++;
-	return 1;
-}
-
-static int
-e8_sampler_spin_pool_wait(void)
-{
-	e8_sampler_spin_pool *pool = &e8_sampler_spin_worker_pool;
-	unsigned spins = 0;
-
-	while (pool->remaining != 0 && !pool->stopping) {
-		e8_sampler_spin_relax(&spins);
-	}
-	if (pool->stopping) {
-		return 0;
-	}
-	__sync_synchronize();
-	pool->args = NULL;
-	pool->active_threads = 0;
-	return 1;
+	e8_sample_z_worker_run(&args[worker]);
 }
 
 /* see hawk_e8_inner.h */
@@ -2081,17 +1776,22 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 		worker_args[u].sigma_sign_bits = cache->sigma_sign_bits;
 	}
 
+	/*
+	 * A serial call joins every pool thread, inside the call, and the
+	 * next threaded call starts them again inside its own call
+	 * (cmn_pool_dispatch() resizes the pool to thread_count - 1).
+	 */
 	if (thread_count == 1) {
-		e8_sampler_spin_pool_shrink(0);
-		(void)e8_sample_z_worker_run(&worker_args[0]);
+		cmn_pool_shrink(0);
+		e8_sample_z_worker_run(&worker_args[0]);
 	} else {
 		int dispatch_ok;
 		int wait_ok;
 
 		c0 = e8_profile_cycles_start();
 		w0 = e8_profile_wall_ns();
-		dispatch_ok = e8_sampler_spin_pool_dispatch(
-			&worker_args[1], thread_count - 1);
+		dispatch_ok = cmn_pool_dispatch(e8_sample_z_worker_job,
+			worker_args, thread_count - 1);
 		e8_profile_add(&profile.cycles_worker_dispatch,
 			&profile.wall_ns_worker_dispatch, c0, w0);
 		if (!dispatch_ok) {
@@ -2099,11 +1799,11 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 			return 0;
 		}
 
-		(void)e8_sample_z_worker_run(&worker_args[0]);
+		e8_sample_z_worker_run(&worker_args[0]);
 
 		c0 = e8_profile_cycles_start();
 		w0 = e8_profile_wall_ns();
-		wait_ok = e8_sampler_spin_pool_wait();
+		wait_ok = cmn_pool_wait();
 		e8_profile_add(&profile.cycles_worker_wait,
 			&profile.wall_ns_worker_wait, c0, w0);
 		if (!wait_ok) {
@@ -2123,11 +1823,13 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 			worker_args[u].profile.cycles_block_sample;
 		profile.wall_ns_block_sample +=
 			worker_args[u].profile.wall_ns_block_sample;
+		cmn_rng_counters_add(&profile.rng, &worker_args[u].rng);
 		if (!worker_args[u].ok
 			|| UINT64_MAX - acc < worker_args[u].norm2)
 		{
 			e8_profile_add(&profile.cycles_reduction,
 				&profile.wall_ns_reduction, c0, w0);
+			cmn_rng_counters_add(&e8_sampler_rng_total, &profile.rng);
 			e8_sampler_last_profile = profile;
 			return 0;
 		}
@@ -2140,6 +1842,7 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 		&profile.wall_ns_reduction, c0, w0);
 
 	*pnorm_out = acc;
+	cmn_rng_counters_add(&e8_sampler_rng_total, &profile.rng);
 	e8_sampler_last_profile = profile;
 	return 1;
 }

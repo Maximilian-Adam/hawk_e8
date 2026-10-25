@@ -1,6 +1,9 @@
 # This Makefile builds the experimental HAWK-E8-CM code, its tests, tools and
 # comparison benchmarks against the generated, unmodified HAWK reference
 # sources in ../Reference_Implementation (produced from ../src by ../build.py).
+# The shared measurement modules in common/ (RNG, worker pool, timing, CSV)
+# are used by src/, tests/, tools/ and compare/; they depend only on
+# upstream HAWK's sha3.h and hawk.h.
 .POSIX:
 
 CC = c99
@@ -13,21 +16,30 @@ HAWK_STAMP = build/hawk_sources.stamp
 HAWK_OBJ = build/hawk/hawk_kgen.o build/hawk/hawk_sign.o build/hawk/hawk_vrfy.o build/hawk/ng_fxp.o build/hawk/ng_hawk.o build/hawk/ng_mp31.o build/hawk/ng_ntru.o build/hawk/ng_poly.o build/hawk/ng_zint31.o build/hawk/sha3.o
 HAWK_OBJ_NOSIGN = $(filter-out build/hawk/hawk_sign.o,$(HAWK_OBJ))
 HAWK_SHIM_OBJ = build/hawk_shim.o
+CMN_OBJ = build/common/cmn_timing.o build/common/cmn_rng.o build/common/cmn_pool.o build/common/cmn_csv.o
 E8_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_vrfy.o build/e8_sign.o
-E8_SAMPLER_OBJ = build/e8_sampler.o
+# The sampler and the shared modules it (and e8_sign.o) uses.
+E8_SAMPLER_OBJ = build/e8_sampler.o $(CMN_OBJ)
+E8_SAMPLER_PROFILE_OBJ = build/profile/e8_sampler.o $(CMN_OBJ)
 E8_API_OBJ = build/e8_api.o
 E8_PROFILE_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_vrfy.o build/profile/e8_sign.o build/profile/e8_api.o
 
-E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler bin/test_e8_api
+E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler bin/test_e8_api bin/test_cmn_common
 E8_TOOL_PROGS = bin/e8_histograms bin/e8_rejection_summary bin/e8_validation_summary
-E8_BENCH_PROGS = bin/e8_sampler_bench bin/e8_sign_bench bin/e8_sign_profile_bench bin/hawk_sign_profile_bench
+E8_BENCH_PROGS = bin/e8_sampler_bench bin/e8_sampler_profile_bench bin/e8_sign_bench bin/e8_sign_profile_bench bin/hawk_sign_profile_bench
 HAWK_PROFILE_SIGN_SOURCE = build/hawk_sign_profile.c
 
 HAWK_HEAD = $(HAWK_STAMP)
-E8_HEAD = src/hawk_e8_inner.h src/hawk_e8.h $(HAWK_HEAD)
-E8_INC = -I$(HAWK_DIR)
+CMN_HEAD = common/cmn_timing.h common/cmn_rng.h common/cmn_pool.h common/cmn_csv.h $(HAWK_HEAD)
+E8_HEAD = src/hawk_e8_inner.h src/hawk_e8.h $(CMN_HEAD)
+E8_INC = -I$(HAWK_DIR) -Icommon
+CMN_CFLAGS = $(CFLAGS) -I$(HAWK_DIR)
 E8_CFLAGS = $(CFLAGS) -DHAWK_ENABLE_E8_EXPERIMENTAL=1
-E8_PROFILE_SIGN_CFLAGS = $(E8_CFLAGS) -DHAWK_E8_PROFILE_SIGN=1
+# In-path instrumentation is off by default (HAWK_E8_PROFILE_SIGN=0 and
+# HAWK_E8_PROFILE_SAMPLER=0); the profiling builds below enable it
+# explicitly and are never used for headline timings.
+E8_PROFILE_SIGN_CFLAGS = $(E8_CFLAGS) -DHAWK_E8_PROFILE_SIGN=1 -DHAWK_E8_PROFILE_SAMPLER=0
+E8_PROFILE_SAMPLER_CFLAGS = $(E8_CFLAGS) -DHAWK_E8_PROFILE_SAMPLER=1
 HAWK_PROFILE_SIGN_CFLAGS = $(CFLAGS) -DHAWK_AVX2=0 -DHAWK_PROFILE_SIGN=1
 E8_THREAD_CFLAGS ?= -pthread
 E8_THREAD_LIBS ?= -pthread
@@ -42,11 +54,15 @@ test-e8: build bin $(E8_TEST_PROGS)
 	./bin/test_e8_sampler
 	./bin/test_e8_sign_sampler
 	./bin/test_e8_api
+	./bin/test_cmn_common
 e8-histograms: build bin bin/e8_histograms
 	./bin/e8_histograms
 sampler-bench: build bin bin/e8_sampler_bench
 	@./bin/e8_sampler_bench --selected-configs > e8_sampler_bench.csv
 	@printf 'wrote e8_sampler_bench.csv\n'
+profile-sampler-bench: build bin bin/e8_sampler_profile_bench
+	@./bin/e8_sampler_profile_bench --selected-configs > e8_sampler_profile_bench.csv
+	@printf 'wrote e8_sampler_profile_bench.csv\n'
 sign-bench: build bin bin/e8_sign_bench
 	@./bin/e8_sign_bench > e8_sign_bench.csv
 	@printf 'wrote e8_sign_bench.csv\n'
@@ -68,12 +84,12 @@ e8-sigma-sign-sweep: build bin bin/e8_rejection_summary
 	@printf 'wrote e8_sigma_sign_sweep.csv\n'
 
 build:
-	-mkdir -p build/hawk build/profile
+	-mkdir -p build/hawk build/profile build/common
 bin:
 	-mkdir -p bin
 clean:
 	-rm -rf build bin
-	-rm -f e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sign_bench.csv hawk_sign_profile_bench.csv e8_rejection_summary.csv e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv e8_sigma_verify_sweep.csv e8_sigma_sign_sweep.csv
+	-rm -f e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sampler_profile_bench.csv e8_sign_bench.csv hawk_sign_profile_bench.csv e8_rejection_summary.csv e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv e8_sigma_verify_sweep.csv e8_sigma_sign_sweep.csv
 
 # Generated upstream HAWK sources:
 $(HAWK_STAMP): ../build.py ../src/*.c ../src/*.h
@@ -101,18 +117,24 @@ bin/test_e8_sign_sampler: tests/test_e8_sign_sampler.c $(HAWK_OBJ) $(E8_OBJ) $(E
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_sign_sampler tests/test_e8_sign_sampler.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/test_e8_api: tests/test_e8_api.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_api tests/test_e8_api.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/test_cmn_common: tests/test_cmn_common.c $(CMN_HEAD) $(CMN_OBJ) build/hawk/sha3.o
+	$(CC) $(CMN_CFLAGS) -Icommon $(E8_THREAD_CFLAGS) -o bin/test_cmn_common tests/test_cmn_common.c $(CMN_OBJ) build/hawk/sha3.o $(LIBS) $(E8_THREAD_LIBS)
 
 # Tools
 bin/e8_histograms: tools/e8_histograms.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_histograms tools/e8_histograms.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
-bin/e8_rejection_summary: tools/e8_rejection_summary.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ)
-	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_rejection_summary tools/e8_rejection_summary.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+# The rejection summary reports the sampler's per-stage profile, so it
+# links the profiled sampler.
+bin/e8_rejection_summary: tools/e8_rejection_summary.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_PROFILE_OBJ)
+	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) -o bin/e8_rejection_summary tools/e8_rejection_summary.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_PROFILE_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/e8_validation_summary: tools/e8_validation_summary.c compare/hawk_shim.h $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_validation_summary tools/e8_validation_summary.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 
 # Comparison benchmarks
 bin/e8_sampler_bench: compare/e8_sampler_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_sampler_bench compare/e8_sampler_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_sampler_profile_bench: compare/e8_sampler_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_PROFILE_OBJ)
+	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) -o bin/e8_sampler_profile_bench compare/e8_sampler_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_PROFILE_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/e8_sign_bench: compare/e8_sign_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_sign_bench compare/e8_sign_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/e8_sign_profile_bench: compare/e8_sign_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ)
@@ -148,6 +170,20 @@ build/hawk/sha3.o: $(HAWK_HEAD)
 $(HAWK_SHIM_OBJ): compare/hawk_shim.c compare/hawk_shim.h $(HAWK_HEAD)
 	$(CC) $(CFLAGS) -I$(HAWK_DIR) -c -o $(HAWK_SHIM_OBJ) compare/hawk_shim.c
 
+# Shared measurement modules (common/), compiled with the base flags.
+build/common/cmn_timing.o: common/cmn_timing.c $(CMN_HEAD)
+	-mkdir -p build/common
+	$(CC) $(CMN_CFLAGS) -c -o build/common/cmn_timing.o common/cmn_timing.c
+build/common/cmn_rng.o: common/cmn_rng.c $(CMN_HEAD)
+	-mkdir -p build/common
+	$(CC) $(CMN_CFLAGS) -c -o build/common/cmn_rng.o common/cmn_rng.c
+build/common/cmn_pool.o: common/cmn_pool.c $(CMN_HEAD)
+	-mkdir -p build/common
+	$(CC) $(CMN_CFLAGS) $(E8_THREAD_CFLAGS) -c -o build/common/cmn_pool.o common/cmn_pool.c
+build/common/cmn_csv.o: common/cmn_csv.c $(CMN_HEAD)
+	-mkdir -p build/common
+	$(CC) $(CMN_CFLAGS) -c -o build/common/cmn_csv.o common/cmn_csv.c
+
 # Instrumented copy of upstream HAWK signing; the upstream source is untouched.
 $(HAWK_PROFILE_SIGN_SOURCE): ../src/hawk_sign.c compare/hawk_sign_profile.patch
 	-mkdir -p build
@@ -168,6 +204,12 @@ build/e8_api.o: src/e8_api.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_api.o src/e8_api.c
 build/e8_sampler.o: src/e8_sampler.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -c -o build/e8_sampler.o src/e8_sampler.c
+
+# E8 sampler with its per-stage profile (HAWK_E8_PROFILE_SAMPLER=1), used
+# only by the profiled sampler benchmark and the rejection summary.
+build/profile/e8_sampler.o: src/e8_sampler.c $(E8_HEAD)
+	-mkdir -p build/profile
+	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -c -o build/profile/e8_sampler.o src/e8_sampler.c
 
 # E8 signing objects with per-stage profiling (HAWK_E8_PROFILE_SIGN=1), used
 # only by the profile benchmark; the profile changes e8_sign_trace_timing.
