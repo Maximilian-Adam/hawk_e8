@@ -12,7 +12,9 @@
 #include <unistd.h>
 
 #include "../src/hawk_e8_inner.h"
+#include "cmn_pool.h"
 #include "cmn_timing.h"
+#include "hawk_variants.h"
 
 /*
  * The ordinary HAWK signing sampler is static in hawk_sign.c; hawk_shim
@@ -36,7 +38,8 @@ typedef enum {
 	BENCH_MODE_ISOLATED_MATRIX = 0,
 	BENCH_MODE_SINGLE_CONFIG = 1,
 	BENCH_MODE_SINGLE_HAWK_SAMPLER = 2,
-	BENCH_MODE_SELECTED_CONFIGS = 3
+	BENCH_MODE_SELECTED_CONFIGS = 3,
+	BENCH_MODE_VARIANT_MATRIX = 4
 } bench_run_mode;
 
 typedef struct {
@@ -99,6 +102,8 @@ typedef struct {
 	int no_header;
 	int worker_mode_set;
 	int worker_mode_spin;
+	int logn_set;
+	int threads_set;
 } bench_options;
 
 static uint64_t
@@ -316,8 +321,10 @@ usage(const char *prog)
 		"       %s --single-config --logn N --threads N "
 		"--worker-mode serial|spin --rng-mode per_block|per_worker "
 		"[--trials N] [--warmups N]\n"
-		"       %s --single-hawk-sampler --logn N [--trials N]\n",
-		prog, prog, prog);
+		"       %s --single-hawk-sampler --logn N [--trials N]\n"
+		"       %s --variant-matrix [--logn N] [--threads N]"
+		" [--trials N] [--warmups N]\n",
+		prog, prog, prog, prog);
 }
 
 static int
@@ -348,6 +355,8 @@ parse_options(int argc, char **argv, bench_options *opts)
 			opts->mode = BENCH_MODE_ISOLATED_MATRIX;
 		} else if (strcmp(arg, "--selected-configs") == 0) {
 			opts->mode = BENCH_MODE_SELECTED_CONFIGS;
+		} else if (strcmp(arg, "--variant-matrix") == 0) {
+			opts->mode = BENCH_MODE_VARIANT_MATRIX;
 		} else if (strcmp(arg, "--no-header") == 0) {
 			opts->no_header = 1;
 		} else if (strcmp(arg, "--logn") == 0) {
@@ -357,6 +366,7 @@ parse_options(int argc, char **argv, bench_options *opts)
 				fprintf(stderr, "ERR: invalid --logn\n");
 				return 0;
 			}
+			opts->logn_set = 1;
 		} else if (strcmp(arg, "--threads") == 0) {
 			if (++ i >= argc || !parse_unsigned_arg(argv[i],
 				1, 24, &opts->threads))
@@ -364,6 +374,7 @@ parse_options(int argc, char **argv, bench_options *opts)
 				fprintf(stderr, "ERR: invalid --threads\n");
 				return 0;
 			}
+			opts->threads_set = 1;
 		} else if (strcmp(arg, "--rng-mode") == 0) {
 			if (++ i >= argc || !parse_rng_mode(argv[i],
 				&opts->rng_mode))
@@ -1048,6 +1059,211 @@ run_selected_configs(const char *self_path, unsigned trials, unsigned warmups)
 	return ok ? 0 : 1;
 }
 
+/*
+ * Variant matrix (Step 4): every sampler variant of both schemes, one
+ * full-dimension sampler call per trial, through the same entry points
+ * the signers use, with bound streams: a fixed prefix
+ * hm || K || enc32le(1) (K of encoded-key length), the 40-byte seed from
+ * the call's RNG, T threads (pool sized outside the timed calls; upstream
+ * HAWK ref is serial). HAWK: upstream sig_gauss() through the shim (ref)
+ * or the variant hook (ref-T, hot64, hot32); E8: the registry's sample_z
+ * in per-worker mode. Each call is one cmn_pool_measure pair. Output: one
+ * CSV row per configuration with medians; cycles per 8 coordinates =
+ * cycles / (n / 4) for both schemes (2n HAWK coordinates, n/4 E8 blocks
+ * of 8); rng_bytes_per_call = 40 seed bytes + the sampler streams'
+ * delivered bytes (upstream HAWK ref: 40 + 20n, exact).
+ */
+static int
+cmp_u64_matrix(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+
+	return x < y ? -1 : x > y;
+}
+
+static uint64_t
+median_matrix(uint64_t *v, unsigned count)
+{
+	for (unsigned u = 0; u < count; u ++) {
+		if (v[u] == CMN_UNAVAILABLE) {
+			return CMN_UNAVAILABLE;
+		}
+	}
+	qsort(v, count, sizeof *v, cmp_u64_matrix);
+	return (count & 1) ? v[count / 2]
+		: (v[count / 2 - 1] + v[count / 2]) / 2;
+}
+
+static void
+print_u64_field(uint64_t x)
+{
+	if (x != CMN_UNAVAILABLE) {
+		printf("%llu", (unsigned long long)x);
+	}
+}
+
+static int
+variant_matrix_config(unsigned scheme, size_t vi, unsigned logn,
+	unsigned threads, unsigned trials, unsigned warmups)
+{
+	size_t n = (size_t)1 << logn;
+	static uint8_t t[MAXN / 4], t0[MAXN], t1[MAXN];
+	static int8_t x[2 * MAXN];
+	static int32_t z0[MAXN], z1[MAXN];
+	uint64_t *tsc = malloc(trials * sizeof *tsc);
+	uint64_t *core = malloc(trials * sizeof *core);
+	uint64_t *wall = malloc(trials * sizeof *wall);
+	uint64_t *cpu = malloc(trials * sizeof *cpu);
+	const hawk_sampler_variant *hv = NULL;
+	const e8_sampler_variant *ev = NULL;
+	uint8_t hm[64], key[40];
+	shake_context prefix;
+	uint64_t perms, bytes = 0, mt;
+	bench_rng_state rng;
+	int ok = 1;
+
+	if (tsc == NULL || core == NULL || wall == NULL || cpu == NULL) {
+		free(tsc);
+		free(core);
+		free(wall);
+		free(cpu);
+		return 0;
+	}
+	if (scheme == 0) {
+		hv = &hawk_sampler_variants[vi];
+		if (hv->range == NULL && threads != 1) {
+			free(tsc);
+			free(core);
+			free(wall);
+			free(cpu);
+			return 1;
+		}
+		ok = hawkv_select(hv, threads);
+	} else {
+		ev = &e8_sampler_variants[vi];
+		e8_sampler_set_thread_count(threads);
+	}
+	if (ok && threads > 1) {
+		ok = cmn_pool_ensure(threads - 1);
+	}
+	rng.state = UINT64_C(0x5A3B1E0000000000) + (logn << 8) + vi;
+	bench_rng(&rng, hm, sizeof hm);
+	bench_rng(&rng, key, sizeof key);
+	perms = e8_sampler_prefix_init(&prefix, hm, key,
+		8 + ((size_t)1 << (logn - 5)), 1);
+	for (unsigned trial = 0; ok && trial < warmups + trials; trial ++) {
+		cmn_pool_stamp st;
+		cmn_measure m;
+		cmn_rng_counters c0, c1;
+		uint64_t norm;
+
+		bench_rng(&rng, t, n >> 2);
+		for (size_t u = 0; u < n; u ++) {
+			t0[u] = (uint8_t)(bench_rng_next(&rng) >> 63);
+			t1[u] = (uint8_t)(bench_rng_next(&rng) >> 63);
+		}
+		if (hv != NULL) {
+			hawkv_rng_counters_get(&c0);
+			cmn_pool_measure_start(&st);
+			norm = hawk_variant_sampler(logn, bench_rng, &rng,
+				&prefix, x, t);
+			cmn_pool_measure_stop(&m, &st);
+			hawkv_rng_counters_get(&c1);
+			ok = norm != UINT32_MAX;
+		} else {
+			e8_sampler_rng_counters_get(&c0);
+			cmn_pool_measure_start(&st);
+			ok = ev->sample_z(ev->tables(logn), z0, z1, &norm,
+				t0, t1, logn, E8_SAMPLER_RNG_PER_WORKER,
+				&prefix, perms, bench_rng, &rng, NULL);
+			cmn_pool_measure_stop(&m, &st);
+			e8_sampler_rng_counters_get(&c1);
+		}
+		if (trial >= warmups) {
+			unsigned k = trial - warmups;
+
+			tsc[k] = m.tsc_cycles;
+			core[k] = m.core_cycles;
+			wall[k] = m.wall_ns;
+			cpu[k] = m.cpu_ns_all_threads;
+			bytes += 40 + (hv != NULL && hv->range == NULL
+				? (uint64_t)20 << logn
+				: c1.bytes_delivered - c0.bytes_delivered);
+		}
+	}
+	if (ok) {
+		mt = median_matrix(tsc, trials);
+		printf("%s,%s,%u,%s,%u,%u,%u,%llu,", scheme == 0 ? "hawk" : "e8",
+			hv != NULL ? hv->name : ev->name,
+			hv != NULL ? hv->threshold_bits : ev->threshold_bits,
+			hv != NULL ? hv->technique : ev->technique,
+			logn, threads, trials, (unsigned long long)mt);
+		print_u64_field(median_matrix(core, trials));
+		printf(",");
+		print_u64_field(median_matrix(wall, trials));
+		printf(",");
+		print_u64_field(median_matrix(cpu, trials));
+		printf(",%.1f,%.1f\n", (double)mt / (double)(n >> 2),
+			(double)bytes / (double)trials);
+	}
+	(void)hawkv_select(&hawk_sampler_variants[0], 1);
+	e8_sampler_set_thread_count(1);
+	cmn_pool_shrink(0);
+	free(tsc);
+	free(core);
+	free(wall);
+	free(cpu);
+	return ok;
+}
+
+static int
+run_variant_matrix(const bench_options *opts)
+{
+	static const unsigned default_threads[] = { 1, 8, 16 };
+	unsigned logn_min = opts->logn_set ? opts->logn : 8;
+	unsigned logn_max = opts->logn_set ? opts->logn : 10;
+	unsigned warmups = opts->warmups < 20 ? 20 : opts->warmups;
+
+	(void)cmn_core_cycles_open();
+	if (!cmn_pool_set_accounting(1)) {
+		return 1;
+	}
+	if (!opts->no_header) {
+		printf("scheme,variant,threshold_bits,technique,logn,threads,"
+			"trials,median_tsc_cycles,median_core_cycles,"
+			"median_wall_ns,median_cpu_ns_all_threads,"
+			"median_cycles_per_8_coords,rng_bytes_per_call\n");
+	}
+	for (unsigned logn = logn_min; logn <= logn_max; logn ++) {
+		for (unsigned scheme = 0; scheme < 2; scheme ++) {
+			size_t vcount = scheme == 0 ? hawk_sampler_variant_count
+				: e8_sampler_variant_count;
+
+			for (size_t vi = 0; vi < vcount; vi ++) {
+				for (unsigned c = 0; c < 3; c ++) {
+					unsigned threads = opts->threads_set
+						? opts->threads
+						: default_threads[c];
+
+					if (opts->threads_set && c > 0) {
+						break;
+					}
+					if (!variant_matrix_config(scheme, vi,
+						logn, threads, opts->trials,
+						warmups))
+					{
+						fprintf(stderr, "ERR: variant"
+							" matrix logn=%u\n",
+							logn);
+						return 1;
+					}
+				}
+			}
+		}
+	}
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1068,6 +1284,9 @@ main(int argc, char **argv)
 	}
 	if (opts.mode == BENCH_MODE_SELECTED_CONFIGS) {
 		return run_selected_configs(argv[0], opts.trials, opts.warmups);
+	}
+	if (opts.mode == BENCH_MODE_VARIANT_MATRIX) {
+		return run_variant_matrix(&opts);
 	}
 	usage(argv[0]);
 	return 1;

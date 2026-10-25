@@ -9,10 +9,17 @@ nothing is amortised.
 
 | scheme | accounting | timed call | setup, timed separately and never added |
 | --- | --- | --- | --- |
-| HAWK | `all_in` | `hawk_sign_finish(encoded priv)` | none |
-| HAWK | `prepared` | `hawk_shim_sign_finish_decoded(decoded priv)` | `hawk_decode_private_key` |
-| E8 | `all_in` | `e8_sign_finish(encoded priv)` | none |
-| E8 | `prepared` | `e8_sign_finish_prepared(prepared key)` | `e8_prepare_private_key` |
+| HAWK `ref` | `all_in` | `hawk_sign_finish(encoded priv)` | none |
+| HAWK `ref` | `prepared` | `hawk_shim_sign_finish_decoded(decoded priv)` | `hawk_decode_private_key` |
+| HAWK other variants | `all_in` | `hawkv_sign_finish(encoded priv)` | none |
+| HAWK other variants | `prepared` | `hawkv_sign_finish_decoded(decoded priv)` | `hawk_decode_private_key` |
+| E8 | `all_in` | `e8_sign_finish_inner(encoded priv, variant)` (= `e8_sign_finish()` for `hot64`) | none |
+| E8 | `prepared` | `e8_sign_finish_inner(prepared key, variant)` (= `e8_sign_finish_prepared()` for `hot64`) | `e8_prepare_private_key` |
+
+The HAWK variant signer `hawkv_*` (`e8/compare/hawk_variants/`) is upstream
+`sign_finish_inner()` with only its `sig_gauss()` call routed through a
+sampler hook; with the hook set to upstream `sig_gauss()` its signatures are
+byte-identical to upstream's (`test_hawk_variants`).
 
 - `all_in`: everything from the encoded private key to the encoded signature.
   HAWK regenerates `f, g` from the key seed; E8 regenerates `f, g` and builds
@@ -38,15 +45,23 @@ nothing is amortised.
   through their `rng` callback; for the same trial both schemes receive the
   same stream.  Key generation uses the same RNG with its own seeds.
 - Attempts are counted identically: both signers call the RNG exactly twice
-  per attempt (salt, then sampler seed), so `attempts = rng_calls / 2`.
-- The E8 sampler thread count is a reported parameter (1, and 8, 8, 16 for
-  n = 256, 512, 1024); HAWK is serial.  Thread fairness is handled separately
-  (`plan.md`, Step 4).
-- Before each block of signatures (scheme, degree, thread count), one untimed
-  signature per accounting mode warms caches, and for E8 the sampler tables
-  and worker pool.  Key generation, key preparation and message context setup
-  are outside the timed region.  After a threaded block the pool threads are
-  joined, so that no later block runs beside spinning workers.
+  per attempt (salt, then the 40-byte sampler seed), so
+  `attempts = rng_calls / 2`, for every variant.
+- Sampler streams are bound to the message, key and attempt for every
+  variant of both schemes, as in upstream HAWK (prefix `hm || K ||
+  enc32le(attempt + 1)`); the binding cost is part of every timing.  Stream
+  layouts: `e8/docs/HAWK_E8_VARIANT.md`, "Sampler Variants".
+- The thread count is a reported parameter of every variant except upstream
+  HAWK `ref` (serial): by default 1, and 8, 8, 16 for n = 256, 512, 1024;
+  `--threads LIST` selects others.  Both schemes use the same pool, with the
+  same settings and accounting.
+- Before each block of signatures (scheme, variant, degree, thread count),
+  the pool is sized with `cmn_pool_ensure(T - 1)` and one untimed signature
+  per accounting mode warms caches, sampler tables and the pool.  Dispatches
+  only grow the pool, so no timed call starts or joins a thread.  Key
+  generation, key preparation and message context setup are outside the
+  timed region.  After a block the pool threads are joined, so that no later
+  block runs beside spinning workers.
 - In-path instrumentation is off in the timed build: the E8 sampler's
   per-stage profile (`HAWK_E8_PROFILE_SAMPLER`) and signing profile
   (`HAWK_E8_PROFILE_SIGN`) both default to 0, and `e8_sign_sampler_core()`
@@ -68,10 +83,10 @@ accounting,encoding_included,verify_ok
 | `kind` | `sign`, `sign_failed`, or `keygen` / `prepare` for the separately timed setup |
 | `run_id` | UTC start time and a random 32-bit suffix, also printed in the summary |
 | `scheme` | `hawk` or `e8` |
-| `variant` | `ref` (upstream HAWK sampler) or `hot64` (current E8 sampler) |
-| `threshold_bits` | 78 for HAWK, 64 for E8 |
-| `technique` | `ct_full_scan` for HAWK, `vt_hot_table` for E8 |
-| `threads` | sampler threads, caller included (1 = serial) |
+| `variant` | sampler variant: `ref`, `hot64`, `hot32` for both schemes, and HAWK's `ref-T` (upstream table and scan on the bound worker streams; HAWK `ref` is upstream `sig_gauss()`, serial) |
+| `threshold_bits` | from the variant registry: 78 (`ref`, `ref-T`), 64 (`hot64`), 32 (`hot32`) |
+| `technique` | from the variant registry: `ct_full_scan` (`ref`, `ref-T`) or `vt_hot_table` (`hot64`, `hot32`) |
+| `threads` | sampler threads `T`, caller included; `T = 1` is the variant's serial form (one stream, no pool). E8 rows always use the bound per-worker streams; the legacy per-block mode never appears in a row |
 | `key_index`, `msg_index` | key and message of the row (`msg_index` empty for setup rows) |
 | `attempts` | `rng_calls / 2` |
 | `sig_bytes` | `HAWK_SIG_SIZE(logn)` / `E8_SIG_SIZE(logn)` |
@@ -94,22 +109,31 @@ example while the main thread verifies or generates the next key) is
 reported per block in the stderr summary, not in any row.
 
 `rng_bytes` is the number of bytes requested from the signing RNG plus the
-bytes the sampler streams deliver to the sampler, summed over all attempts:
+bytes the sampler streams deliver to the sampler, summed over all attempts.
+The signing RNG supplies `salt_len + 40` bytes per attempt for every variant
+of both schemes (salt, then the 40-byte sampler seed).  The sampler term is:
 
-- HAWK: `attempts * (salt_len + 40 + 20n)`: the salt, the 40-byte sampler
-  seed, and the exact output of upstream `sig_gauss`'s four SHAKE256
-  instances (40 bytes per four coordinates, 2n coordinates).  Upstream HAWK
-  stays unmodified, so this term is computed, not counted.
-- E8: `attempts * (salt_len + 32) + D`, where `D` is the sampler streams'
-  delivered byte count, read from `e8_sampler_rng_counters_get()`.  Each of
-  the n/4 blocks reads 9 little-endian words (component, then 8
-  coordinates) and one more word per coordinate that falls to the tail
-  table, so `D = attempts * 18n + 8 * tail_draws`.
+- HAWK `ref`: `attempts * 20n`, the exact output of upstream `sig_gauss`'s
+  four SHAKE256 instances (40 bytes per four coordinates, 2n coordinates).
+  Upstream HAWK stays unmodified, so this term alone is computed, not
+  counted.
+- every other variant (HAWK `ref-T`, `hot64`, `hot32`; E8 `ref`, `hot64`,
+  `hot32`): the sampler streams' delivered byte count, read from the stream
+  counters (`hawkv_rng_counters_get()`, `e8_sampler_rng_counters_get()`).
+  Per attempt this is 20n for HAWK `ref-T` (when 4 divides each range), 16n
+  or 8n plus 8 or 4 bytes per tail draw for HAWK `hot64` / `hot32`, 18n or
+  9n plus 8 or 4 per tail draw for E8 `hot64` / `hot32`, and
+  `ceil(9b/4) * 40` per worker range of `b` blocks for E8 `ref` (22.5n
+  serially).
 
-With `salt_len` = 14, 24, 40, HAWK consumes 5,174 / 10,304 / 20,560 bytes per
-attempt and E8 4,654 / 9,272 / 18,504 bytes per attempt plus 8 bytes per tail
-draw (rare: 13 tail draws in 1,200 E8 signatures per degree on the WSL smoke
-run).  Unused buffered bytes are not counted (at most 127 per stream).
+With `salt_len` = 14, 24, 40, bytes per attempt are (n = 256 / 512 / 1024):
+HAWK `ref` and `ref-T` 5,174 / 10,304 / 20,560; E8 `ref` 5,814 / 11,584 /
+23,120 (serial); E8 `hot64` 4,662 / 9,280 / 18,512 and `hot32` 2,358 / 4,672
+/ 9,296, plus rare tail draws (about 1e-5 per coordinate); HAWK `hot64`
+4,150 / 8,256 / 16,464 and `hot32` 2,102 / 4,160 / 8,272, plus tail draws
+at 0.2-2.7% per coordinate (WSL means: 4,164 / 8,423 / 16,830 and 2,109 /
+4,244 / 8,455).  The summary also prints `rng_bytes_per_attempt`.  Unused
+buffered bytes are not counted (at most 127 per stream).
 
 The stderr summary prints the `run_id` and core-cycle counter status, one
 table per accounting mode (median and mean TSC cycles, median core cycles,
@@ -133,7 +157,9 @@ are off unless a `profile-*` build enables them.  The profile bench's timings
 include its per-stage timers and are not headline figures.
 
 `--sigs-per-key N` (default 1) sets how many signatures share one key; it does
-not change the accounting.  `--logn L` restricts the run to one degree.
+not change the accounting.  `--logn L` restricts the run to one degree,
+`--variant NAME` (repeatable) to the named variants and `--threads LIST` to
+the given thread counts; `--list` prints every variant of both schemes.
 
 Results under this accounting are to be measured on bare-metal Linux
 (`plan.md`, Step 9); WSL runs are smoke tests only.

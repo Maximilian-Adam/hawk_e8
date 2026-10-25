@@ -68,12 +68,24 @@ Core experimental sources:
   target coset.
 - `e8/src/e8_ntt.c`: shared internal NTT, inverse NTT, modular multiplication,
   and CRT helpers for verifier/signing arithmetic.
-- `e8/src/e8_sampler.c`: coset-matched Construction-A CM E8 sampler.
-- `e8/src/e8_sign.c`: dummy E8 signers and the sampler-backed uncompressed
-  signing core shared by the internal `e8_sign_sampler_*` entry points and
-  the public API.
-- `e8/src/e8_vrfy.c`: uncompressed signature codec, sign symmetry break, and
-  E8 completion-norm verifier.
+- `e8/src/e8_sampler.c`: shared part of the coset-matched Construction-A CM
+  E8 sampler (block geometry, controls, stream derivations, worker
+  dispatch); `e8_sampler_inner.h` is its internal interface.
+- `e8/src/e8_sampler_hot.c` (compiled once per threshold width, variants
+  `hot64` and `hot32`), `e8/src/e8_sampler_ref.c` (variant `ref`) and
+  `e8/src/e8_sampler_variants.c` (the variant registry): the sampler
+  variants on the generated tables.
+- `e8/src/e8_sampler_runtime.c`: test/tool-only runtime `hot64` table
+  builder (floating point) for arbitrary `sigma_sign`, and the legacy
+  double-sigma sampler entry points.
+- `e8/src/e8_sign.c`: dummy E8 signers and the integer-only sampler-backed
+  uncompressed signing core shared by the public API and
+  `e8/src/e8_sign_legacy.c` (the caller-supplied-salt, double-sigma
+  `e8_sign_sampler_*` entry points of tests and tools).
+- `e8/src/e8_codec.c`: uncompressed signature codec.
+- `e8/src/e8_vrfy.c`: sign symmetry break and E8 completion-norm verifier.
+- `e8/tables/`: the offline table generator `gen_tables.py` and the
+  generated integer tables of every sampler variant of both schemes.
 
 The experimental E8 path targets GCC or Clang and is not strict
 `-std=c99 -pedantic` code: exact CRT/reference accumulations use `__int128`,
@@ -140,12 +152,11 @@ coordinates, reconstructs the E8-side point, and maps back to `z_block` with a
 checked inverse.  Debug builds check parity, coset membership, syndrome, and
 norm consistency.
 
-The implementation uses floating-point finite-tail tables and runtime caches
-keyed by the exact `sigma_sign` bit pattern.  Cached probability tables,
-component masses, prefixes, totals, normalisers, and tail CDFs use `double`;
-hot component and six-value CDF thresholds use 64-bit integer thresholds.
-The cache also stores one-dimensional centre classes, ordered tail fallback
-data, base blocks, base norms, and affine reconstruction deltas.
+The sampler runs on integer tables generated offline for the three fixed
+`sigma_sign` values (see "Sampler Variants"); the signing path is
+integer-only.  The double-sigma entry points used by tests and tools build
+`hot64` tables of the same format at runtime, in `double`, for any
+`sigma_sign`.
 
 Serial mode is the reference path.  The full sampler can also use the shared
 pthread spin/yield worker pool (`e8/common/cmn_pool.c`, moved unchanged from
@@ -215,7 +226,165 @@ not reentrant across application threads because the worker pool, thread/RNG
 controls, and profiling state are process-global; applications must serialize
 those calls.  This does not affect the sampler's internal block parallelism.
 
-All sampler paths are floating-point, data-dependent, and non-constant-time.
+The `hot64` and `hot32` variants are data-dependent and not constant-time;
+the `ref` variant uses constant-time full scans (see "Sampler Variants").
+
+## Sampler Variants
+
+Step 4 of the fair-comparison plan gives HAWK and E8 the same sampler
+variants, so that every headline row pair differs only in the lattice.  All
+variants of both schemes are linked into one binary and listed by
+`e8_sign_bench --list`:
+
+```text
+scheme  variant  threshold_bits  technique     notes
+hawk    ref      78              ct_full_scan  upstream sig_gauss(), unchanged
+hawk    ref-T    78              ct_full_scan  upstream table and scan, worker streams
+hawk    hot64    64              vt_hot_table  generated tables
+hawk    hot32    32              vt_hot_table  generated tables
+e8      ref      78              ct_full_scan  generated tables
+e8      hot64    64              vt_hot_table  generated tables (public API default)
+e8      hot32    32              vt_hot_table  generated tables
+```
+
+Every variant except upstream HAWK `ref` runs with `T` workers (`T = 1` is its
+serial form, which never touches the pool); the thread count is reported
+beside the variant.
+
+E8 registry: `e8_sampler_variants[]` (`hawk_e8_inner.h`), each with a name,
+threshold width, technique, `sample_z` (the full-dimension sampler, one
+indirect call per attempt from the signing core) and its generated tables per
+logn.  `e8_sign_finish_inner()` takes the variant (NULL: `hot64`).  Each
+variant is its own translation unit (`e8_sampler_hot.c` compiled with
+`E8_HOT_BITS=64` and `=32`, `e8_sampler_ref.c`) with its own symbols; the
+per-block loop is direct within it.  HAWK registry: `hawk_sampler_variants[]`
+(`e8/compare/hawk_variants/hawk_variants.h`).
+
+### Hot-table variants (`hot64`, `hot32`)
+
+Per E8 block: one `B`-bit word selects the component against the tau's
+component CDF; each of the eight coordinates reads one `B`-bit word against
+its centre class's hot table of the `K = 6` highest-weight values and, on a
+miss, a second `B`-bit word against the class's integer tail table.  Every
+comparison is `target <= threshold`, at both widths.  (The 32-bit sampler of
+commit `b7bf0fc` compared `target < threshold`, with thresholds
+`(uint64_t)(prefix / total * 2^32)` clamped to `UINT32_MAX` and a `double`
+tail; using one rule at every width keeps the precision audit uniform.)
+HAWK's `hot64` and `hot32` use the same skeleton per coordinate on its two
+distributions (`x in 2Z + p`, `x = 2y + p`, `y ~ D(-p/2, sigma_sign)`, by the
+parity `p` of `t`), with the same `K`, rule, integer tail and read widths.
+With `K = 6`, HAWK's coordinates fall to the tail with probability 0.51% /
+0.20% (n = 256, parity 0 / 1), 2.48% / 1.60% (512) and 2.71% / 1.79% (1024),
+against about 1e-5 for E8 (HAWK's distributions are wider in lattice units:
+`sigma_sign` 1.01-1.30 against E8's 0.64).
+
+### Constant-time variants (`ref`)
+
+HAWK `ref` is upstream `sig_gauss()`: 78-bit one-sided table, sign bit,
+constant-time full scan, four interleaved SHAKE256 instances.  HAWK `ref-T`
+uses the same table and per-coordinate code on the worker streams below,
+reading each range's draws sequentially (groups of five words per four
+coordinates); its per-coordinate distribution equals upstream's, its mapping
+does not.
+
+E8 `ref` (`e8_sampler_ref.c`) uses 78-bit thresholds and HAWK's draw format:
+every draw is `hi (15 bits) || lo (63 bits)`, a group of five little-endian
+words giving four draws (words 0-3: low parts, bit 63 unused; word 4: the
+four high parts in its 16-bit lanes).  A block uses nine draws (component,
+then eight coordinates); groups continue across the blocks of a stream and a
+stream's last partial group is read whole, so a stream of `b` blocks reads
+`ceil(9b/4) * 40` bytes (22.5n bytes per attempt serially; up to 30 more per
+worker).  Comparisons are HAWK's borrow form (`cc = (lo - Tlo) >> 63`, then
+`(hi - Thi - cc) >> 31`), over whole tables with no early exit:
+
+- component: the secret tau selects a row class (6 distinct component mass
+  orders) and a slot-to-component permutation by a masked scan over all 256
+  taus; the row class's 15 survival thresholds by a masked scan over the 6
+  classes; the slot is the count of thresholds above `u`, the component the
+  slot's 4-bit field of the permutation;
+- coordinates: the base block `tau + 2 rep(component)`, its offset `P z`,
+  squared norm and the centres `c = k/4` are computed arithmetically; the
+  residue `k mod 4` selects one of four two-sided survival tables (13
+  entries) by a masked scan, and the value is `floor(k/4) + lo + #{j : u <
+  T[j]}`.
+
+`test_e8_ref_ct` links a build whose loops count their iterations and checks
+that every block, for every tau and random input, runs the same counts (256
+tau scans, 90 row-class entries, 119 comparisons, 416 residue entries).
+Valgrind/ctgrind is not available here, so the absence of other
+secret-dependent branches and memory indices rests on code review.
+
+### RNG layout per variant
+
+Both schemes draw every sampler stream like upstream HAWK: bound to the
+message, key and attempt, from a 40-byte seed read from the signing RNG
+(`option B` of the plan).  The prefix is HAWK's
+`hm || K || enc32le(2*attempt + 1)` (`K` = key seed for an encoded key, `f || g`
+for a prepared/decoded key), absorbed once per attempt and copied into each
+stream.  The signing RNG is called exactly twice per attempt (salt, seed) and
+supplies `salt_len + 40` bytes per attempt for every variant of both schemes.
+
+```text
+hawk ref          SHAKE256(prefix || seed40 || u8 j), j = 0..3   (upstream)
+hawk ref-T/hot*   SHAKE256(prefix || "HAWK bench sampler worker v1" || seed40
+                           || u8 logn || u8 w || u64le(start) || u64le(end))
+                  ranges over the 2n coordinates
+e8 ref/hot*       SHAKE256(prefix || "HAWK-E8-CM worker sampler v2" || seed40
+                           || u8 logn || u8 w || u64le(start) || u64le(end)
+                           || u64le(sigma_sign bits))
+                  ranges over the n/4 blocks
+```
+
+Worker `w` of `T` covers `[N w / T, N (w + 1) / T)`.  `test_hawk_variants`
+checks that the prefix the HAWK signer gives its sampler equals E8's
+`e8_sampler_prefix_init()` for the same message, key and attempt, and
+`test_e8_variants` / `test_hawk_variants` check every variant against these
+documented streams for several `T`.  Sampler bytes per attempt (n = 256, 512,
+1024; top-level `salt_len + 40` not included):
+
+```text
+hawk ref, ref-T   20n                 5120 / 10240 / 20480
+hawk hot64        16n + 8 per tail    4096 / 8192 / 16384 + tails
+hawk hot32         8n + 4 per tail    2048 / 4096 / 8192 + tails
+e8 ref            22.5n (serial)      5760 / 11520 / 23040
+e8 hot64          18n + 8 per tail    4608 / 9216 / 18432 + tails
+e8 hot32           9n + 4 per tail    2304 / 4608 / 9216 + tails
+```
+
+### Integer-only runtime and generated tables
+
+`e8/tables/gen_tables.py` (Python standard library, `decimal` at 160 digits
+from exact rational exponents) generates every table of both schemes with
+one discrete-Gaussian routine: E8 for `sigma_sign` = 3.592, 3.631, 3.669 (all
+13 centre classes `k/4`, the component CDFs of all 256 taus, `base_z`,
+`base_norm2`, `coord_class`, and the `ref` residue and slot tables), HAWK for
+upstream's `sigma_sign` = 1.010, 1.278, 1.299 (both parities; the `ref` table
+reproduces upstream's 78-bit table exactly, which the generator and
+`test_hawk_variants` check).  Thresholds are exact floors of
+`prefix / total * 2^B`; values within `10^-130` of an integer are exact
+symmetries (for example `P(X > 0) = 1/2` at centre 1/2) and are taken as that
+integer.  The rules are in the generator's docstring.  `make tables`
+regenerates the headers and fails if the committed ones differ.
+
+The signing path (`e8_sign.c`, `e8_api.c`, `e8_codec.c`, `e8_f2.c`,
+`e8_ntt.c`, `e8_math.c`, `e8_sampler.c`, the variant TUs, `cmn_rng`,
+`cmn_pool`, `cmn_timing`, and the HAWK variant signer and samplers) contains
+no floating point: `make check-integer-only` compiles each of these
+translation units with `-mgeneral-regs-only` (GCC rejects any floating-point
+use) and scans the timed objects, plus the upstream objects the E8 signer
+calls (`sha3.o`, `ng_hawk.o`), for SSE/AVX/x87 floating-point instructions.
+The timed objects themselves are compiled with the ordinary flags, identical
+for both schemes.  The norm bounds of the public API are integer constants
+(8439, 16220, 31150; `e8_norm_bound_default()`), equal to
+`e8_verify_bound_from_sigma()` with the default `sigma_verify`.
+
+The former runtime `double` builder survives only for tests and the tools
+that sweep `sigma_sign` (`e8_sampler_runtime.c`).  Its double weights resolve
+about 53 bits, so the low bits of nearly every 64-bit threshold differ from
+the exact generated ones (at most 5,840 units of 2^-64; `test_e8_tables`
+counts them); hot values agree, sampling on either table set gives the same
+outputs in the tests, and none of the fixed-seed vectors contains a tail
+draw, so the integer tail left them unchanged.
 
 ## Signing And Verification
 
@@ -463,9 +632,20 @@ test_e8_sign_sampler  sampler-backed uncompressed sign/verify, dynamic-range
                       diagnostic, and fixed-seed signature regression
 test_e8_api           public API: keygen/sign (encoded and prepared)/verify
                       round trips, tampering, HAWK salt construction, RNG
-                      calls per attempt, and the HAWK prepared-key shim
-test_cmn_common       shared modules: RNG known answer, buffering invariance
-                      and counters; pool coverage, reductions, resizing and
+                      calls per attempt, the API's bound streams, and the
+                      HAWK prepared-key shim
+test_e8_tables        generated against runtime-built hot64 tables, sampling
+                      equivalence, integer norm bounds, 1D distribution
+                      moments of every ref/hot64/hot32 table
+test_e8_variants      every E8 variant: sign/verify, documented streams for
+                      T = 1, 2, 4, 8, determinism, binding
+test_e8_ref_ct        structural constant-time loop counts of E8 ref
+test_hawk_variants    HAWK variants: generated = upstream 78-bit table,
+                      variant signer = upstream signing, prefix = E8 prefix,
+                      sign/verify, documented streams, binding, moments
+test_cmn_common       shared modules: RNG known answer, buffering invariance,
+                      prefixed streams and counters; pool coverage,
+                      reductions, grow-only dispatch, resizing and
                       accounting; clock monotonicity and perf unavailability;
                       CSV writer
 ```
@@ -518,7 +698,16 @@ e8/bin/e8_sampler_bench --selected-configs --trials 50 --warmups 1
 e8/bin/e8_sampler_bench --isolated-matrix --trials 50 --warmups 1
 e8/bin/e8_sampler_bench --single-hawk-sampler --logn 10 --trials 50
 e8/bin/e8_sampler_bench --single-config --logn 10 --threads 16 --worker-mode spin --rng-mode per_worker --trials 50 --warmups 1
+e8/bin/e8_sampler_bench --variant-matrix [--logn N] [--threads N] --trials 2000
 ```
+
+`--variant-matrix` (also `make -C e8 variant-sampler-bench`, writing
+`e8/e8_variant_sampler_bench.csv`) times every sampler variant of both
+schemes, one full-dimension call per trial through the signers' own entry
+points with bound streams (a fixed prefix of encoded-key length), at
+`T = 1, 8, 16` by default, and reports medians, cycles per 8 coordinates
+(`cycles / (n/4)` for both schemes) and random bytes per call.  The other
+modes are the earlier E8-only configurations.
 
 Signature timing:
 
@@ -533,6 +722,10 @@ their own `sign_finish` calls under the same two accounting modes (`all_in`,
 (`e8/common/cmn_csv.h`), every signature verified.  Both schemes draw from
 the shared SHAKE256 signing RNG and are timed with the shared timing and pool
 measurement; columns are defined in `e8/docs/perf_comparison_final.md`.
+Every sampler variant of both schemes runs by default, with one thread and
+with the selected per-logn thread count; `--variant NAME` (repeatable) and
+`--threads LIST` (for example `1,8,16`, or `sel`) select blocks, and
+`--list` prints the variants.
 `profile-sign-bench` builds the same benchmark with `HAWK_E8_PROFILE_SIGN=1`
 and prints per-stage E8 signing timings (including key preparation and salt
 derivation) to the terminal.  For optimization timing, build with
@@ -598,8 +791,10 @@ statistical proof of sampler distribution.
 
 ## Limitations
 
-- Experimental floating-point sampler.
-- Data-dependent, non-constant-time sampling and signing paths.
+- The `hot64` and `hot32` samplers are data-dependent and not constant-time;
+  the `ref` sampler's constant-time property rests on its structure (loop
+  counts tested) and code review, not on a tool such as ctgrind.  The rest
+  of the signing path is not hardened.
 - No AVX2 E8 implementation.
 - No compressed E8 public key or signature format.
 - The E8 key formats are experimental and uncompressed, not production

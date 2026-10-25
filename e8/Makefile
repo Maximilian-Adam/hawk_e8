@@ -77,6 +77,9 @@ e8-histograms: build bin bin/e8_histograms
 sampler-bench: build bin bin/e8_sampler_bench
 	@./bin/e8_sampler_bench --selected-configs > e8_sampler_bench.csv
 	@printf 'wrote e8_sampler_bench.csv\n'
+variant-sampler-bench: build bin bin/e8_sampler_bench
+	@./bin/e8_sampler_bench --variant-matrix --trials 2000 > e8_variant_sampler_bench.csv
+	@printf 'wrote e8_variant_sampler_bench.csv\n'
 profile-sampler-bench: build bin bin/e8_sampler_profile_bench
 	@./bin/e8_sampler_profile_bench --selected-configs > e8_sampler_profile_bench.csv
 	@printf 'wrote e8_sampler_profile_bench.csv\n'
@@ -152,7 +155,7 @@ bin:
 	-mkdir -p bin
 clean:
 	-rm -rf build bin
-	-rm -f e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sampler_profile_bench.csv e8_sign_bench.csv hawk_sign_profile_bench.csv e8_rejection_summary.csv e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv e8_sigma_verify_sweep.csv e8_sigma_sign_sweep.csv
+	-rm -f e8_variant_sampler_bench.csv e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sampler_profile_bench.csv e8_sign_bench.csv hawk_sign_profile_bench.csv e8_rejection_summary.csv e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv e8_sigma_verify_sweep.csv e8_sigma_sign_sweep.csv
 
 # Generated upstream HAWK sources:
 $(HAWK_STAMP): ../build.py ../src/*.c ../src/*.h
@@ -203,14 +206,14 @@ bin/e8_validation_summary: tools/e8_validation_summary.c compare/hawk_shim.h $(H
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_validation_summary tools/e8_validation_summary.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 
 # Comparison benchmarks
-bin/e8_sampler_bench: compare/e8_sampler_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ)
-	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_sampler_bench compare/e8_sampler_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
-bin/e8_sampler_profile_bench: compare/e8_sampler_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_PROFILE_OBJ)
-	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) -o bin/e8_sampler_profile_bench compare/e8_sampler_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_PROFILE_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
-bin/e8_sign_bench: compare/e8_sign_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
-	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_sign_bench compare/e8_sign_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
-bin/e8_sign_profile_bench: compare/e8_sign_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ)
-	$(CC) $(E8_PROFILE_SIGN_CFLAGS) $(E8_INC) -o bin/e8_sign_profile_bench compare/e8_sign_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_sampler_bench: compare/e8_sampler_bench.c $(HAWKV_HEAD) $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_sampler_bench compare/e8_sampler_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_sampler_profile_bench: compare/e8_sampler_bench.c $(HAWKV_HEAD) $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) build/e8_math.o $(E8_SAMPLER_PROFILE_OBJ)
+	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_sampler_profile_bench compare/e8_sampler_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) build/e8_math.o $(E8_SAMPLER_PROFILE_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_sign_bench: compare/e8_sign_bench.c $(HAWKV_HEAD) $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_sign_bench compare/e8_sign_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_sign_profile_bench: compare/e8_sign_bench.c $(HAWKV_HEAD) $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_PROFILE_SIGN_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_sign_profile_bench compare/e8_sign_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/hawk_sign_profile_bench: compare/hawk_sign_profile_bench.c $(HAWK_PROFILE_SIGN_SOURCE) $(HAWK_OBJ_NOSIGN)
 	$(CC) $(HAWK_PROFILE_SIGN_CFLAGS) -I$(HAWK_DIR) -o bin/hawk_sign_profile_bench compare/hawk_sign_profile_bench.c $(HAWK_OBJ_NOSIGN) $(LIBS)
 

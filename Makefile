@@ -1,5 +1,5 @@
 # This Makefile compiles the implementation in this directory.
-.PHONY: avx2 ref e8 test-e8 tables check-integer-only e8-histograms sampler-bench profile-sampler-bench sign-bench profile-sign-bench profile-hawk-sign-bench e8-rejection-summary e8-validation-summary e8-sigma-verify-sweep e8-sigma-sign-sweep e8-clean check-upstream
+.PHONY: avx2 ref e8 test-e8 tables check-integer-only variant-sampler-bench e8-histograms sampler-bench profile-sampler-bench sign-bench profile-sign-bench profile-hawk-sign-bench e8-rejection-summary e8-validation-summary e8-sigma-verify-sweep e8-sigma-sign-sweep e8-clean check-upstream
 .POSIX:
 
 all: build avx2 ref e8
@@ -16,7 +16,7 @@ e8: build
 	make -C e8
 test-e8: build
 	make -C e8 test-e8
-e8-histograms e8-rejection-summary e8-validation-summary e8-sigma-verify-sweep e8-sigma-sign-sweep sampler-bench profile-sampler-bench sign-bench profile-sign-bench profile-hawk-sign-bench tables check-integer-only:
+e8-histograms e8-rejection-summary e8-validation-summary e8-sigma-verify-sweep e8-sigma-sign-sweep sampler-bench variant-sampler-bench profile-sampler-bench sign-bench profile-sign-bench profile-hawk-sign-bench tables check-integer-only:
 	@make -s -C e8 --no-print-directory $@
 e8-clean:
 	make -C e8 clean
