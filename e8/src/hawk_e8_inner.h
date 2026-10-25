@@ -95,6 +95,8 @@
 #define e8_sample_block_construction_a_cm  Zh(e8_sample_block_construction_a_cm)
 #define e8_sample_block_construction_a_cm_trace  Zh(e8_sample_block_construction_a_cm_trace)
 #define e8_sample_z_construction_a_cm  Zh(e8_sample_z_construction_a_cm)
+#define e8_sample_z_construction_a_cm_ex  Zh(e8_sample_z_construction_a_cm_ex)
+#define e8_sampler_prefix_init  Zh(e8_sampler_prefix_init)
 #define e8_sampler_warm_cache  Zh(e8_sampler_warm_cache)
 #define e8_sampler_set_thread_count  Zh(e8_sampler_set_thread_count)
 #define e8_sampler_get_thread_count  Zh(e8_sampler_get_thread_count)
@@ -152,6 +154,21 @@ typedef struct {
 
 #define E8_SAMPLER_WORKER_SERIAL      0u
 #define E8_SAMPLER_WORKER_SPIN        1u
+/*
+ * Sampler RNG modes.
+ *
+ *   E8_SAMPLER_RNG_PER_WORKER  (default) one stream per worker, bound
+ *       to the message, key and attempt through a prefix, from a 40-byte
+ *       seed drawn from the signing RNG (domain "HAWK-E8-CM worker
+ *       sampler v2"); a serial call uses exactly one stream (worker 0,
+ *       range [0, n/4)), so serial and one-thread outputs are identical.
+ *       The public API always uses this mode.
+ *   E8_SAMPLER_RNG_PER_BLOCK  legacy, regression-only: one unbound stream
+ *       per block from a 32-byte seed (domain "HAWK-E8-CM block sampler
+ *       v1"); its output does not depend on the thread count. It keeps
+ *       the fixed-seed vectors of the caller-supplied-salt entry points
+ *       and is never used by the public API or in benchmark rows.
+ */
 #define E8_SAMPLER_RNG_PER_BLOCK      0u
 #define E8_SAMPLER_RNG_PER_WORKER     1u
 
@@ -159,8 +176,9 @@ typedef struct {
  * Profile of the last e8_sample_z_construction_a_cm() call. worker_mode,
  * rng_mode and rng (the sampler streams' counters, summed over streams;
  * see cmn_rng.h) are always set; the cycles_* and wall_ns_* fields only
- * with HAWK_E8_PROFILE_SAMPLER. The 32-byte master seed drawn from the
- * caller's RNG is not part of rng.
+ * with HAWK_E8_PROFILE_SAMPLER. The seed drawn from the caller's RNG (40
+ * bytes per worker mode, 32 per block mode) is not part of rng; the
+ * permutations of a bound call's prefix are, once per call.
  */
 typedef struct {
 	uint64_t worker_mode;
@@ -406,7 +424,14 @@ int e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
  *
  * where hm = SHAKE256(message || hpub), then recomputes h and the target
  * coset (the hawk_e8.h API).  In that mode the RNG is invoked twice per
- * attempt: salt_len bytes, then the sampler's 32-byte seed.
+ * attempt: salt_len bytes, then the sampler's 40-byte seed.
+ *
+ * The sampler streams of attempt i are bound to the message, the key and
+ * the attempt (e8_sampler_prefix_init() with hm, salt_key and counter
+ * 2i + 1), as in HAWK. With salt == NULL (the public API) the sampler
+ * always runs in the bound per-worker mode; with a caller-supplied salt
+ * it runs in the configured mode (per-block keeps the legacy, unbound
+ * streams and a 32-byte seed) and the prefix has an empty key.
  */
 int e8_sign_sampler_core(unsigned logn,
 	void *sig, size_t sig_len, const shake_context *sc_data,
@@ -519,7 +544,7 @@ int e8_sampler_warm_cache(double sigma_sign);
 
 /*
  * Control full-dimension CM sampler parallelism.  A count of 1 forces the
- * single-thread path (which joins every pool thread; see cmn_pool.h).
+ * single-thread path, which does not touch the worker pool.
  * User-selected counts greater than 1 use the shared spin/yield worker pool
  * (cmn_pool.h).  A count of 0 requests an automatic worker count, capped by
  * the number of E8 blocks and by the sampler's conservative worker limit.
@@ -557,10 +582,38 @@ int e8_sample_block_construction_a_cm_trace(int32_t *zblk, uint8_t tau,
 	uint64_t *norm2_out, e8_sampler_stats *stats,
 	e8_ca_sample_trace *trace);
 
+/*
+ * Full-dimension sampler in the configured RNG mode, without a binding
+ * prefix (sampler-only callers).
+ */
 int e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
 	unsigned logn, double sigma_sign, hawk_rng rng, void *rng_context,
 	e8_sampler_stats *stats);
+
+/*
+ * Full-dimension sampler with an explicit RNG mode and, in per-worker
+ * mode, the binding prefix (NULL: empty) whose absorption took
+ * prefix_permutations permutations (added once to the stream counters).
+ * The prefix is ignored in per-block mode.
+ */
+int e8_sample_z_construction_a_cm_ex(int32_t *z0, int32_t *z1,
+	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, double sigma_sign, unsigned rng_mode,
+	const shake_context *prefix, uint64_t prefix_permutations,
+	hawk_rng rng, void *rng_context, e8_sampler_stats *stats);
+
+/*
+ * Binding prefix of the sampler streams for one attempt, as upstream
+ * HAWK builds it for sig_gauss(): prefix is initialised and absorbs
+ * hm (64 bytes) || key || enc32le(counter), and is left absorbing (not
+ * flipped). key is the salt key material (kgseed for an encoded key,
+ * f || g for a prepared key; empty for the caller-supplied-salt entry
+ * points) and counter is 2 * attempt + 1. Returns the permutations
+ * this absorption took.
+ */
+uint64_t e8_sampler_prefix_init(shake_context *prefix, const uint8_t *hm,
+	const void *key, size_t key_len, uint32_t counter);
 
 /*
  * Test hooks for cache equivalence against the direct reference mass

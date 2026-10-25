@@ -625,6 +625,9 @@ e8_sign_sampler_core(unsigned logn,
 	int16_t s0[E8_MAXN], s1[E8_MAXN];
 	int64_t threshold;
 	size_t n;
+	shake_context prefix;
+	uint64_t prefix_permutations;
+	unsigned rng_mode;
 #if HAWK_E8_PROFILE_SIGN
 	uint64_t sign_c0 = 0, sign_w0 = 0;
 	uint64_t stage_c0 = 0, stage_w0 = 0;
@@ -658,6 +661,14 @@ e8_sign_sampler_core(unsigned logn,
 		return 0;
 	}
 	n = (size_t)1 << logn;
+
+	/*
+	 * The public API (no caller-supplied salt) always uses the bound
+	 * per-worker streams; the legacy entry points honour the
+	 * configured mode.
+	 */
+	rng_mode = salt == NULL
+		? E8_SAMPLER_RNG_PER_WORKER : e8_sampler_get_rng_mode();
 #if HAWK_E8_DEBUG_CHECKS
 	{
 		uint64_t digest = e8_basis_debug_digest(f, g, F, G, n);
@@ -779,6 +790,14 @@ e8_sign_sampler_core(unsigned logn,
 #endif
 		}
 		/*
+		 * Binding prefix of this attempt's sampler streams, as in
+		 * HAWK: hm || K || enc32le(2 * attempt + 1).
+		 */
+		prefix_permutations = e8_sampler_prefix_init(&prefix, hm,
+			salt_key, salt == NULL ? salt_key_len : 0,
+			((uint32_t)attempt << 1) + 1);
+
+		/*
 		 * The per-attempt sampler timestamps are taken only for a
 		 * trace, so that untraced signing has no timers in its path.
 		 */
@@ -786,8 +805,9 @@ e8_sign_sampler_core(unsigned logn,
 			sample_c0 = cmn_tsc_start();
 			sample_w0 = cmn_wall_ns();
 		}
-		int sample_ok = e8_sample_z_construction_a_cm(z0, z1, &pnorm_u,
-			t0, t1, logn, sigma_sign, rng, rng_context, NULL);
+		int sample_ok = e8_sample_z_construction_a_cm_ex(z0, z1,
+			&pnorm_u, t0, t1, logn, sigma_sign, rng_mode,
+			&prefix, prefix_permutations, rng, rng_context, NULL);
 		if (trace_timing != NULL) {
 			uint64_t sample_w1 = cmn_wall_ns();
 			uint64_t sample_c1 = cmn_tsc_end();

@@ -18,12 +18,20 @@
  * protocol, thread limit, atexit shutdown and error paths) are those of
  * the former E8 sampler pool (e8_sampler_spin_pool_* in e8_sampler.c),
  * with the job generalised from the sampler's worker arguments to a
- * function and context, plus the optional accounting.
+ * function and context, plus the optional accounting, grow-only dispatch,
+ * and one fix: a thread starts from the generation current at its
+ * creation (start_generation), not 0.
  */
 
 typedef struct {
 	unsigned index;
 	volatile int stopping;
+
+	/*
+	 * Pool generation when the thread was created: the thread waits for
+	 * the generation to change from this value before its first job.
+	 */
+	unsigned start_generation;
 
 	/* Written by the worker; read by the caller after a dispatch. */
 	uint64_t job_cpu_ns;
@@ -98,7 +106,7 @@ cmn_pool_thread_main(void *arg)
 {
 	cmn_pool_worker *worker = arg;
 	cmn_pool_state *pool = &cmn_pool;
-	unsigned seen_generation = 0;
+	unsigned seen_generation = worker->start_generation;
 
 	if (pool->accounting) {
 		(void)cmn_core_cycles_open();
@@ -224,9 +232,12 @@ cmn_pool_shrink(unsigned threads)
 	pool->thread_count = threads;
 }
 
-/* see cmn_pool.h */
-int
-cmn_pool_ensure(unsigned threads)
+/*
+ * Start pool threads up to threads (no-op if the pool is already at
+ * least that large). Returns 0 under the conditions of cmn_pool_ensure().
+ */
+static int
+cmn_pool_grow(unsigned threads)
 {
 	cmn_pool_state *pool = &cmn_pool;
 	unsigned old_count;
@@ -245,12 +256,22 @@ cmn_pool_ensure(unsigned threads)
 	if (pool->remaining != 0) {
 		return 0;
 	}
-	cmn_pool_shrink(threads);
 	old_count = pool->thread_count;
 	started = old_count;
 	for (unsigned u = old_count; u < threads; u ++) {
 		pool->workers[u].index = u;
 		pool->workers[u].stopping = 0;
+
+		/*
+		 * A thread started by a dispatch must take the dispatch's
+		 * generation bump as its first job. Starting from 0 (as the
+		 * former E8 pool did), a thread that first ran after the
+		 * dispatch had published the job but before the bump ran the
+		 * job, then ran it again on the bump, decrementing remaining
+		 * twice, so the caller could resume while a worker was still
+		 * writing.
+		 */
+		pool->workers[u].start_generation = pool->generation;
 		if (pthread_create(&pool->threads[u], NULL,
 			cmn_pool_thread_main, &pool->workers[u]) != 0)
 		{
@@ -275,6 +296,19 @@ cmn_pool_ensure(unsigned threads)
 }
 
 /* see cmn_pool.h */
+int
+cmn_pool_ensure(unsigned threads)
+{
+	if (threads > CMN_POOL_MAX_THREADS
+		|| (cmn_pool.initialized && cmn_pool.remaining != 0))
+	{
+		return 0;
+	}
+	cmn_pool_shrink(threads);
+	return cmn_pool_grow(threads);
+}
+
+/* see cmn_pool.h */
 unsigned
 cmn_pool_thread_count(void)
 {
@@ -288,7 +322,7 @@ cmn_pool_dispatch(cmn_pool_job job, void *ctx, unsigned active_threads)
 	cmn_pool_state *pool = &cmn_pool;
 
 	if (active_threads == 0 || active_threads > CMN_POOL_MAX_THREADS
-		|| job == NULL || !cmn_pool_ensure(active_threads))
+		|| job == NULL || !cmn_pool_grow(active_threads))
 	{
 		return 0;
 	}

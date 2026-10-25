@@ -17,10 +17,11 @@
 
 /*
  * Tests of the shared measurement modules in e8/common/: RNG streams
- * (known answer, buffering invariance, exact counters), worker pool
- * (dispatch coverage, reductions, repeated dispatches, resizing,
- * accounting), timing (monotonic clocks, perf unavailability reported
- * rather than fatal) and the CSV writer.
+ * (known answer, buffering invariance, prefixed streams, exact
+ * counters), worker pool (dispatch coverage, reductions, repeated
+ * dispatches, grow-only dispatch, explicit resizing, accounting), timing
+ * (monotonic clocks, perf unavailability reported rather than fatal) and
+ * the CSV writer.
  */
 
 static void
@@ -239,6 +240,66 @@ test_rng(void)
 			"rng source counters");
 	}
 
+	/*
+	 * Prefixed streams: prefix || domain || seed || label, from a
+	 * copied absorbing state, for prefixes ending anywhere in a block
+	 * (dptr != 0) or on a block boundary. Only permutations after the
+	 * prefix are counted; cmn_rng_absorb() counts the prefix's own.
+	 */
+	{
+		static const size_t prefix_lens[] = {
+			0, 1, 84, 92, 108, 135, 136, 137, 580, 1092, 2116
+		};
+		static uint8_t pbuf[2116], a[600], b[600];
+		size_t absorbed = sizeof RNG_DOMAIN - 1 + sizeof RNG_SEED
+			+ sizeof RNG_LABEL;
+
+		for (size_t u = 0; u < sizeof pbuf; u ++) {
+			pbuf[u] = (uint8_t)(u * 7 + 3);
+		}
+		for (size_t p = 0; p < sizeof prefix_lens / sizeof prefix_lens[0];
+			p ++)
+		{
+			size_t plen = prefix_lens[p];
+			shake_context prefix, sc;
+			uint64_t pperms;
+
+			shake_init(&prefix, 256);
+			pperms = cmn_rng_absorb(&prefix, pbuf, plen);
+			check(pperms == plen / 136, "rng prefix permutations");
+			cmn_rng_init_prefixed(&r, &prefix,
+				RNG_DOMAIN, sizeof RNG_DOMAIN - 1,
+				RNG_SEED, sizeof RNG_SEED,
+				RNG_LABEL, sizeof RNG_LABEL);
+			cmn_rng_read_bytes(&r, a, 300);
+			cmn_rng_read_bulk(&r, a + 300, 300);
+
+			shake_init(&sc, 256);
+			shake_inject(&sc, pbuf, plen);
+			shake_inject(&sc, RNG_DOMAIN, sizeof RNG_DOMAIN - 1);
+			shake_inject(&sc, RNG_SEED, sizeof RNG_SEED);
+			shake_inject(&sc, RNG_LABEL, sizeof RNG_LABEL);
+			shake_flip(&sc);
+			shake_extract(&sc, b, sizeof b);
+			check(memcmp(a, b, sizeof a) == 0,
+				"rng prefixed stream output");
+
+			cmn_rng_counters_get(&r, &c);
+			check(c.bytes_delivered == 600
+				&& c.bytes_squeezed == 128 + 172 + 300
+				&& c.refills == 4
+				&& c.permutations == (plen + absorbed) / 136
+					- plen / 136 + ceil_div(600, 136),
+				"rng prefixed stream counters");
+
+			/* The prefix itself is not modified. */
+			shake_init(&sc, 256);
+			shake_inject(&sc, pbuf, plen);
+			check(memcmp(&sc, &prefix, sizeof sc) == 0,
+				"rng prefix unchanged");
+		}
+	}
+
 	/* Signing RNG: a counted SHAKE256 stream of its own domain. */
 	{
 		static const char domain[] = "HAWK-E8 bench signing RNG v1";
@@ -351,6 +412,38 @@ test_pool(void)
 			"pool thread count after dispatch");
 	}
 
+	/*
+	 * A dispatch that starts threads runs each worker exactly once
+	 * (threads created by the dispatch must not mistake its generation
+	 * bump for a second job).
+	 */
+	for (unsigned rep = 0; rep < 300; rep ++) {
+		cmn_pool_shrink(0);
+		memset((void *)t.runs, 0, sizeof t.runs);
+		check(pool_run(&t, 8) == expected, "pool growing dispatch");
+		for (unsigned u = 0; u <= CMN_POOL_MAX_THREADS; u ++) {
+			check(t.runs[u] == (u < 8 ? 1u : 0u),
+				"pool growing dispatch runs each worker once");
+		}
+	}
+	check(pool_run(&t, 24) == expected, "pool regrow");
+
+	/*
+	 * Dispatch only grows the pool: a smaller dispatch leaves the
+	 * surplus threads idle, runs only the dispatched workers, and
+	 * starts or joins no thread.
+	 */
+	cmn_pool_stats_reset();
+	memset((void *)t.runs, 0, sizeof t.runs);
+	check(pool_run(&t, 4) == expected, "pool smaller dispatch");
+	for (unsigned u = 0; u <= CMN_POOL_MAX_THREADS; u ++) {
+		check(t.runs[u] == (u < 4 ? 1u : 0u),
+			"pool smaller dispatch runs dispatched workers only");
+	}
+	cmn_pool_stats_get(&st);
+	check(cmn_pool_thread_count() == 23 && st.threads_started == 0
+		&& st.threads_joined == 0, "pool dispatch does not shrink");
+
 	/* Growing and shrinking. */
 	cmn_pool_stats_reset();
 	check(cmn_pool_ensure(4) && cmn_pool_thread_count() == 4,
@@ -365,6 +458,8 @@ test_pool(void)
 	cmn_pool_shrink(0);
 	check(cmn_pool_thread_count() == 0, "pool shrink to zero");
 	check(pool_run(&t, 3) == expected, "pool run after shrink to zero");
+	check(pool_run(&t, 2) == expected && cmn_pool_thread_count() == 2,
+		"pool keeps threads after a smaller dispatch");
 	check(!cmn_pool_ensure(CMN_POOL_MAX_THREADS + 1),
 		"pool rejects too many threads");
 	check(!cmn_pool_dispatch(pool_test_job, &t, 0)

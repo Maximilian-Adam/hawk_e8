@@ -14,8 +14,11 @@
  *   - tampered message, signature, salt and public key are rejected;
  *   - the per-attempt salt is exactly HAWK's construction;
  *   - both schemes call the RNG exactly twice per attempt (salt, then
- *     sampler seed), also with the E8 sampler thread pool enabled, so
- *     attempts = rng_calls / 2 for both.
+ *     40-byte sampler seed), also with the E8 sampler thread pool
+ *     enabled, so attempts = rng_calls / 2 for both;
+ *   - the E8 API always uses the bound per-worker sampler streams: the
+ *     configured (legacy) RNG mode does not change its signatures. The
+ *     rng_mode printed per message is the configured mode.
  */
 
 #define MAXN   1024
@@ -223,7 +226,7 @@ sign_and_check(unsigned logn, const void *priv, size_t priv_len,
 	count_rng rng;
 	unsigned attempts = 0;
 
-	count_rng_init(&rng, rng_seed, e8_salt_len(logn), 32);
+	count_rng_init(&rng, rng_seed, e8_salt_len(logn), 40);
 	make_message(&sc, logn, key, msg, 0);
 	if (!e8_sign_finish_inner(logn, counting_rng, &rng, sig, &sc,
 		priv, priv_len, tmp, sizeof tmp, &attempts, NULL))
@@ -365,6 +368,20 @@ test_e8_api_logn(const api_param *param)
 					" mismatch logn=%u\n", logn);
 				return 0;
 			}
+			e8_sampler_set_rng_mode(
+				rng_mode == E8_SAMPLER_RNG_PER_WORKER
+				? E8_SAMPLER_RNG_PER_BLOCK
+				: E8_SAMPLER_RNG_PER_WORKER);
+			state = rng_seed;
+			if (!e8_sign_finish(logn, plain_rng, &state, sig_pub,
+				&sc, priv, stmp, sizeof stmp)
+				|| memcmp(sig_pub, sig_enc, E8_SIG_SIZE(logn)) != 0)
+			{
+				fprintf(stderr, "ERR: E8 API depends on the"
+					" configured RNG mode logn=%u\n", logn);
+				return 0;
+			}
+			e8_sampler_set_rng_mode(rng_mode);
 			if (e8_sign_finish(logn, plain_rng, &state, sig_pub,
 				&sc, priv, stmp, E8_TMPSIZE_SIGN(logn) - 8))
 			{

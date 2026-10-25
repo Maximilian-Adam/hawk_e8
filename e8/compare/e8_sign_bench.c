@@ -47,8 +47,8 @@
  * attempts = rng_calls / 2.
  *
  * rng_bytes is the number of random bytes consumed by the signature: the
- * bytes requested from the signing RNG plus the bytes the sampler streams
- * deliver to the sampler. For E8 the latter is read from the sampler's
+ * bytes requested from the signing RNG (salt_len + 40 per attempt for both
+ * schemes) plus the bytes the sampler streams deliver to the sampler. For E8 the latter is read from the sampler's
  * stream counters; for upstream HAWK, whose sampler stays unmodified, it is
  * the exact count 20n bytes per attempt (four SHAKE256 instances, 40 bytes
  * per four coordinates, 2n coordinates).
@@ -64,8 +64,10 @@
  * count (8, 8, 16); the thread count is reported on every row. Ordinary
  * HAWK is serial. Before each block of signatures, one untimed signature
  * per accounting mode warms caches (and the E8 sampler tables and worker
- * pool) for both schemes alike. After a threaded block the pool threads
- * are joined, so that no block runs beside spinning workers.
+ * pool) for both schemes alike. A threaded block sizes the pool with
+ * cmn_pool_ensure() before its warm-up and joins the pool threads after
+ * the block, so that no timed call starts or joins a thread and no block
+ * runs beside spinning workers.
  *
  * stdout: one CSV row per signature, plus one row per key generation and
  * per key preparation (kind = keygen / prepare), in the shared schema
@@ -526,6 +528,17 @@ run_block(bench_block *b, const sign_bench_options *opts, int profile)
 		e8_sampler_set_rng_mode(E8_SAMPLER_RNG_PER_WORKER);
 		b->threads = e8_sampler_get_thread_count(b->logn);
 		b->sig_bytes = E8_SIG_SIZE(b->logn);
+
+		/*
+		 * Size the pool before the warm-up, outside any timed
+		 * region: dispatches only grow the pool, so no timed call
+		 * then starts or joins a thread.
+		 */
+		if (b->threads > 1 && !cmn_pool_ensure(b->threads - 1)) {
+			fprintf(stderr, "ERR: cannot start %u pool threads\n",
+				b->threads - 1);
+			return 0;
+		}
 	} else {
 		b->sig_bytes = HAWK_SIG_SIZE(b->logn);
 	}

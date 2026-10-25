@@ -21,9 +21,20 @@
  *
  * Usage:
  *
+ *   cmn_pool_ensure(T - 1);               outside timed regions
  *   cmn_pool_dispatch(job, ctx, T - 1);   threads run job(ctx, 1..T-1)
  *   job(ctx, 0);                          the caller is worker 0
  *   cmn_pool_wait();
+ *   cmn_pool_shrink(0);                   outside timed regions
+ *
+ * Sizing: cmn_pool_dispatch() only grows the pool (it starts missing
+ * threads and never joins any), so a dispatch to fewer threads than the
+ * pool holds leaves the surplus threads idle (spinning) and a pool that
+ * is already large enough creates no thread inside the dispatch. Threads
+ * are joined only by cmn_pool_shrink(), cmn_pool_ensure() and
+ * cmn_pool_shutdown(). Harnesses size the pool with cmn_pool_ensure()
+ * before a timed block and shrink it after, so that no timed call
+ * creates or joins a thread; every scheme follows the same rule.
  *
  * Accounting (off by default, cmn_pool_set_accounting()): each pool thread
  * reads its thread CPU clock and core-cycle counter around every job and
@@ -40,9 +51,10 @@ typedef void (*cmn_pool_job)(void *ctx, unsigned worker);
 
 /*
  * Resize the pool to exactly threads pool threads (excluding the caller),
- * joining surplus threads and starting missing ones. Returns 0 if threads
- * exceeds CMN_POOL_MAX_THREADS, a dispatch is outstanding, or a thread
- * cannot be started (the pool then keeps its previous threads).
+ * joining surplus threads and starting missing ones; the explicit resize
+ * for harnesses, outside timed regions. Returns 0 if threads exceeds
+ * CMN_POOL_MAX_THREADS, a dispatch is outstanding, or a thread cannot be
+ * started (the pool then keeps the threads it had after any shrink).
  */
 int cmn_pool_ensure(unsigned threads);
 
@@ -64,9 +76,10 @@ void cmn_pool_shutdown(void);
 unsigned cmn_pool_thread_count(void);
 
 /*
- * Run job(ctx, w) on pool threads for w = 1 .. active_threads, resizing
- * the pool to active_threads first (cmn_pool_ensure()). Returns 0 on
- * error (no job is then running).
+ * Run job(ctx, w) on pool threads for w = 1 .. active_threads, first
+ * starting pool threads up to active_threads if the pool is smaller
+ * (grow only; surplus threads stay idle). Returns 0 on error (no job is
+ * then running).
  */
 int cmn_pool_dispatch(cmn_pool_job job, void *ctx, unsigned active_threads);
 

@@ -153,23 +153,48 @@ this file so that HAWK parallel variants can use the same code) over
 independent block ranges; the calling thread runs worker 0.  Parallelism is
 controlled by `e8_sampler_set_thread_count()`,
 `HAWK_E8_SAMPLER_THREADS`, or the compile-time `HAWK_E8_SAMPLER_THREADS`
-macro.  RNG mode is either per-block SHAKE streams or per-worker SHAKE streams.
-The compile-time default is serial.  The selected benchmark/signing diagnostic
-configuration uses 8, 8, and 16 sampler threads for n=256, 512, and 1024,
-respectively.  A serial call always uses per-block streams, and joins every
-pool thread inside the call; the next threaded call starts its threads again
-inside its own call.
+macro.  The compile-time default is serial.  The selected benchmark/signing
+diagnostic configuration uses 8, 8, and 16 sampler threads for n=256, 512, and
+1024, respectively.  A serial call runs worker 0 directly and never touches
+the pool; a threaded call dispatches to the pool, which only grows
+(`cmn_pool.h`), so harnesses size it with `cmn_pool_ensure()` outside timed
+regions.
 
-The sampler streams are shared-module streams (`e8/common/cmn_rng.c`):
-SHAKE256 over a domain string, the 32-byte master seed, then a label, read
-through a 128-byte buffer as little-endian 64-bit words:
+The sampler streams are shared-module streams (`e8/common/cmn_rng.c`), read
+through a 128-byte buffer as little-endian 64-bit words.  The RNG mode is one
+of:
 
 ```text
-per block:  "HAWK-E8-CM block sampler v1"  || seed || u8 logn || u8 tau
-            || u64le(block_index) || u64le(sigma_sign bits)
-per worker: "HAWK-E8-CM worker sampler v1" || seed || u8 logn || u8 worker_id
-            || u64le(range_start) || u64le(range_end) || u64le(sigma_sign bits)
+per worker (default; the public API always uses it):
+    SHAKE256(prefix || "HAWK-E8-CM worker sampler v2" || seed40
+             || u8 logn || u8 worker_id || u64le(range_start)
+             || u64le(range_end) || u64le(sigma_sign bits))
+    prefix = hm || K || enc32le(2*attempt + 1)     (absorbed once per attempt)
+per block (legacy, regression-only):
+    SHAKE256("HAWK-E8-CM block sampler v1" || seed32 || u8 logn || u8 tau
+             || u64le(block_index) || u64le(sigma_sign bits))
 ```
+
+The per-worker streams are bound to the message, key and attempt exactly as
+upstream HAWK binds its `sig_gauss()` streams: `hm = SHAKE256(message ||
+hpub)`, `K` is the key seed for an encoded key and `f || g` for a prepared key
+(the same key material as the salt derivation), and the counter is HAWK's odd
+sampler counter.  The prefix is absorbed once per attempt
+(`e8_sampler_prefix_init()`) and copied into each stream
+(`cmn_rng_init_prefixed()`), so the binding cost does not grow with the
+thread count; its permutations are counted once per attempt.  The seed is 40
+bytes from the signing RNG, as for HAWK, so the signing RNG supplies
+`salt_len + 40` bytes per attempt and is called exactly twice per attempt.  A
+serial per-worker call uses exactly one stream (worker 0, range `[0, n/4)`),
+so serial and one-thread outputs are identical by construction; with `T`
+workers the output depends on `T`.  Sampler-only callers without a message
+(`e8_sample_z_construction_a_cm()`) use an empty prefix.
+
+The per-block mode is kept only so that the fixed-seed regression vectors of
+the caller-supplied-salt entry points (`e8_sign_sampler_*_uncompressed()`)
+stay valid: its streams are unbound, its seed is 32 bytes, and its output does
+not depend on the thread count.  It is never used by the public API or in
+benchmark rows.
 
 Each block reads one word for the component and one per coordinate (72
 bytes), plus one more word for each coordinate that falls to the tail table.

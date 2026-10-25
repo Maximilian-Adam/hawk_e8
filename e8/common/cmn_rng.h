@@ -12,6 +12,9 @@
  * A stream is SHAKE256 initialised by absorbing a domain string, then the
  * seed bytes, then the label bytes, in that order, then flipped; its
  * output is read through a fixed CMN_RNG_BUF_BYTES-byte buffer. A stream
+ * may start from an already-absorbed prefix (cmn_rng_init_prefixed()): the
+ * prefix state is copied, then domain, seed and label are absorbed after
+ * it, so one prefix serves any number of streams. A stream
  * may instead be sourced from a hawk_rng callback (cmn_rng_init_source());
  * buffering and counters are then the same, with the callback in place of
  * SHAKE256.
@@ -32,7 +35,10 @@
  *   refills           source extractions (buffer refills plus direct bulk
  *                     extractions)
  *   permutations      Keccak-f[1600] permutations, absorbing and squeezing
- *                     (0 for a callback source)
+ *                     (0 for a callback source); for a prefixed stream,
+ *                     only those after the prefix (the prefix's own are
+ *                     counted once by whoever absorbed it, see
+ *                     cmn_rng_absorb())
  *
  * Counters of several streams are summed with cmn_rng_counters_add().
  */
@@ -64,6 +70,24 @@ typedef struct {
  */
 void cmn_rng_init(cmn_rng *r, const void *domain, size_t domain_len,
 	const void *seed, size_t seed_len, const void *label, size_t label_len);
+
+/*
+ * Initialise a SHAKE256 stream from prefix || domain || seed || label,
+ * where prefix is an absorbing (not flipped) SHAKE256 context, for
+ * example one built with cmn_rng_absorb(). The prefix is copied and not
+ * modified. The stream's permutation counter counts the permutations
+ * from the first byte after the prefix, so a prefix shared by several
+ * streams is counted once, by its builder.
+ */
+void cmn_rng_init_prefixed(cmn_rng *r, const shake_context *prefix,
+	const void *domain, size_t domain_len,
+	const void *seed, size_t seed_len, const void *label, size_t label_len);
+
+/*
+ * Absorb len bytes into an absorbing SHAKE context (shake_inject()) and
+ * return the number of Keccak-f[1600] permutations this triggered.
+ */
+uint64_t cmn_rng_absorb(shake_context *sc, const void *data, size_t len);
 
 /*
  * Initialise a stream whose bytes come from a hawk_rng callback.

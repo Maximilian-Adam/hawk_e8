@@ -24,6 +24,7 @@
 #define E8_TWO_PI              6.28318530717958647692528676655900576839
 #define E8_1D_TINY_VALUES      6
 #define E8_MASTER_SEED_BYTES   32
+#define E8_BOUND_SEED_BYTES    40
 #define E8_MAX_FULL_BLOCKS     (1u << (10 - 2))
 #define E8_SAMPLER_MAX_THREADS 24
 
@@ -138,7 +139,7 @@ struct e8_ca_sigma_cache_s {
 static e8_ca_sigma_cache *e8_ca_cache_list = NULL;
 static pthread_mutex_t e8_ca_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static unsigned e8_sampler_thread_override = UINT_MAX;
-static unsigned e8_sampler_rng_mode = E8_SAMPLER_RNG_PER_BLOCK;
+static unsigned e8_sampler_rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 static e8_sampler_profile e8_sampler_last_profile;
 static cmn_rng_counters e8_sampler_rng_total;
 
@@ -305,7 +306,9 @@ e8_enc64le(uint8_t *dst, uint64_t x)
 }
 
 /*
- * Per-block sampler stream:
+ * Per-block sampler stream (legacy, regression-only mode; never used by
+ * the public API or in benchmark rows): unbound, from a 32-byte master
+ * seed drawn from the signing RNG,
  *
  *   SHAKE256("HAWK-E8-CM block sampler v1" || master_seed
  *            || u8 logn || u8 tau || u64le(block_index)
@@ -329,19 +332,25 @@ e8_block_rng_init(cmn_rng *rng,
 }
 
 /*
- * Per-worker sampler stream:
+ * Per-worker sampler stream, bound to the message, key and attempt as
+ * upstream HAWK's sampler streams are: prefix is the absorbing SHAKE256
+ * state of hm || K || enc32le(attempt + 1) (see e8_sampler_prefix_init()),
+ * seed is 40 bytes from the signing RNG, and
  *
- *   SHAKE256("HAWK-E8-CM worker sampler v1" || master_seed
+ *   SHAKE256(prefix || "HAWK-E8-CM worker sampler v2" || seed
  *            || u8 logn || u8 worker_id || u64le(range_start)
  *            || u64le(range_end) || u64le(sigma_sign bits))
+ *
+ * Without a prefix (sampler-only callers with no message) the stream
+ * starts from an empty SHAKE256 state.
  */
 static void
-e8_worker_rng_init(cmn_rng *rng,
-	const uint8_t master_seed[E8_MASTER_SEED_BYTES],
+e8_worker_rng_init(cmn_rng *rng, const shake_context *prefix,
+	const uint8_t seed[E8_BOUND_SEED_BYTES],
 	unsigned logn, unsigned worker_id, uint64_t range_start,
 	uint64_t range_end, uint64_t sigma_sign_bits)
 {
-	static const char domain[] = "HAWK-E8-CM worker sampler v1";
+	static const char domain[] = "HAWK-E8-CM worker sampler v2";
 	uint8_t label[26];
 
 	label[0] = (uint8_t)logn;
@@ -349,8 +358,29 @@ e8_worker_rng_init(cmn_rng *rng,
 	e8_enc64le(label + 2, range_start);
 	e8_enc64le(label + 10, range_end);
 	e8_enc64le(label + 18, sigma_sign_bits);
-	cmn_rng_init(rng, domain, sizeof domain - 1,
-		master_seed, E8_MASTER_SEED_BYTES, label, sizeof label);
+	if (prefix != NULL) {
+		cmn_rng_init_prefixed(rng, prefix, domain, sizeof domain - 1,
+			seed, E8_BOUND_SEED_BYTES, label, sizeof label);
+	} else {
+		cmn_rng_init(rng, domain, sizeof domain - 1,
+			seed, E8_BOUND_SEED_BYTES, label, sizeof label);
+	}
+}
+
+/* see hawk_e8_inner.h */
+uint64_t
+e8_sampler_prefix_init(shake_context *prefix, const uint8_t *hm,
+	const void *key, size_t key_len, uint32_t counter)
+{
+	uint8_t tbuf[4];
+	uint64_t perms;
+
+	enc32le(tbuf, counter);
+	shake_init(prefix, 256);
+	perms = cmn_rng_absorb(prefix, hm, 64);
+	perms += cmn_rng_absorb(prefix, key, key_len);
+	perms += cmn_rng_absorb(prefix, tbuf, sizeof tbuf);
+	return perms;
 }
 
 static unsigned
@@ -442,6 +472,11 @@ e8_sampler_apply_auto_policy(unsigned logn, size_t block_count,
 	unsigned configured_threads, unsigned *thread_count,
 	unsigned *rng_mode)
 {
+	/*
+	 * Automatic thread counts use the bound per-worker streams, also
+	 * when they resolve to one thread (one stream).
+	 */
+	(void)logn;
 	if (configured_threads != 0 || thread_count == NULL
 		|| rng_mode == NULL)
 	{
@@ -449,15 +484,8 @@ e8_sampler_apply_auto_policy(unsigned logn, size_t block_count,
 	}
 	if (*thread_count <= 1 || block_count < 2) {
 		*thread_count = 1;
-		*rng_mode = E8_SAMPLER_RNG_PER_BLOCK;
-		return;
 	}
-	if (logn >= 8 && logn <= 10) {
-		*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
-		return;
-	}
-	*thread_count = 1;
-	*rng_mode = E8_SAMPLER_RNG_PER_BLOCK;
+	*rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 }
 
 /* see hawk_e8_inner.h */
@@ -1615,6 +1643,7 @@ struct e8_sample_z_worker_args_s {
 	const uint8_t *t0;
 	const uint8_t *t1;
 	const uint8_t *master_seed;
+	const shake_context *prefix;
 	e8_ca_sigma_cache *cache;
 	unsigned logn;
 	unsigned worker_id;
@@ -1646,9 +1675,10 @@ e8_sample_z_worker_run(e8_sample_z_worker_args *args)
 	if (use_worker_rng) {
 		c0 = e8_profile_cycles_start();
 		w0 = e8_profile_wall_ns();
-		e8_worker_rng_init(&worker_stream, args->master_seed,
-			args->logn, args->worker_id, (uint64_t)args->start,
-			(uint64_t)args->end, args->sigma_sign_bits);
+		e8_worker_rng_init(&worker_stream, args->prefix,
+			args->master_seed, args->logn, args->worker_id,
+			(uint64_t)args->start, (uint64_t)args->end,
+			args->sigma_sign_bits);
 		e8_profile_add(&args->profile.cycles_block_rng_init,
 			&args->profile.wall_ns_block_rng_init, c0, w0);
 	}
@@ -1715,6 +1745,19 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 	unsigned logn, double sigma_sign, hawk_rng rng, void *rng_context,
 	e8_sampler_stats *stats)
 {
+	return e8_sample_z_construction_a_cm_ex(z0, z1, pnorm_out, t0, t1,
+		logn, sigma_sign, e8_sampler_rng_mode, NULL, 0,
+		rng, rng_context, stats);
+}
+
+/* see hawk_e8_inner.h */
+int
+e8_sample_z_construction_a_cm_ex(int32_t *z0, int32_t *z1,
+	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, double sigma_sign, unsigned rng_mode,
+	const shake_context *prefix, uint64_t prefix_permutations,
+	hawk_rng rng, void *rng_context, e8_sampler_stats *stats)
+{
 	if (logn < 8 || logn > 10 || z0 == NULL || z1 == NULL
 		|| pnorm_out == NULL || t0 == NULL || t1 == NULL
 		|| !(sigma_sign > 0.0) || rng == NULL)
@@ -1730,28 +1773,29 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 	size_t k = n >> 2;
 	unsigned configured_threads = e8_sampler_configured_thread_count();
 	unsigned thread_count = e8_sampler_resolve_thread_count(k, logn);
-	unsigned rng_mode = e8_sampler_rng_mode;
-	uint8_t master_seed[E8_MASTER_SEED_BYTES];
+	uint8_t master_seed[E8_BOUND_SEED_BYTES];
+	size_t seed_len;
 	uint64_t acc = 0;
 	e8_sample_z_worker_args worker_args[E8_SAMPLER_MAX_THREADS];
 	e8_sampler_profile profile;
 	uint64_t c0, w0;
 
+	rng_mode = rng_mode == E8_SAMPLER_RNG_PER_BLOCK
+		? E8_SAMPLER_RNG_PER_BLOCK : E8_SAMPLER_RNG_PER_WORKER;
 	if (thread_count == 0 || thread_count > E8_SAMPLER_MAX_THREADS) {
 		return 0;
 	}
 	e8_sampler_apply_auto_policy(logn, k, configured_threads,
 		&thread_count, &rng_mode);
-	if (thread_count == 1) {
-		rng_mode = E8_SAMPLER_RNG_PER_BLOCK;
-	}
+	seed_len = rng_mode == E8_SAMPLER_RNG_PER_WORKER
+		? E8_BOUND_SEED_BYTES : E8_MASTER_SEED_BYTES;
 	memset(&profile, 0, sizeof profile);
 	profile.worker_mode = thread_count == 1
 		? E8_SAMPLER_WORKER_SERIAL : E8_SAMPLER_WORKER_SPIN;
 	profile.rng_mode = rng_mode;
 	c0 = e8_profile_cycles_start();
 	w0 = e8_profile_wall_ns();
-	rng(rng_context, master_seed, sizeof master_seed);
+	rng(rng_context, master_seed, seed_len);
 	e8_profile_add(&profile.cycles_master_seed,
 		&profile.wall_ns_master_seed, c0, w0);
 	memset(z0, 0, n * sizeof *z0);
@@ -1767,6 +1811,8 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 		worker_args[u].t0 = t0;
 		worker_args[u].t1 = t1;
 		worker_args[u].master_seed = master_seed;
+		worker_args[u].prefix =
+			rng_mode == E8_SAMPLER_RNG_PER_WORKER ? prefix : NULL;
 		worker_args[u].cache = cache;
 		worker_args[u].logn = logn;
 		worker_args[u].worker_id = u;
@@ -1777,12 +1823,11 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 	}
 
 	/*
-	 * A serial call joins every pool thread, inside the call, and the
-	 * next threaded call starts them again inside its own call
-	 * (cmn_pool_dispatch() resizes the pool to thread_count - 1).
+	 * A serial call runs worker 0 directly and does not touch the
+	 * pool. A threaded call dispatches to the pool, which only grows
+	 * (cmn_pool.h); harnesses size it outside timed regions.
 	 */
 	if (thread_count == 1) {
-		cmn_pool_shrink(0);
 		e8_sample_z_worker_run(&worker_args[0]);
 	} else {
 		int dispatch_ok;
@@ -1842,6 +1887,9 @@ e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
 		&profile.wall_ns_reduction, c0, w0);
 
 	*pnorm_out = acc;
+	if (rng_mode == E8_SAMPLER_RNG_PER_WORKER && prefix != NULL) {
+		profile.rng.permutations += prefix_permutations;
+	}
 	cmn_rng_counters_add(&e8_sampler_rng_total, &profile.rng);
 	e8_sampler_last_profile = profile;
 	return 1;
