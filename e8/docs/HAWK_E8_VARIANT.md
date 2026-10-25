@@ -50,13 +50,18 @@ Q_E8 = B^* S_n B
 ```
 
 The implementation stores expanded `qtilde00`, `qtilde01`, `qtilde10`, and
-`qtilde11` values for tests and verification helpers.  Compressed E8 public
-keys are not implemented.
+`qtilde11` values for tests and verification helpers.  The public key format
+(see "Public API And Key Formats") stores `qtilde00` and `qtilde01`
+uncompressed; compressed E8 public keys are not implemented.
 
 ## Code Layout
 
 Core experimental sources:
 
+- `e8/src/hawk_e8.h`: public E8 API (key generation, signing with an
+  encoded or prepared private key, verification), mirroring `hawk.h`.
+- `e8/src/e8_api.c`: implementation of that API: key generation and key
+  formats, key preparation, signing entry points, verification.
 - `e8/src/hawk_e8_inner.h`: gated internal E8 declarations.
 - `e8/src/e8_math.c`: `P_n`, `S_n`, `Delta_n`, and `Q_E8` helpers.
 - `e8/src/e8_f2.c`: bit-packed F2 negacyclic arithmetic used for the signing
@@ -64,7 +69,9 @@ Core experimental sources:
 - `e8/src/e8_ntt.c`: shared internal NTT, inverse NTT, modular multiplication,
   and CRT helpers for verifier/signing arithmetic.
 - `e8/src/e8_sampler.c`: coset-matched Construction-A CM E8 sampler.
-- `e8/src/e8_sign.c`: dummy E8 signers and sampler-backed uncompressed signer.
+- `e8/src/e8_sign.c`: dummy E8 signers and the sampler-backed uncompressed
+  signing core shared by the internal `e8_sign_sampler_*` entry points and
+  the public API.
 - `e8/src/e8_vrfy.c`: uncompressed signature codec, sign symmetry break, and
   E8 completion-norm verifier.
 
@@ -205,6 +212,96 @@ e = w0 + q01 d
 
 Tests compare this completion norm with the expanded direct `Q_E8` norm.
 
+## Public API And Key Formats
+
+`e8/src/hawk_e8.h` gives the experimental scheme the same API boundary as
+ordinary HAWK (`src/hawk.h`), so that both can be timed through equivalent
+calls.  With the default `HAWK_PREFIX`, the public names are `hawk_e8_*`.
+
+| HAWK (`hawk.h`, shim) | E8 (`hawk_e8.h`) |
+| --- | --- |
+| `hawk_keygen` | `e8_keygen` |
+| `hawk_sign_start` | `e8_sign_start` (`= shake_init(sc, 256)`) |
+| `hawk_sign_finish` (encoded key) | `e8_sign_finish` (encoded key) |
+| `hawk_decode_private_key` | `e8_prepare_private_key` |
+| `hawk_shim_sign_finish_decoded` (decoded key) | `e8_sign_finish_prepared` (prepared key) |
+| `hawk_verify_finish` | `e8_verify_finish` |
+
+`hawk_shim_sign_finish_decoded()` (`e8/compare/hawk_shim.c`) exposes HAWK's
+static `sign_finish_inner()` with the normal SHAKE sampler and a decoded
+private key.  The public `hawk_sign_finish_alt()` also accepts a decoded key,
+but it switches to a different sampler and salt rule, so it is not HAWK's
+prepared-key mode for comparison purposes.
+
+Formats (experimental, uncompressed; `seed_len = 8 + n/32`,
+`hpub_len = n/16`, little-endian integers):
+
+```text
+encoded private key   kgseed (seed_len) || F (n x int8) || G (n x int8)
+                      || hpub (hpub_len)
+public key            q00 (n x int32) || q01 (n x int32)
+hpub                  SHAKE256(public key), first hpub_len bytes
+prepared private key  f, g, F, G, hpub, NTT basis, F2 basis
+                      (implementation-defined layout, aligned internally)
+signature             salt || s0 (n x int16) || s1 (n x int16)
+```
+
+| n | private key | prepared key | public key | signature |
+| ---: | ---: | ---: | ---: | ---: |
+| 256 | 544 | 40,960 | 2,048 | 1,038 |
+| 512 | 1,080 | 40,960 | 4,096 | 2,072 |
+| 1024 | 2,152 | 40,960 | 8,192 | 4,136 |
+
+The signer needs the full `F` and `G` (not only `F mod 2` and `G mod 2`, as in
+HAWK) for `w = B^-1 z`.  `f` and `g` are regenerated from `kgseed` with HAWK's
+`Hawk_regen_fg()`.  `e8_keygen()` calls HAWK's internal `Hawk_keygen()`, so
+`(f, g, F, G)` follow HAWK's key distribution exactly; the NTRU solver only
+accepts `F` and `G` with coefficients in `[-127, +127]`, which keygen asserts.
+Keygen additionally discards a basis whose `qtilde00` has a zero NTT
+coefficient modulo one of the verifier's primes (such a key could never
+verify; this has probability about `n/2^31` per prime).  The public key
+stores the two entries the completion-norm verifier uses; `qtilde10` is the
+adjoint of `qtilde01` and `qtilde11` is not needed.
+
+The prepared key holds the per-key NTT and F2 basis tables, whose fixed
+maximum-size layout makes it 40,960 bytes for every degree; it is valid only at
+the address where it was prepared.  Signing with an encoded key prepares the
+key in the caller's temporary buffer (`E8_TMPSIZE_SIGN(logn)` bytes) on every
+call; this is E8's true all-in cost.
+
+Signing semantics mirror `hawk_sign_finish()`:
+
+```text
+hm = SHAKE256(message || hpub)                                  once per call
+for attempt = 0, 2, 4, ...:
+    salt = SHAKE256(hm || K || enc32le(attempt) || rng(salt_len))
+    h    = SHAKE256(hm || salt)                                 2n bits
+    t    = B h mod 2;  z <- E8 sampler on 2R^2 + t              rng(32)
+    reject if ||P_n z||^2 > bound;  w = B^-1 z;  symmetry break
+    s    = (h - w) / 2;  reject if s does not fit int16;  encode
+```
+
+`K` is `kgseed` for an encoded key and `f || g` (2n bytes) for a prepared key,
+the same rule as HAWK's encoded/decoded split, and the attempt counter
+advances by 2 as in HAWK.  The RNG is called exactly twice per attempt in both
+schemes (salt, then sampler seed: 32 bytes for E8, 40 bytes for HAWK); the E8
+sampler derives its per-block or per-worker SHAKE streams from that seed, also
+with the worker pool enabled.  Attempts can therefore be counted identically
+for both schemes as `rng_calls / 2`.  The public API uses the prototype
+`sigma_sign` and default `sigma_verify` values below and caps attempts
+internally at 65,536 (HAWK loops until success).
+
+One difference remains: HAWK's sampler SHAKE instances also absorb
+`hm || K || enc32le(attempt + 1)` before the RNG seed, so its samples stay
+key- and message-bound even with a poor RNG; the E8 sampler is seeded from the
+RNG only.
+
+The older internal `e8_sign_sampler_*` functions keep their behaviour: they
+take raw `f, g, F, G` (and optionally prepared bases) and a caller-supplied
+salt that is reused for every attempt.  Both paths share
+`e8_sign_sampler_core()`, and the fixed-seed signature regression in
+`test_e8_sign_sampler` is unchanged.
+
 ## Signature Format
 
 Only an uncompressed experimental E8 signature is implemented:
@@ -304,6 +401,9 @@ test_e8_sign          dummy E8 signing algebra and encoding
 test_e8_sampler       block/full sampler support, cosets, and norms
 test_e8_sign_sampler  sampler-backed uncompressed sign/verify, dynamic-range
                       diagnostic, and fixed-seed signature regression
+test_e8_api           public API: keygen/sign (encoded and prepared)/verify
+                      round trips, tampering, HAWK salt construction, RNG
+                      calls per attempt, and the HAWK prepared-key shim
 ```
 
 ## Diagnostics And CSV Outputs
@@ -359,10 +459,12 @@ make -C e8 sign-bench
 make -C e8 profile-sign-bench
 ```
 
-`sign-bench` writes `e8/e8_sign_bench.csv`.
-`profile-sign-bench` builds the dedicated signature benchmark with
-`HAWK_E8_PROFILE_SIGN=1` and prints per-stage E8 signing timings to the
-terminal.  For optimization timing, build profile runs with
+`sign-bench` writes `e8/e8_sign_bench.csv`: HAWK and E8 signed through
+their own `sign_finish` calls under the same two accounting modes (`all_in`,
+`prepared`), one CSV row per signature, every signature verified.
+`profile-sign-bench` builds the same benchmark with `HAWK_E8_PROFILE_SIGN=1`
+and prints per-stage E8 signing timings (including key preparation and salt
+derivation) to the terminal.  For optimization timing, build profile runs with
 `HAWK_E8_DEBUG_CHECKS=0`; debug-check builds deliberately retain schoolbook
 cross-checks for the reconstructed signer coefficients.  The final symmetric
 HAWK/E8 accounting, methods, and reproduction commands are recorded in
@@ -429,7 +531,8 @@ statistical proof of sampler distribution.
 - Data-dependent, non-constant-time sampling and signing paths.
 - No AVX2 E8 implementation.
 - No compressed E8 public key or signature format.
-- No production E8 key format.
+- The E8 key formats are experimental and uncompressed, not production
+  formats.
 - No side-channel hardening.
 - No full qROM-style unforgeability proof or complete HAWK security reduction for the modified public-form class.
 - Only the HAWK-style publicly computable isometry/orbit structure is analysed; a complete automorphism-aware cryptanalysis of the E8 preconditioned public-form class remains to be done.

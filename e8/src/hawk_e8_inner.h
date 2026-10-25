@@ -2,6 +2,7 @@
 #define HAWK_E8_INNER_H__
 
 #include "hawk_inner.h"
+#include "hawk_e8.h"
 
 #ifndef HAWK_ENABLE_E8_EXPERIMENTAL
 #define HAWK_ENABLE_E8_EXPERIMENTAL   0
@@ -60,6 +61,8 @@
 #define e8_sign_sampler_trace_uncompressed  Zh(e8_sign_sampler_trace_uncompressed)
 #define e8_sign_sampler_trace_timed_uncompressed  Zh(e8_sign_sampler_trace_timed_uncompressed)
 #define e8_sign_sampler_trace_timed_uncompressed_prepared  Zh(e8_sign_sampler_trace_timed_uncompressed_prepared)
+#define e8_sign_sampler_core  Zh(e8_sign_sampler_core)
+#define e8_sign_finish_inner  Zh(e8_sign_finish_inner)
 #define e8_extract_tau  Zh(e8_extract_tau)
 #define e8_write_block  Zh(e8_write_block)
 #define e8_read_block  Zh(e8_read_block)
@@ -119,12 +122,16 @@ typedef struct {
 	uint64_t wall_ns_sample_last;
 #if HAWK_E8_PROFILE_SIGN
 	uint64_t cycles_sign_total;
+	uint64_t cycles_prepare_total;
+	uint64_t cycles_salt_total;
 	uint64_t cycles_hash_total;
 	uint64_t cycles_target_total;
 	uint64_t cycles_reconstruct_total;
 	uint64_t cycles_norm_check_total;
 	uint64_t cycles_encode_total;
 	uint64_t wall_ns_sign_total;
+	uint64_t wall_ns_prepare_total;
+	uint64_t wall_ns_salt_total;
 	uint64_t wall_ns_hash_total;
 	uint64_t wall_ns_target_total;
 	uint64_t wall_ns_reconstruct_total;
@@ -372,6 +379,47 @@ int e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 	int32_t *trace_z0, int32_t *trace_z1,
 	int64_t *trace_pnorm, unsigned *trace_attempts,
 	e8_sign_trace_timing *trace_timing);
+
+/*
+ * Shared core of all sampler-backed signers.  If salt is non-NULL, it is
+ * used unchanged for every attempt, and h and the target coset are
+ * computed once (the e8_sign_sampler_* entry points above).  If salt is
+ * NULL, each attempt derives a fresh salt exactly as HAWK does:
+ *
+ *   salt = SHAKE256(hm || salt_key || enc32le(2*attempt) || rng(salt_len))
+ *
+ * where hm = SHAKE256(message || hpub), then recomputes h and the target
+ * coset (the hawk_e8.h API).  In that mode the RNG is invoked twice per
+ * attempt: salt_len bytes, then the sampler's 32-byte seed.
+ */
+int e8_sign_sampler_core(unsigned logn,
+	void *sig, size_t sig_len, const shake_context *sc_data,
+	const void *hpub, size_t hpub_len,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G,
+	const e8_inverse_w_ntt_basis *basis_ntt,
+	const e8_coset_f2_basis *basis_f2, const uint8_t *salt,
+	const void *salt_key, size_t salt_key_len,
+	double sigma_sign, double sigma_verify,
+	unsigned max_attempts, hawk_rng rng, void *rng_context,
+	int32_t *trace_z0, int32_t *trace_z1,
+	int64_t *trace_pnorm, unsigned *trace_attempts,
+	e8_sign_trace_timing *trace_timing);
+
+/*
+ * Implementation of e8_sign_finish() and e8_sign_finish_prepared() (see
+ * hawk_e8.h), with the key format selected by priv_len as in HAWK's
+ * sign_finish_inner(): E8_PRIVKEY_SIZE(logn) for an encoded key, or
+ * E8_PRIVKEY_PREPARED_SIZE(logn) for a prepared key.  trace_attempts
+ * (optional) receives the number of attempts; trace_timing (optional)
+ * receives the sampler timing and, with HAWK_E8_PROFILE_SIGN, the
+ * per-stage profile including key preparation.
+ */
+int e8_sign_finish_inner(unsigned logn,
+	hawk_rng rng, void *rng_context,
+	void *sig, const shake_context *sc_data,
+	const void *priv, size_t priv_len, void *tmp, size_t tmp_len,
+	unsigned *trace_attempts, e8_sign_trace_timing *trace_timing);
 
 /*
  * Experimental E8 sampler helpers.  These are floating-point,

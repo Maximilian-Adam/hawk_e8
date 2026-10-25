@@ -14,3 +14,16 @@ hawk_shim_sig_gauss(unsigned logn, hawk_rng rng, void *rng_context,
 {
 	return sig_gauss(logn, rng, rng_context, sc_extra, x, t);
 }
+
+/* see hawk_shim.h */
+int
+hawk_shim_sign_finish_decoded(unsigned logn, hawk_rng rng,
+	void *rng_context, void *sig, const shake_context *sc_data,
+	const void *priv_decoded, void *tmp, size_t tmp_len)
+{
+	if (logn < 8 || logn > 10) {
+		return 0;
+	}
+	return sign_finish_inner(logn, 1, rng, rng_context, sig, sc_data,
+		priv_decoded, HAWK_PRIVKEY_DECODED_SIZE(logn), tmp, tmp_len);
+}

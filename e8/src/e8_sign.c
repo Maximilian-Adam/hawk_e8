@@ -126,25 +126,70 @@ get_bit(const uint8_t *buf, size_t u)
 	return (buf[u >> 3] >> (u & 7)) & 1u;
 }
 
+/*
+ * hm <- SHAKE256(message || hpub)  (64 bytes)
+ */
 static void
-hash_to_h(unsigned logn, uint8_t *h,
-	const shake_context *sc_data, const void *hpub,
-	const uint8_t *salt, size_t salt_len)
+hash_message(unsigned logn, uint8_t *hm,
+	const shake_context *sc_data, const void *hpub)
 {
-	uint8_t hm[64];
 	size_t hpub_len = (size_t)1 << (logn - 4);
 	shake_context scd;
 
 	scd = *sc_data;
 	shake_inject(&scd, hpub, hpub_len);
 	shake_flip(&scd);
-	shake_extract(&scd, hm, sizeof hm);
+	shake_extract(&scd, hm, 64);
+}
+
+/*
+ * h <- SHAKE256(hm || salt)  (2*n bits)
+ */
+static void
+hash_challenge(unsigned logn, uint8_t *h,
+	const uint8_t *hm, const uint8_t *salt, size_t salt_len)
+{
+	shake_context scd;
 
 	shake_init(&scd, 256);
-	shake_inject(&scd, hm, sizeof hm);
+	shake_inject(&scd, hm, 64);
 	shake_inject(&scd, salt, salt_len);
 	shake_flip(&scd);
 	shake_extract(&scd, h, (size_t)1 << (logn - 2));
+}
+
+static void
+hash_to_h(unsigned logn, uint8_t *h,
+	const shake_context *sc_data, const void *hpub,
+	const uint8_t *salt, size_t salt_len)
+{
+	uint8_t hm[64];
+
+	hash_message(logn, hm, sc_data, hpub);
+	hash_challenge(logn, h, hm, salt, salt_len);
+}
+
+/*
+ * Per-attempt salt, with the same construction as HAWK's
+ * sign_finish_inner() in SHAKE mode: on input, salt holds salt_len bytes
+ * from the RNG; on output,
+ *   salt = SHAKE256(hm || salt_key || enc32le(counter) || salt).
+ */
+static void
+derive_salt(uint8_t *salt, size_t salt_len, const uint8_t *hm,
+	const void *salt_key, size_t salt_key_len, uint32_t counter)
+{
+	shake_context scd;
+	uint8_t tbuf[4];
+
+	enc32le(tbuf, counter);
+	shake_init(&scd, 256);
+	shake_inject(&scd, hm, 64);
+	shake_inject(&scd, salt_key, salt_key_len);
+	shake_inject(&scd, tbuf, sizeof tbuf);
+	shake_inject(&scd, salt, salt_len);
+	shake_flip(&scd);
+	shake_extract(&scd, salt, salt_len);
 }
 
 static void
@@ -627,13 +672,14 @@ e8_sign_dummy_uncompressed(unsigned logn,
 
 /* see hawk_e8_inner.h */
 int
-e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
+e8_sign_sampler_core(unsigned logn,
 	void *sig, size_t sig_len, const shake_context *sc_data,
 	const void *hpub, size_t hpub_len,
 	const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G,
 	const e8_inverse_w_ntt_basis *basis_ntt,
 	const e8_coset_f2_basis *basis_f2, const uint8_t *salt,
+	const void *salt_key, size_t salt_key_len,
 	double sigma_sign, double sigma_verify,
 	unsigned max_attempts, hawk_rng rng, void *rng_context,
 	int32_t *trace_z0, int32_t *trace_z1,
@@ -641,8 +687,10 @@ e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 	e8_sign_trace_timing *trace_timing)
 {
 	size_t salt_len = e8_salt_len(logn);
-	uint8_t h[256], h0b[E8_MAXN], h1b[E8_MAXN];
+	uint8_t hm[64], h[256], h0b[E8_MAXN], h1b[E8_MAXN];
 	uint8_t t0[E8_MAXN], t1[E8_MAXN];
+	uint8_t attempt_salt[40];
+	const uint8_t *sig_salt;
 	int32_t z0[E8_MAXN], z1[E8_MAXN];
 	int16_t s0[E8_MAXN], s1[E8_MAXN];
 	int64_t threshold;
@@ -669,7 +717,8 @@ e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 		|| hpub_len != ((size_t)1 << (logn - 4))
 		|| sig == NULL || sc_data == NULL || hpub == NULL
 		|| f == NULL || g == NULL || F == NULL || G == NULL
-		|| basis_ntt == NULL || basis_f2 == NULL || salt == NULL
+		|| basis_ntt == NULL || basis_f2 == NULL
+		|| (salt == NULL && (salt_key == NULL || salt_key_len == 0))
 		|| basis_ntt->magic != E8_INVERSE_W_NTT_MAGIC
 		|| basis_f2->magic != E8_COSET_F2_MAGIC
 		|| basis_ntt->logn != logn || basis_f2->logn != logn
@@ -708,9 +757,20 @@ e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 		sign_profile_stage_start(&stage_c0, &stage_w0);
 	}
 #endif
-	hash_to_h(logn, h, sc_data, hpub, salt, salt_len);
-	bits_to_poly(z0, h0b, h, 0, n);
-	bits_to_poly(z1, h1b, h, n, n);
+	/*
+	 * hm = SHAKE256(message || hpub) is computed once per call. With a
+	 * caller-supplied salt, h and the target coset t are computed once
+	 * as well; otherwise they are recomputed for each attempt's salt.
+	 */
+	hash_message(logn, hm, sc_data, hpub);
+	if (salt != NULL) {
+		sig_salt = salt;
+		hash_challenge(logn, h, hm, salt, salt_len);
+		bits_to_poly(z0, h0b, h, 0, n);
+		bits_to_poly(z1, h1b, h, n, n);
+	} else {
+		sig_salt = attempt_salt;
+	}
 #if HAWK_E8_PROFILE_SIGN
 	if (trace_timing != NULL) {
 		sign_profile_stage_add(&trace_timing->cycles_hash_total,
@@ -719,7 +779,9 @@ e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 		sign_profile_stage_start(&stage_c0, &stage_w0);
 	}
 #endif
-	e8_compute_t_mod2_prepared(t0, t1, basis_f2, h0b, h1b, n);
+	if (salt != NULL) {
+		e8_compute_t_mod2_prepared(t0, t1, basis_f2, h0b, h1b, n);
+	}
 #if HAWK_E8_PROFILE_SIGN
 	if (trace_timing != NULL) {
 		sign_profile_stage_add(&trace_timing->cycles_target_total,
@@ -739,6 +801,53 @@ e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 			trace_timing->attempts_total ++;
 		}
 #endif
+		if (salt == NULL) {
+			/*
+			 * Fresh salt for this attempt, as in HAWK: the RNG
+			 * provides salt_len bytes, which are hashed with hm,
+			 * the key material and the HAWK attempt counter
+			 * (0, 2, 4, ...).
+			 */
+#if HAWK_E8_PROFILE_SIGN
+			if (trace_timing != NULL) {
+				sign_profile_stage_start(&stage_c0, &stage_w0);
+			}
+#endif
+			rng(rng_context, attempt_salt, salt_len);
+			derive_salt(attempt_salt, salt_len, hm,
+				salt_key, salt_key_len, (uint32_t)attempt << 1);
+#if HAWK_E8_PROFILE_SIGN
+			if (trace_timing != NULL) {
+				sign_profile_stage_add(
+					&trace_timing->cycles_salt_total,
+					&trace_timing->wall_ns_salt_total,
+					stage_c0, stage_w0);
+				sign_profile_stage_start(&stage_c0, &stage_w0);
+			}
+#endif
+			hash_challenge(logn, h, hm, attempt_salt, salt_len);
+			bits_to_poly(z0, h0b, h, 0, n);
+			bits_to_poly(z1, h1b, h, n, n);
+#if HAWK_E8_PROFILE_SIGN
+			if (trace_timing != NULL) {
+				sign_profile_stage_add(
+					&trace_timing->cycles_hash_total,
+					&trace_timing->wall_ns_hash_total,
+					stage_c0, stage_w0);
+				sign_profile_stage_start(&stage_c0, &stage_w0);
+			}
+#endif
+			e8_compute_t_mod2_prepared(t0, t1,
+				basis_f2, h0b, h1b, n);
+#if HAWK_E8_PROFILE_SIGN
+			if (trace_timing != NULL) {
+				sign_profile_stage_add(
+					&trace_timing->cycles_target_total,
+					&trace_timing->wall_ns_target_total,
+					stage_c0, stage_w0);
+			}
+#endif
+		}
 		sample_c0 = trace_cycles_start();
 		sample_w0 = trace_wall_ns();
 		int sample_ok = e8_sample_z_construction_a_cm(z0, z1, &pnorm_u,
@@ -837,7 +946,7 @@ e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 		}
 #endif
 		int encode_ok = e8_encode_sig_uncompressed(logn,
-			sig, sig_len, salt, s0, s1);
+			sig, sig_len, sig_salt, s0, s1);
 #if HAWK_E8_PROFILE_SIGN
 		if (trace_timing != NULL) {
 			sign_profile_stage_add(&trace_timing->cycles_encode_total,
@@ -876,6 +985,35 @@ e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 	sign_profile_finish(trace_timing, sign_c0, sign_w0);
 #endif
 	return 0;
+}
+
+/* see hawk_e8_inner.h */
+int
+e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
+	void *sig, size_t sig_len, const shake_context *sc_data,
+	const void *hpub, size_t hpub_len,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G,
+	const e8_inverse_w_ntt_basis *basis_ntt,
+	const e8_coset_f2_basis *basis_f2, const uint8_t *salt,
+	double sigma_sign, double sigma_verify,
+	unsigned max_attempts, hawk_rng rng, void *rng_context,
+	int32_t *trace_z0, int32_t *trace_z1,
+	int64_t *trace_pnorm, unsigned *trace_attempts,
+	e8_sign_trace_timing *trace_timing)
+{
+	if (salt == NULL) {
+		if (trace_timing != NULL) {
+			memset(trace_timing, 0, sizeof *trace_timing);
+		}
+		return 0;
+	}
+	return e8_sign_sampler_core(logn,
+		sig, sig_len, sc_data, hpub, hpub_len,
+		f, g, F, G, basis_ntt, basis_f2, salt, NULL, 0,
+		sigma_sign, sigma_verify, max_attempts, rng, rng_context,
+		trace_z0, trace_z1, trace_pnorm, trace_attempts,
+		trace_timing);
 }
 
 /* see hawk_e8_inner.h */

@@ -15,14 +15,16 @@ HAWK_OBJ_NOSIGN = $(filter-out build/hawk/hawk_sign.o,$(HAWK_OBJ))
 HAWK_SHIM_OBJ = build/hawk_shim.o
 E8_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_vrfy.o build/e8_sign.o
 E8_SAMPLER_OBJ = build/e8_sampler.o
+E8_API_OBJ = build/e8_api.o
+E8_PROFILE_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_vrfy.o build/profile/e8_sign.o build/profile/e8_api.o
 
-E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler
+E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler bin/test_e8_api
 E8_TOOL_PROGS = bin/e8_histograms bin/e8_rejection_summary bin/e8_validation_summary
 E8_BENCH_PROGS = bin/e8_sampler_bench bin/e8_sign_bench bin/e8_sign_profile_bench bin/hawk_sign_profile_bench
 HAWK_PROFILE_SIGN_SOURCE = build/hawk_sign_profile.c
 
 HAWK_HEAD = $(HAWK_STAMP)
-E8_HEAD = src/hawk_e8_inner.h $(HAWK_HEAD)
+E8_HEAD = src/hawk_e8_inner.h src/hawk_e8.h $(HAWK_HEAD)
 E8_INC = -I$(HAWK_DIR)
 E8_CFLAGS = $(CFLAGS) -DHAWK_ENABLE_E8_EXPERIMENTAL=1
 E8_PROFILE_SIGN_CFLAGS = $(E8_CFLAGS) -DHAWK_E8_PROFILE_SIGN=1
@@ -39,6 +41,7 @@ test-e8: build bin $(E8_TEST_PROGS)
 	./bin/test_e8_sign
 	./bin/test_e8_sampler
 	./bin/test_e8_sign_sampler
+	./bin/test_e8_api
 e8-histograms: build bin bin/e8_histograms
 	./bin/e8_histograms
 sampler-bench: build bin bin/e8_sampler_bench
@@ -65,7 +68,7 @@ e8-sigma-sign-sweep: build bin bin/e8_rejection_summary
 	@printf 'wrote e8_sigma_sign_sweep.csv\n'
 
 build:
-	-mkdir -p build/hawk
+	-mkdir -p build/hawk build/profile
 bin:
 	-mkdir -p bin
 clean:
@@ -96,6 +99,8 @@ bin/test_e8_sampler: tests/test_e8_sampler.c build/e8_math.o build/hawk/sha3.o $
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_sampler tests/test_e8_sampler.c build/e8_math.o build/hawk/sha3.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/test_e8_sign_sampler: tests/test_e8_sign_sampler.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_sign_sampler tests/test_e8_sign_sampler.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/test_e8_api: tests/test_e8_api.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_api tests/test_e8_api.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 
 # Tools
 bin/e8_histograms: tools/e8_histograms.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ)
@@ -108,10 +113,10 @@ bin/e8_validation_summary: tools/e8_validation_summary.c compare/hawk_shim.h $(H
 # Comparison benchmarks
 bin/e8_sampler_bench: compare/e8_sampler_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_sampler_bench compare/e8_sampler_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
-bin/e8_sign_bench: compare/e8_sign_bench.c src/e8_vrfy.c src/e8_sign.c $(E8_HEAD) $(HAWK_OBJ) build/e8_math.o build/e8_f2.o build/e8_ntt.o $(E8_SAMPLER_OBJ)
-	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_sign_bench compare/e8_sign_bench.c $(HAWK_OBJ) build/e8_math.o build/e8_f2.o build/e8_ntt.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
-bin/e8_sign_profile_bench: compare/e8_sign_bench.c src/e8_vrfy.c src/e8_sign.c $(E8_HEAD) $(HAWK_OBJ) build/e8_math.o build/e8_f2.o build/e8_ntt.o $(E8_SAMPLER_OBJ)
-	$(CC) $(E8_PROFILE_SIGN_CFLAGS) $(E8_INC) -o bin/e8_sign_profile_bench compare/e8_sign_bench.c $(HAWK_OBJ) build/e8_math.o build/e8_f2.o build/e8_ntt.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_sign_bench: compare/e8_sign_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_sign_bench compare/e8_sign_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_sign_profile_bench: compare/e8_sign_bench.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_PROFILE_SIGN_CFLAGS) $(E8_INC) -o bin/e8_sign_profile_bench compare/e8_sign_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/hawk_sign_profile_bench: compare/hawk_sign_profile_bench.c $(HAWK_PROFILE_SIGN_SOURCE) $(HAWK_OBJ_NOSIGN)
 	$(CC) $(HAWK_PROFILE_SIGN_CFLAGS) -I$(HAWK_DIR) -o bin/hawk_sign_profile_bench compare/hawk_sign_profile_bench.c $(HAWK_OBJ_NOSIGN) $(LIBS)
 
@@ -159,5 +164,16 @@ build/e8_vrfy.o: src/e8_vrfy.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_vrfy.o src/e8_vrfy.c
 build/e8_sign.o: src/e8_sign.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_sign.o src/e8_sign.c
+build/e8_api.o: src/e8_api.c $(E8_HEAD)
+	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_api.o src/e8_api.c
 build/e8_sampler.o: src/e8_sampler.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -c -o build/e8_sampler.o src/e8_sampler.c
+
+# E8 signing objects with per-stage profiling (HAWK_E8_PROFILE_SIGN=1), used
+# only by the profile benchmark; the profile changes e8_sign_trace_timing.
+build/profile/e8_sign.o: src/e8_sign.c $(E8_HEAD)
+	-mkdir -p build/profile
+	$(CC) $(E8_PROFILE_SIGN_CFLAGS) $(E8_INC) -c -o build/profile/e8_sign.o src/e8_sign.c
+build/profile/e8_api.o: src/e8_api.c $(E8_HEAD)
+	-mkdir -p build/profile
+	$(CC) $(E8_PROFILE_SIGN_CFLAGS) $(E8_INC) -c -o build/profile/e8_api.o src/e8_api.c
