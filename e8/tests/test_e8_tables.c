@@ -365,6 +365,33 @@ distribution_hot32(unsigned logn)
  * by floor(k / 4); value lo + j has probability (T[j-1] - T[j]) / 2^78
  * with T[-1] = 2^78 and T[j] = 0 past the table.
  */
+static void
+ref_moments(const e8_ref_tables *g, unsigned j, long double *mean,
+	long double *var)
+{
+	int64_t c = e8_tab_center_num32[j];
+	unsigned kk = (unsigned)((c + 32) >> 3);
+	unsigned res = kk & 3;
+	int32_t lo = (int32_t)(kk >> 2) - 1 + g->lo_value[res];
+	long double scale = ldexpl(1.0L, 78), prev = scale;
+	long double m1 = 0.0L, m2 = 0.0L;
+
+	for (unsigned i = 0; i <= E8_REF_1D_LEN; i ++) {
+		long double t = i < E8_REF_1D_LEN
+			? ldexpl((long double)g->hi[res][i], 63)
+				+ (long double)g->lo[res][i]
+			: 0.0L;
+		long double p = (prev - t) / scale;
+		int32_t v = lo + (int32_t)i;
+
+		m1 += p * v;
+		m2 += p * v * v;
+		prev = t;
+	}
+	*mean = m1;
+	*var = m2 - m1 * m1;
+}
+
 static int
 distribution_ref(unsigned logn)
 {
@@ -373,28 +400,11 @@ distribution_ref(unsigned logn)
 
 	for (unsigned j = 0; j < E8_TAB_CLASSES; j ++) {
 		int64_t c = e8_tab_center_num32[j];
-		unsigned kk = (unsigned)((c + 32) >> 3);
-		unsigned res = kk & 3;
-		int32_t lo = (int32_t)(kk >> 2) - 1 + g->lo_value[res];
-		long double scale = ldexpl(1.0L, 78), prev = scale;
-		long double m1 = 0.0L, m2 = 0.0L, mean, var;
+		long double mean, var;
 		uint8_t seed[2] = { (uint8_t)logn, (uint8_t)j };
 		cmn_rng s;
 
-		for (unsigned i = 0; i <= E8_REF_1D_LEN; i ++) {
-			long double t = i < E8_REF_1D_LEN
-				? ldexpl((long double)g->hi[res][i], 63)
-					+ (long double)g->lo[res][i]
-				: 0.0L;
-			long double p = (prev - t) / scale;
-			int32_t v = lo + (int32_t)i;
-
-			m1 += p * v;
-			m2 += p * v * v;
-			prev = t;
-		}
-		mean = m1;
-		var = m2 - m1 * m1;
+		ref_moments(g, j, &mean, &var);
 		cmn_rng_init(&s, "test_e8_tables ref", 18, seed, 2, NULL, 0);
 		for (size_t u = 0; u < REF_DIST_SAMPLES; u ++) {
 			if (!e8_ref_sample_1d(g, c, &s, &x[u])) {
@@ -410,9 +420,60 @@ distribution_ref(unsigned logn)
 	return 1;
 }
 
-int
-main(void)
+/*
+ * --moments: print the exact moments of every 1D table (the values the
+ * distribution checks use) as CSV lines, for the precision audit
+ * (tools/precision_audit.py --c-moments), and exit.
+ */
+static void
+print_moments(void)
 {
+	for (unsigned logn = 8; logn <= 10; logn ++) {
+		const e8_hot64_tables *g64 = e8_hot64_tables_get(logn);
+		const e8_hot32_tables *g32 = e8_hot32_tables_get(logn);
+		const e8_ref_tables *gr = e8_ref_tables_get(logn);
+
+		for (unsigned j = 0; j < E8_TAB_CLASSES; j ++) {
+			const e8_hot64_row *r64 = &g64->rows[j];
+			const e8_hot32_row *r32 = &g32->rows[j];
+			uint64_t tiny_cdf[E8_HOT32_TINY_LEN];
+			uint64_t tail_cdf[E8_HOT32_TAIL_LEN_MAX];
+			long double mean, var;
+
+			ref_moments(gr, j, &mean, &var);
+			printf("moments,e8,ref,%u,%u,%.21Le,%.21Le\n",
+				logn, j, mean, var);
+			hot_moments(64, r64->tiny_len, r64->tiny_value,
+				r64->tiny_cdf, r64->tail_len, r64->tail_value,
+				r64->tail_cdf, &mean, &var);
+			printf("moments,e8,hot64,%u,%u,%.21Le,%.21Le\n",
+				logn, j, mean, var);
+			for (unsigned i = 0; i < r32->tiny_len; i ++) {
+				tiny_cdf[i] = r32->tiny_cdf[i];
+			}
+			for (unsigned i = 0; i < r32->tail_len; i ++) {
+				tail_cdf[i] = r32->tail_cdf[i];
+			}
+			hot_moments(32, r32->tiny_len, r32->tiny_value,
+				tiny_cdf, r32->tail_len, r32->tail_value,
+				tail_cdf, &mean, &var);
+			printf("moments,e8,hot32,%u,%u,%.21Le,%.21Le\n",
+				logn, j, mean, var);
+		}
+	}
+}
+
+int
+main(int argc, char **argv)
+{
+	if (argc > 1) {
+		if (argc == 2 && strcmp(argv[1], "--moments") == 0) {
+			print_moments();
+			return 0;
+		}
+		fprintf(stderr, "usage: %s [--moments]\n", argv[0]);
+		return 2;
+	}
 	for (unsigned logn = 8; logn <= 10; logn ++) {
 		if (!compare_hot64(logn)) {
 			return 1;

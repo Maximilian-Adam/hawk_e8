@@ -386,6 +386,21 @@ counts them); hot values agree, sampling on either table set gives the same
 outputs in the tests, and none of the fixed-seed vectors contains a tail
 draw, so the integer tail left them unchanged.
 
+### Precision
+
+`make precision-audit` (`e8/tools/precision_audit.py`) computes, from the
+committed tables and with one set of measures for both schemes, the exact
+implemented distribution of every draw and its statistical distance and
+Renyi divergence `R_a(P_impl || P_ideal)` (orders and criteria of
+hawk-spec.pdf, section 6.5) per draw, per coordinate or block, and per
+signature.  Method, results and findings: `docs/precision_audit.md`;
+per-variant summary (joined onto timing rows in Step 7):
+`docs/precision_summary.csv`.  In short, the SD at equal width is within
+about 2 bits between the schemes (78 bits: about 2^-66 per signature).  The
+order-513 divergence is decided by single extreme-tail entries, which the
+generator's end rules round up: the last hot tail entry, and E8 `ref`'s `lo`
+for the residue-1/2 classes.  HAWK `ref` reproduces the spec's figures.
+
 ## Signing And Verification
 
 The sampler-backed signer samples in the internal E8 coordinate coset:

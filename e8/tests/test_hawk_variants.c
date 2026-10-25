@@ -515,6 +515,38 @@ ref_moments(unsigned logn, unsigned p, long double *mean, long double *var)
 	*var = m2;
 }
 
+/*
+ * Exact moments of variant v's 1D table for parity p.
+ */
+static void
+variant_moments(const hawk_sampler_variant *v, unsigned logn, unsigned p,
+	long double *mean, long double *var)
+{
+	if (v->threshold_bits == 78) {
+		ref_moments(logn, p, mean, var);
+	} else if (v->threshold_bits == 64) {
+		const hawk_hot64_row *r = &((const hawk_hot64_tables *)
+			v->tables(logn))->rows[p];
+
+		hot_moments(64, r->tiny_len, r->tiny_value, r->tiny_cdf,
+			r->tail_len, r->tail_value, r->tail_cdf, mean, var);
+	} else {
+		const hawk_hot32_row *r = &((const hawk_hot32_tables *)
+			v->tables(logn))->rows[p];
+		uint64_t tq[HAWK_HOT32_TINY_LEN];
+		uint64_t lq[HAWK_HOT32_TAIL_LEN_MAX];
+
+		for (unsigned i = 0; i < r->tiny_len; i ++) {
+			tq[i] = r->tiny_cdf[i];
+		}
+		for (unsigned i = 0; i < r->tail_len; i ++) {
+			lq[i] = r->tail_cdf[i];
+		}
+		hot_moments(32, r->tiny_len, r->tiny_value, tq,
+			r->tail_len, r->tail_value, lq, mean, var);
+	}
+}
+
 static int
 distribution(unsigned logn)
 {
@@ -532,33 +564,7 @@ distribution(unsigned logn)
 			cmn_rng s;
 
 			memset(t, p ? 0xFF : 0x00, sizeof t);
-			if (v->threshold_bits == 78) {
-				ref_moments(logn, p, &mean, &var);
-			} else if (v->threshold_bits == 64) {
-				const hawk_hot64_row *r = &((const
-					hawk_hot64_tables *)v->tables(logn))
-					->rows[p];
-
-				hot_moments(64, r->tiny_len, r->tiny_value,
-					r->tiny_cdf, r->tail_len, r->tail_value,
-					r->tail_cdf, &mean, &var);
-			} else {
-				const hawk_hot32_row *r = &((const
-					hawk_hot32_tables *)v->tables(logn))
-					->rows[p];
-				uint64_t tq[HAWK_HOT32_TINY_LEN];
-				uint64_t lq[HAWK_HOT32_TAIL_LEN_MAX];
-
-				for (unsigned i = 0; i < r->tiny_len; i ++) {
-					tq[i] = r->tiny_cdf[i];
-				}
-				for (unsigned i = 0; i < r->tail_len; i ++) {
-					lq[i] = r->tail_cdf[i];
-				}
-				hot_moments(32, r->tiny_len, r->tiny_value, tq,
-					r->tail_len, r->tail_value, lq,
-					&mean, &var);
-			}
+			variant_moments(v, logn, p, &mean, &var);
 			cmn_rng_init(&s, "test_hawk_variants", 18, seed, 3,
 				NULL, 0);
 			if (!v->range(v->tables(logn), logn, x, t, 0,
@@ -578,9 +584,41 @@ distribution(unsigned logn)
 	return 1;
 }
 
-int
-main(void)
+/*
+ * --moments: print the exact moments of every variant's 1D tables (the
+ * values the distribution check uses) as CSV lines, for the precision
+ * audit (tools/precision_audit.py --c-moments), and exit.
+ */
+static void
+print_moments(void)
 {
+	for (unsigned logn = 8; logn <= 10; logn ++) {
+		for (size_t vi = 1; vi < hawk_sampler_variant_count; vi ++) {
+			const hawk_sampler_variant *v =
+				&hawk_sampler_variants[vi];
+
+			for (unsigned p = 0; p < 2; p ++) {
+				long double mean, var;
+
+				variant_moments(v, logn, p, &mean, &var);
+				printf("moments,hawk,%s,%u,%u,%.21Le,%.21Le\n",
+					v->name, logn, p, mean, var);
+			}
+		}
+	}
+}
+
+int
+main(int argc, char **argv)
+{
+	if (argc > 1) {
+		if (argc == 2 && strcmp(argv[1], "--moments") == 0) {
+			print_moments();
+			return 0;
+		}
+		fprintf(stderr, "usage: %s [--moments]\n", argv[0]);
+		return 2;
+	}
 	for (unsigned logn = 8; logn <= 10; logn ++) {
 		printf("HAWK variants n=%u:\n", 1u << logn);
 		if (!tables_equal_upstream(logn) || !signer_is_upstream(logn)) {

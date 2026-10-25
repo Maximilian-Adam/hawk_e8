@@ -34,7 +34,9 @@ e8/
                 cmn_csv     CSV writer and the per-signature schema
   tests/      E8 correctness tests (test_e8_*.c), test_hawk_variants.c and
               test_cmn_common.c
-  tools/      diagnostics: histograms, rejection summary, validation summary
+  tools/      diagnostics: histograms, rejection summary, validation summary;
+              precision_audit.py (SD and Renyi divergence of every sampler
+              variant from the committed tables)
   compare/    HAWK vs E8 benchmarks
     e8_sign_bench.c          HAWK vs E8 signing, every sampler variant,
                              all_in and prepared accounting
@@ -48,7 +50,8 @@ e8/
       hawk_variants.c/.h        registry, selection, bound worker streams
       hawk_sampler_hot.c        hot64/hot32 (built once per width)
       hawk_sampler_ref.c        ref-T (upstream table and scan)
-  docs/       design notes and recorded performance results
+  docs/       design notes, recorded performance results, the precision
+              audit (precision_audit.md, precision_summary.csv)
 ```
 
 Dependencies run one way: `src/` may use `common/` and `tables/`;
@@ -66,6 +69,8 @@ make test-e8             # run the E8 test suite
 make check-upstream      # confirm upstream HAWK files are unchanged
 make tables              # regenerate the sampler tables; fail if they differ
 make check-integer-only  # the signing paths contain no floating point
+make precision-audit     # SD / Renyi audit of every variant (docs/precision_audit.md);
+                         # fail if docs/precision_summary.csv differs
 ```
 
 Benchmarks and diagnostics: `sampler-bench`, `variant-sampler-bench`,

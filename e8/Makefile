@@ -114,6 +114,21 @@ tables: build
 			|| { echo "tables: $$f differs from the generator output"; exit 1; }; \
 	done; echo "tables: committed tables match the generator"
 
+# Precision audit (tools/precision_audit.py, see docs/precision_audit.md):
+# self-tests, including the exact 1D moments against the C moments of
+# test_e8_tables and test_hawk_variants, then the audit of every variant's
+# committed tables (precision_audit.csv, precision_audit_dists.csv,
+# precision_summary.csv in e8/); fails if the committed
+# docs/precision_summary.csv differs from the fresh summary (to update it,
+# copy precision_summary.csv to docs/).
+precision-audit: build bin bin/test_e8_tables bin/test_hawk_variants
+	@./bin/test_e8_tables --moments > build/precision_moments.csv
+	@./bin/test_hawk_variants --moments >> build/precision_moments.csv
+	python3 -I tools/precision_audit.py --self-test --c-moments build/precision_moments.csv --out-dir .
+	@cmp -s precision_summary.csv docs/precision_summary.csv \
+		|| { echo "precision-audit: docs/precision_summary.csv differs from the fresh precision_summary.csv"; exit 1; }; \
+		echo "precision-audit: committed docs/precision_summary.csv matches"
+
 # Integer-only signing path. Every E8 and HAWK-variant translation unit on
 # the signing path (and the shared modules it uses) must compile with
 # -mgeneral-regs-only,
@@ -155,7 +170,7 @@ bin:
 	-mkdir -p bin
 clean:
 	-rm -rf build bin
-	-rm -f e8_variant_sampler_bench.csv e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sampler_profile_bench.csv e8_sign_bench.csv hawk_sign_profile_bench.csv e8_rejection_summary.csv e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv e8_sigma_verify_sweep.csv e8_sigma_sign_sweep.csv
+	-rm -f e8_variant_sampler_bench.csv e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sampler_profile_bench.csv e8_sign_bench.csv hawk_sign_profile_bench.csv e8_rejection_summary.csv e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv e8_sigma_verify_sweep.csv e8_sigma_sign_sweep.csv precision_audit.csv precision_audit_dists.csv precision_summary.csv
 
 # Generated upstream HAWK sources:
 $(HAWK_STAMP): ../build.py ../src/*.c ../src/*.h

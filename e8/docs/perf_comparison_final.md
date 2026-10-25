@@ -99,6 +99,16 @@ accounting,encoding_included,verify_ok
 | `encoding_included` | 1: both timed calls include signature encoding |
 | `verify_ok` | 1 if the signature verifies (empty for setup rows) |
 
+Precision columns (Step 7): every timing row is joined with
+`e8/docs/precision_summary.csv` on `(scheme, variant, logn)` (HAWK `ref-T`
+has the `ref` values; thread count does not change the distribution).  The
+headline precision columns are `threshold_bits`, `sig_sd_bound_log2` (union
+bound on the statistical distance of one signature's sampler output from
+the ideal, worst target), `sig_rd513_m1_log2` (`log2(R_513 - 1)` per
+signature, `R_a(P_impl || P_ideal)` as in hawk-spec.pdf eq. (5)), and
+`a_opt` / `loss_opt` (the loss factor of eq. (57) over `q_s` signatures at
+the order minimising it).  Definitions: `e8/docs/precision_audit.md`.
+
 Empty fields mean "not applicable" or "unavailable", never zero.  The pool
 workers' share of `cpu_ns_all_threads` and `core_cycles` comes from the pool's
 per-worker accounting (each worker reads its thread CPU clock and core-cycle
