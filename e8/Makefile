@@ -28,10 +28,17 @@ E8_SAMPLER_PROFILE_OBJ = build/profile/e8_sampler.o build/profile/e8_sampler_ref
 E8_API_OBJ = build/e8_api.o
 E8_PROFILE_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_codec.o build/e8_vrfy.o build/profile/e8_sign.o build/e8_sign_legacy.o build/profile/e8_api.o
 
-E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler bin/test_e8_api bin/test_e8_tables bin/test_e8_variants bin/test_e8_ref_ct bin/test_cmn_common
+E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler bin/test_e8_api bin/test_e8_tables bin/test_e8_variants bin/test_e8_ref_ct bin/test_hawk_variants bin/test_cmn_common
 E8_TOOL_PROGS = bin/e8_histograms bin/e8_rejection_summary bin/e8_validation_summary
 E8_BENCH_PROGS = bin/e8_sampler_bench bin/e8_sampler_profile_bench bin/e8_sign_bench bin/e8_sign_profile_bench bin/hawk_sign_profile_bench
 HAWK_PROFILE_SIGN_SOURCE = build/hawk_sign_profile.c
+# Benchmark-only HAWK variants (compare/hawk_variants/): the variant signer
+# (a patched copy of upstream hawk_sign.c) and its samplers.
+HAWKV_DIR = compare/hawk_variants
+HAWKV_SIGN_SOURCE = build/hawk_sign_variant.c
+HAWKV_HEAD = $(HAWKV_DIR)/hawk_variants.h compare/hawk_shim.h $(CMN_HEAD) $(HAWK_TABLES)
+HAWKV_INC = -I$(HAWK_DIR) -Icommon -Itables -Icompare -I$(HAWKV_DIR)
+HAWKV_OBJ = build/hawkv/hawk_sign_variant.o build/hawkv/hawk_variants.o build/hawkv/hawk_sampler_ref.o build/hawkv/hawk_sampler_hot64.o build/hawkv/hawk_sampler_hot32.o
 
 HAWK_HEAD = $(HAWK_STAMP)
 CMN_HEAD = common/cmn_timing.h common/cmn_rng.h common/cmn_pool.h common/cmn_csv.h $(HAWK_HEAD)
@@ -63,6 +70,7 @@ test-e8: build bin $(E8_TEST_PROGS)
 	./bin/test_e8_tables
 	./bin/test_e8_variants
 	./bin/test_e8_ref_ct
+	./bin/test_hawk_variants
 	./bin/test_cmn_common
 e8-histograms: build bin bin/e8_histograms
 	./bin/e8_histograms
@@ -103,8 +111,9 @@ tables: build
 			|| { echo "tables: $$f differs from the generator output"; exit 1; }; \
 	done; echo "tables: committed tables match the generator"
 
-# Integer-only signing path. Every E8 translation unit on the signing path
-# (and the shared modules it uses) must compile with -mgeneral-regs-only,
+# Integer-only signing path. Every E8 and HAWK-variant translation unit on
+# the signing path (and the shared modules it uses) must compile with
+# -mgeneral-regs-only,
 # under which GCC rejects any floating-point use; the timed objects are
 # compiled with the ordinary flags, identical to HAWK's, and their
 # disassembly (with the upstream objects the E8 signer calls) must contain
@@ -112,9 +121,10 @@ tables: build
 INT_ONLY_SRC = src/e8_sign.c src/e8_api.c src/e8_codec.c src/e8_f2.c src/e8_ntt.c src/e8_math.c src/e8_sampler.c src/e8_sampler_ref.c src/e8_sampler_variants.c
 INT_ONLY_VARIANTS = src/e8_sampler_hot.c:-DE8_HOT_BITS=64 src/e8_sampler_hot.c:-DE8_HOT_BITS=32
 INT_ONLY_CMN_SRC = common/cmn_rng.c common/cmn_pool.c common/cmn_timing.c
-INT_ONLY_OBJ = build/e8_sign.o build/e8_api.o build/e8_codec.o build/e8_f2.o build/e8_ntt.o build/e8_math.o build/e8_sampler.o $(E8_SAMPLER_VARIANT_OBJ) build/common/cmn_rng.o build/common/cmn_pool.o build/common/cmn_timing.o build/hawk/sha3.o build/hawk/ng_hawk.o
+INT_ONLY_HAWKV_SRC = $(HAWKV_SIGN_SOURCE):-DHAWK_AVX2=0 $(HAWKV_DIR)/hawk_variants.c: $(HAWKV_DIR)/hawk_sampler_ref.c: $(HAWKV_DIR)/hawk_sampler_hot.c:-DHAWK_HOT_BITS=64 $(HAWKV_DIR)/hawk_sampler_hot.c:-DHAWK_HOT_BITS=32
+INT_ONLY_OBJ = $(HAWKV_OBJ) build/e8_sign.o build/e8_api.o build/e8_codec.o build/e8_f2.o build/e8_ntt.o build/e8_math.o build/e8_sampler.o $(E8_SAMPLER_VARIANT_OBJ) build/common/cmn_rng.o build/common/cmn_pool.o build/common/cmn_timing.o build/hawk/sha3.o build/hawk/ng_hawk.o
 FP_INSN = (add|sub|mul|div|sqrt|min|max|rcp|rsqrt|hadd|hsub|addsub|round|dp)[sp][sd]\b|cvt|ucomis|comis|fmadd|fmsub|fnmadd|fnmsub|\bf(ld|st|ild|ist|add|sub|mul|div|cos|sin|sqrt|xch|com|ucom|chs|abs)[a-z]*\b
-check-integer-only: build $(INT_ONLY_OBJ)
+check-integer-only: build $(INT_ONLY_OBJ) $(HAWKV_SIGN_SOURCE)
 	@for f in $(INT_ONLY_SRC); do \
 		$(CC) $(E8_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -mgeneral-regs-only -c -o /dev/null $$f || exit 1; \
 	done
@@ -123,6 +133,9 @@ check-integer-only: build $(INT_ONLY_OBJ)
 	done
 	@for f in $(INT_ONLY_CMN_SRC); do \
 		$(CC) $(CMN_CFLAGS) $(E8_THREAD_CFLAGS) -mgeneral-regs-only -c -o /dev/null $$f || exit 1; \
+	done
+	@for v in $(INT_ONLY_HAWKV_SRC); do \
+		$(CC) $(CFLAGS) $(HAWKV_INC) $(E8_THREAD_CFLAGS) -mgeneral-regs-only $${v#*:} -c -o /dev/null $${v%%:*} || exit 1; \
 	done
 	@for o in $(INT_ONLY_OBJ); do \
 		if objdump -d --no-show-raw-insn $$o | awk -F'\t' 'NF >= 2 { print $$2 }' | grep -Eq '$(FP_INSN)'; then \
@@ -134,7 +147,7 @@ check-integer-only: build $(INT_ONLY_OBJ)
 	@echo "check-integer-only: signing path is integer-only"
 
 build:
-	-mkdir -p build/hawk build/profile build/common
+	-mkdir -p build/hawk build/profile build/common build/hawkv
 bin:
 	-mkdir -p bin
 clean:
@@ -174,6 +187,8 @@ bin/test_e8_variants: tests/test_e8_variants.c $(E8_HEAD) $(HAWK_OBJ) $(E8_OBJ) 
 E8_SAMPLER_REF_OPS_OBJ = $(filter-out build/e8_sampler_ref.o,$(E8_SAMPLER_OBJ)) build/e8_sampler_ref_ops.o
 bin/test_e8_ref_ct: tests/test_e8_ref_ct.c $(E8_HEAD) $(E8_TABLES) build/e8_math.o build/hawk/sha3.o $(E8_SAMPLER_REF_OPS_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_ref_ct tests/test_e8_ref_ct.c build/e8_math.o build/hawk/sha3.o $(E8_SAMPLER_REF_OPS_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/test_hawk_variants: tests/test_hawk_variants.c $(HAWKV_HEAD) $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/test_hawk_variants tests/test_hawk_variants.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/test_cmn_common: tests/test_cmn_common.c $(CMN_HEAD) $(CMN_OBJ) build/hawk/sha3.o
 	$(CC) $(CMN_CFLAGS) -Icommon $(E8_THREAD_CFLAGS) -o bin/test_cmn_common tests/test_cmn_common.c $(CMN_OBJ) build/hawk/sha3.o $(LIBS) $(E8_THREAD_LIBS)
 
@@ -245,6 +260,28 @@ build/common/cmn_csv.o: common/cmn_csv.c $(CMN_HEAD)
 $(HAWK_PROFILE_SIGN_SOURCE): ../src/hawk_sign.c compare/hawk_sign_profile.patch
 	-mkdir -p build
 	patch --silent --fuzz=0 -o $(HAWK_PROFILE_SIGN_SOURCE) ../src/hawk_sign.c compare/hawk_sign_profile.patch
+
+# HAWK variant signer: upstream hawk_sign.c with the sampler call routed
+# through hawk_variant_sampler() and renamed entry points; the upstream
+# source is untouched. Compiled with the upstream reference flags.
+$(HAWKV_SIGN_SOURCE): ../src/hawk_sign.c $(HAWKV_DIR)/hawk_sign_variant.patch
+	-mkdir -p build
+	patch --silent --fuzz=0 -o $(HAWKV_SIGN_SOURCE) ../src/hawk_sign.c $(HAWKV_DIR)/hawk_sign_variant.patch
+build/hawkv/hawk_sign_variant.o: $(HAWKV_SIGN_SOURCE) $(HAWKV_HEAD)
+	-mkdir -p build/hawkv
+	$(CC) $(CFLAGS) -DHAWK_AVX2=0 $(HAWKV_INC) -c -o build/hawkv/hawk_sign_variant.o $(HAWKV_SIGN_SOURCE)
+build/hawkv/hawk_variants.o: $(HAWKV_DIR)/hawk_variants.c $(HAWKV_HEAD)
+	-mkdir -p build/hawkv
+	$(CC) $(CFLAGS) $(HAWKV_INC) $(E8_THREAD_CFLAGS) -c -o build/hawkv/hawk_variants.o $(HAWKV_DIR)/hawk_variants.c
+build/hawkv/hawk_sampler_ref.o: $(HAWKV_DIR)/hawk_sampler_ref.c $(HAWKV_HEAD)
+	-mkdir -p build/hawkv
+	$(CC) $(CFLAGS) $(HAWKV_INC) -c -o build/hawkv/hawk_sampler_ref.o $(HAWKV_DIR)/hawk_sampler_ref.c
+build/hawkv/hawk_sampler_hot64.o: $(HAWKV_DIR)/hawk_sampler_hot.c $(HAWKV_HEAD)
+	-mkdir -p build/hawkv
+	$(CC) $(CFLAGS) $(HAWKV_INC) -DHAWK_HOT_BITS=64 -c -o build/hawkv/hawk_sampler_hot64.o $(HAWKV_DIR)/hawk_sampler_hot.c
+build/hawkv/hawk_sampler_hot32.o: $(HAWKV_DIR)/hawk_sampler_hot.c $(HAWKV_HEAD)
+	-mkdir -p build/hawkv
+	$(CC) $(CFLAGS) $(HAWKV_INC) -DHAWK_HOT_BITS=32 -c -o build/hawkv/hawk_sampler_hot32.o $(HAWKV_DIR)/hawk_sampler_hot.c
 
 # E8
 build/e8_math.o: src/e8_math.c $(E8_HEAD)

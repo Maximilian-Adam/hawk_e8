@@ -34,4 +34,11 @@ int hawk_shim_sign_finish_decoded(unsigned logn, hawk_rng rng,
 	void *rng_context, void *sig, const shake_context *sc_data,
 	const void *priv_decoded, void *tmp, size_t tmp_len);
 
+/*
+ * Upstream sig_gauss() tables of logn (hi: hi_len 15-bit high parts, lo:
+ * lo_len 63-bit low parts; see hawk_sign.c). Returns 0 for another logn.
+ */
+int hawk_shim_sig_gauss_tables(unsigned logn, const uint16_t **hi,
+	size_t *hi_len, const uint64_t **lo, size_t *lo_len);
+
 #endif
