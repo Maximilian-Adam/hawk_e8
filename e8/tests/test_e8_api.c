@@ -229,7 +229,7 @@ sign_and_check(unsigned logn, const void *priv, size_t priv_len,
 	count_rng_init(&rng, rng_seed, e8_salt_len(logn), 40);
 	make_message(&sc, logn, key, msg, 0);
 	if (!e8_sign_finish_inner(logn, counting_rng, &rng, sig, &sc,
-		priv, priv_len, tmp, sizeof tmp, &attempts, NULL))
+		priv, priv_len, tmp, sizeof tmp, NULL, &attempts, NULL))
 	{
 		fprintf(stderr, "ERR: E8 signing failed logn=%u key=%u"
 			" msg=%u priv_len=%zu\n", logn, key, msg, priv_len);

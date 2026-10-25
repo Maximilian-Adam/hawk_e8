@@ -7,6 +7,7 @@
 #include "../src/hawk_e8_inner.h"
 #include "e8_tables_geom.h"
 #include "e8_tables_hot64.h"
+#include "e8_tables_hot32.h"
 
 /*
  * Tests of the generated E8 sampler tables (e8/tables/) and the
@@ -21,9 +22,9 @@
  *     the same output for the same streams (the threshold differences are
  *     far too small to be hit);
  *   - the integer norm bounds equal the double computation;
- *   - a coarse distribution check of every generated 1D table: empirical
- *     mean and variance against the values implied exactly by the integer
- *     thresholds.
+ *   - a coarse distribution check of every generated 1D table (hot64,
+ *     hot32): empirical mean and variance against the values implied
+ *     exactly by the integer thresholds.
  */
 
 #define MAXN            1024
@@ -318,6 +319,43 @@ distribution_hot64(unsigned logn)
 	return 1;
 }
 
+static int
+distribution_hot32(unsigned logn)
+{
+	static int32_t x[DIST_SAMPLES];
+	const e8_hot32_tables *g = e8_hot32_tables_get(logn);
+
+	for (unsigned j = 0; j < E8_TAB_CLASSES; j ++) {
+		const e8_hot32_row *row = &g->rows[j];
+		uint64_t tiny_cdf[E8_HOT32_TINY_LEN];
+		uint64_t tail_cdf[E8_HOT32_TAIL_LEN_MAX];
+		long double mean, var;
+		cmn_rng s;
+		uint8_t seed[2] = { (uint8_t)logn, (uint8_t)j };
+
+		for (unsigned i = 0; i < row->tiny_len; i ++) {
+			tiny_cdf[i] = row->tiny_cdf[i];
+		}
+		for (unsigned i = 0; i < row->tail_len; i ++) {
+			tail_cdf[i] = row->tail_cdf[i];
+		}
+		hot_moments(32, row->tiny_len, row->tiny_value, tiny_cdf,
+			row->tail_len, row->tail_value, tail_cdf, &mean, &var);
+		cmn_rng_init(&s, "test_e8_tables hot32", 20, seed, 2, NULL, 0);
+		for (size_t u = 0; u < DIST_SAMPLES; u ++) {
+			if (!e8_hot32_sample_1d(g, j, &s, &x[u])) {
+				return 0;
+			}
+		}
+		if (!moments_ok("hot32", logn, j, mean, var, x,
+			DIST_SAMPLES))
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
 int
 main(void)
 {
@@ -330,12 +368,13 @@ main(void)
 		printf("E8 tables n=%u: ", 1u << logn);
 		fflush(stdout);
 		if (!norm_bounds(logn) || !sampler_equivalence(logn)
-			|| !distribution_hot64(logn))
+			|| !distribution_hot64(logn)
+			|| !distribution_hot32(logn))
 		{
 			return 1;
 		}
 		printf("norm bound %lld, generated = runtime sampling,"
-			" hot64 distributions done.\n",
+			" hot64 and hot32 distributions done.\n",
 			(long long)e8_norm_bound_default(logn));
 	}
 	return 0;

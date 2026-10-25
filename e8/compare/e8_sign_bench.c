@@ -358,12 +358,12 @@ bench_sign(unsigned scheme, unsigned acct, unsigned logn,
 			ok = e8_sign_finish_inner(logn, cmn_sign_rng_hawk, rng,
 				sig_buf, sc_data, key_priv,
 				E8_PRIVKEY_SIZE(logn), tmp_sign, sizeof tmp_sign,
-				&trace_attempts, &timing);
+				NULL, &trace_attempts, &timing);
 		} else {
 			ok = e8_sign_finish_inner(logn, cmn_sign_rng_hawk, rng,
 				sig_buf, sc_data, key_prepared,
 				E8_PRIVKEY_PREPARED_SIZE(logn), NULL, 0,
-				&trace_attempts, &timing);
+				NULL, &trace_attempts, &timing);
 		}
 #else
 		if (acct == ACCT_ALL_IN) {

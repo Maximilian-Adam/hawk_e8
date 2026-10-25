@@ -11,8 +11,16 @@
  * target <= cdf. All tables are generated offline (e8/tables/); this file
  * is integer-only.
  *
- * The threshold width B is a compile-time option: E8_HOT_BITS = 64
- * (variant hot64).
+ * The threshold width B is a compile-time option, E8_HOT_BITS = 64
+ * (variant hot64) or 32 (variant hot32); the Makefile compiles this file
+ * once per width, each with its own symbols, so that every variant
+ * coexists in one binary (registry: e8_sampler_variants.c). Both widths
+ * use the same comparison rule, target <= threshold. (The 32-bit sampler
+ * of commit b7bf0fc compared target < threshold, with thresholds
+ * (uint64_t)(prefix / total * 2^32) clamped to UINT32_MAX and a double
+ * tail; the uniform rule keeps the precision audit identical across
+ * widths.) A hot32 block reads 4 bytes for the component and 4 per
+ * coordinate, plus 4 per tail draw; hot64 reads 8 per read.
  */
 
 #include "e8_tables_geom.h"
@@ -30,10 +38,25 @@ typedef e8_hot64_tables e8h_tables;
 #define E8H_SAMPLE_Z            e8_sample_z_hot64
 #define E8H_SAMPLE_BLOCK        e8_hot64_sample_block
 #define E8H_SAMPLE_1D           e8_hot64_sample_1d
+#define E8H_SAMPLE_STREAM       e8_hot64_sample_stream
 #define E8H_TABLES_GET          e8_hot64_tables_get
 #define E8H_TABLES_LOGN8        e8_hot64_tables_logn8
 #define E8H_TABLES_LOGN9        e8_hot64_tables_logn9
 #define E8H_TABLES_LOGN10       e8_hot64_tables_logn10
+#elif E8_HOT_BITS == 32
+#include "e8_tables_hot32.h"
+typedef uint32_t e8h_word;
+typedef e8_hot32_row e8h_row;
+typedef e8_hot32_tables e8h_tables;
+#define e8h_read(s)             cmn_rng_read_u32le(s)
+#define E8H_SAMPLE_Z            e8_sample_z_hot32
+#define E8H_SAMPLE_BLOCK        e8_hot32_sample_block
+#define E8H_SAMPLE_1D           e8_hot32_sample_1d
+#define E8H_SAMPLE_STREAM       e8_hot32_sample_stream
+#define E8H_TABLES_GET          e8_hot32_tables_get
+#define E8H_TABLES_LOGN8        e8_hot32_tables_logn8
+#define E8H_TABLES_LOGN9        e8_hot32_tables_logn9
+#define E8H_TABLES_LOGN10       e8_hot32_tables_logn10
 #else
 #error "unsupported E8_HOT_BITS"
 #endif
@@ -210,6 +233,37 @@ E8H_SAMPLE_BLOCK(const void *tables, int32_t *zblk, uint8_t tau,
 	}
 	return e8h_sample_block(zblk, tau, tables, stream, norm2_out,
 		stats, trace);
+}
+
+/* see hawk_e8_inner.h */
+int
+E8H_SAMPLE_STREAM(const void *tables, int32_t *z0, int32_t *z1,
+	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, size_t start, size_t end, cmn_rng *stream)
+{
+	e8_sampler_worker w;
+
+	if (tables == NULL || stream == NULL || pnorm_out == NULL
+		|| logn < 8 || logn > 10 || start > end
+		|| end > ((size_t)1 << (logn - 2)))
+	{
+		return 0;
+	}
+	memset(&w, 0, sizeof w);
+	w.z0 = z0;
+	w.z1 = z1;
+	w.t0 = t0;
+	w.t1 = t1;
+	w.tables = tables;
+	w.logn = logn;
+	w.rng_mode = E8_SAMPLER_RNG_PER_WORKER;
+	w.start = start;
+	w.end = end;
+	if (!e8h_sample_range(&w, stream)) {
+		return 0;
+	}
+	*pnorm_out = w.norm2;
+	return 1;
 }
 
 /* see hawk_e8_inner.h */

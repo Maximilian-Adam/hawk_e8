@@ -22,13 +22,13 @@ E8_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_codec.o build/e8_
 # e8_sampler.o (shared, integer-only), the variants on the generated tables
 # (integer-only) and the runtime table builder (floating point, used only by
 # the double-sigma entry points of tests and tools).
-E8_SAMPLER_VARIANT_OBJ = build/e8_sampler_hot.o
+E8_SAMPLER_VARIANT_OBJ = build/e8_sampler_hot64.o build/e8_sampler_hot32.o build/e8_sampler_variants.o
 E8_SAMPLER_OBJ = build/e8_sampler.o $(E8_SAMPLER_VARIANT_OBJ) build/e8_sampler_runtime.o $(CMN_OBJ)
-E8_SAMPLER_PROFILE_OBJ = build/profile/e8_sampler.o build/profile/e8_sampler_hot.o build/e8_sampler_runtime.o $(CMN_OBJ)
+E8_SAMPLER_PROFILE_OBJ = build/profile/e8_sampler.o build/profile/e8_sampler_hot64.o build/profile/e8_sampler_hot32.o build/e8_sampler_variants.o build/e8_sampler_runtime.o $(CMN_OBJ)
 E8_API_OBJ = build/e8_api.o
 E8_PROFILE_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_codec.o build/e8_vrfy.o build/profile/e8_sign.o build/e8_sign_legacy.o build/profile/e8_api.o
 
-E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler bin/test_e8_api bin/test_e8_tables bin/test_cmn_common
+E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler bin/test_e8_api bin/test_e8_tables bin/test_e8_variants bin/test_cmn_common
 E8_TOOL_PROGS = bin/e8_histograms bin/e8_rejection_summary bin/e8_validation_summary
 E8_BENCH_PROGS = bin/e8_sampler_bench bin/e8_sampler_profile_bench bin/e8_sign_bench bin/e8_sign_profile_bench bin/hawk_sign_profile_bench
 HAWK_PROFILE_SIGN_SOURCE = build/hawk_sign_profile.c
@@ -61,6 +61,7 @@ test-e8: build bin $(E8_TEST_PROGS)
 	./bin/test_e8_sign_sampler
 	./bin/test_e8_api
 	./bin/test_e8_tables
+	./bin/test_e8_variants
 	./bin/test_cmn_common
 e8-histograms: build bin bin/e8_histograms
 	./bin/e8_histograms
@@ -107,8 +108,8 @@ tables: build
 # compiled with the ordinary flags, identical to HAWK's, and their
 # disassembly (with the upstream objects the E8 signer calls) must contain
 # no SSE/AVX or x87 floating-point instruction.
-INT_ONLY_SRC = src/e8_sign.c src/e8_api.c src/e8_codec.c src/e8_f2.c src/e8_ntt.c src/e8_math.c src/e8_sampler.c
-INT_ONLY_VARIANTS = src/e8_sampler_hot.c:-DE8_HOT_BITS=64
+INT_ONLY_SRC = src/e8_sign.c src/e8_api.c src/e8_codec.c src/e8_f2.c src/e8_ntt.c src/e8_math.c src/e8_sampler.c src/e8_sampler_variants.c
+INT_ONLY_VARIANTS = src/e8_sampler_hot.c:-DE8_HOT_BITS=64 src/e8_sampler_hot.c:-DE8_HOT_BITS=32
 INT_ONLY_CMN_SRC = common/cmn_rng.c common/cmn_pool.c common/cmn_timing.c
 INT_ONLY_OBJ = build/e8_sign.o build/e8_api.o build/e8_codec.o build/e8_f2.o build/e8_ntt.o build/e8_math.o build/e8_sampler.o $(E8_SAMPLER_VARIANT_OBJ) build/common/cmn_rng.o build/common/cmn_pool.o build/common/cmn_timing.o build/hawk/sha3.o build/hawk/ng_hawk.o
 FP_INSN = (add|sub|mul|div|sqrt|min|max|rcp|rsqrt|hadd|hsub|addsub|round|dp)[sp][sd]\b|cvt|ucomis|comis|fmadd|fmsub|fnmadd|fnmsub|\bf(ld|st|ild|ist|add|sub|mul|div|cos|sin|sqrt|xch|com|ucom|chs|abs)[a-z]*\b
@@ -167,6 +168,8 @@ bin/test_e8_api: tests/test_e8_api.c compare/hawk_shim.h $(E8_HEAD) $(HAWK_OBJ_N
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_api tests/test_e8_api.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/test_e8_tables: tests/test_e8_tables.c $(E8_HEAD) $(E8_TABLES) $(HAWK_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_tables tests/test_e8_tables.c $(HAWK_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/test_e8_variants: tests/test_e8_variants.c $(E8_HEAD) $(HAWK_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_variants tests/test_e8_variants.c $(HAWK_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/test_cmn_common: tests/test_cmn_common.c $(CMN_HEAD) $(CMN_OBJ) build/hawk/sha3.o
 	$(CC) $(CMN_CFLAGS) -Icommon $(E8_THREAD_CFLAGS) -o bin/test_cmn_common tests/test_cmn_common.c $(CMN_OBJ) build/hawk/sha3.o $(LIBS) $(E8_THREAD_LIBS)
 
@@ -258,8 +261,14 @@ build/e8_api.o: src/e8_api.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_api.o src/e8_api.c
 build/e8_sampler.o: src/e8_sampler.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -c -o build/e8_sampler.o src/e8_sampler.c
-build/e8_sampler_hot.o: src/e8_sampler_hot.c $(E8_HEAD) $(E8_TABLES)
-	$(CC) $(E8_CFLAGS) $(E8_INC) -DE8_HOT_BITS=64 -c -o build/e8_sampler_hot.o src/e8_sampler_hot.c
+# One object per sampler variant, from the same source with its own
+# threshold width and symbols, so that all variants link into one binary.
+build/e8_sampler_hot64.o: src/e8_sampler_hot.c $(E8_HEAD) $(E8_TABLES)
+	$(CC) $(E8_CFLAGS) $(E8_INC) -DE8_HOT_BITS=64 -c -o build/e8_sampler_hot64.o src/e8_sampler_hot.c
+build/e8_sampler_hot32.o: src/e8_sampler_hot.c $(E8_HEAD) $(E8_TABLES)
+	$(CC) $(E8_CFLAGS) $(E8_INC) -DE8_HOT_BITS=32 -c -o build/e8_sampler_hot32.o src/e8_sampler_hot.c
+build/e8_sampler_variants.o: src/e8_sampler_variants.c $(E8_HEAD)
+	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_sampler_variants.o src/e8_sampler_variants.c
 build/e8_sampler_runtime.o: src/e8_sampler_runtime.c $(E8_HEAD) $(E8_TABLES)
 	$(CC) $(E8_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -c -o build/e8_sampler_runtime.o src/e8_sampler_runtime.c
 
@@ -268,9 +277,12 @@ build/e8_sampler_runtime.o: src/e8_sampler_runtime.c $(E8_HEAD) $(E8_TABLES)
 build/profile/e8_sampler.o: src/e8_sampler.c $(E8_HEAD)
 	-mkdir -p build/profile
 	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -c -o build/profile/e8_sampler.o src/e8_sampler.c
-build/profile/e8_sampler_hot.o: src/e8_sampler_hot.c $(E8_HEAD) $(E8_TABLES)
+build/profile/e8_sampler_hot64.o: src/e8_sampler_hot.c $(E8_HEAD) $(E8_TABLES)
 	-mkdir -p build/profile
-	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) -DE8_HOT_BITS=64 -c -o build/profile/e8_sampler_hot.o src/e8_sampler_hot.c
+	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) -DE8_HOT_BITS=64 -c -o build/profile/e8_sampler_hot64.o src/e8_sampler_hot.c
+build/profile/e8_sampler_hot32.o: src/e8_sampler_hot.c $(E8_HEAD) $(E8_TABLES)
+	-mkdir -p build/profile
+	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) -DE8_HOT_BITS=32 -c -o build/profile/e8_sampler_hot32.o src/e8_sampler_hot.c
 
 # E8 signing objects with per-stage profiling (HAWK_E8_PROFILE_SIGN=1), used
 # only by the profile benchmark; the profile changes e8_sign_trace_timing.

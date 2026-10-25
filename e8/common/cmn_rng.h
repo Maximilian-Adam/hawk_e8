@@ -136,6 +136,32 @@ cmn_rng_read_u64le(cmn_rng *r)
 	}
 }
 
+/*
+ * Read the next 4 bytes as a little-endian 32-bit integer (the read of
+ * the 32-bit hot-table samplers). Reads of different widths may be mixed:
+ * the stream never discards bytes.
+ */
+static inline uint32_t
+cmn_rng_read_u32le(cmn_rng *r)
+{
+	uint32_t x = 0;
+
+	if (r->len - r->pos >= 4) {
+		for (unsigned u = 0; u < 4; u ++) {
+			x |= (uint32_t)r->buf[r->pos ++] << (u << 3);
+		}
+		return x;
+	} else {
+		uint8_t tmp[4];
+
+		cmn_rng_read_bytes(r, tmp, sizeof tmp);
+		for (unsigned u = 0; u < 4; u ++) {
+			x |= (uint32_t)tmp[u] << (u << 3);
+		}
+		return x;
+	}
+}
+
 void cmn_rng_counters_get(const cmn_rng *r, cmn_rng_counters *c);
 
 void cmn_rng_counters_add(cmn_rng_counters *dst, const cmn_rng_counters *src);

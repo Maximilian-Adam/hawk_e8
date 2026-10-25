@@ -100,6 +100,16 @@
 #define e8_sample_z_hot64  Zh(e8_sample_z_hot64)
 #define e8_hot64_sample_block  Zh(e8_hot64_sample_block)
 #define e8_hot64_sample_1d  Zh(e8_hot64_sample_1d)
+#define e8_sample_z_hot32  Zh(e8_sample_z_hot32)
+#define e8_hot32_sample_block  Zh(e8_hot32_sample_block)
+#define e8_hot32_sample_1d  Zh(e8_hot32_sample_1d)
+#define e8_hot64_sample_stream  Zh(e8_hot64_sample_stream)
+#define e8_hot32_sample_stream  Zh(e8_hot32_sample_stream)
+#define e8_hot32_tables_get  Zh(e8_hot32_tables_get)
+#define e8_sampler_variants  Zh(e8_sampler_variants)
+#define e8_sampler_variant_count  Zh(e8_sampler_variant_count)
+#define e8_sampler_variant_find  Zh(e8_sampler_variant_find)
+#define e8_sampler_variant_default  Zh(e8_sampler_variant_default)
 #define e8_hot64_tables_get  Zh(e8_hot64_tables_get)
 #define e8_sampler_runtime_hot64  Zh(e8_sampler_runtime_hot64)
 #define e8_norm_bound_default  Zh(e8_norm_bound_default)
@@ -437,6 +447,43 @@ typedef int (*e8_sample_z_fn)(const void *tables, int32_t *z0, int32_t *z1,
 	hawk_rng rng, void *rng_context, e8_sampler_stats *stats);
 
 /*
+ * Sampler variant registry (e8_sampler_variants.c). Every variant is
+ * compiled into one binary with its own symbols:
+ *
+ *   name   threshold_bits  technique
+ *   hot64  64              vt_hot_table  (default; the public API)
+ *   hot32  32              vt_hot_table
+ *
+ * sample_z is the variant's full-dimension sampler and tables(logn) its
+ * generated tables for the fixed sigma_sign of logn (NULL otherwise).
+ * The signer calls sample_z once per attempt. sample_stream (tests) samples
+ * blocks [start, end) from one given stream, as one per-worker worker does;
+ * the z entries outside the range are left unchanged.
+ */
+typedef int (*e8_sample_stream_fn)(const void *tables, int32_t *z0,
+	int32_t *z1, uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, size_t start, size_t end, cmn_rng *stream);
+
+typedef struct {
+	const char *name;
+	unsigned threshold_bits;
+	const char *technique;
+	e8_sample_z_fn sample_z;
+	const void *(*tables)(unsigned logn);
+	e8_sample_stream_fn sample_stream;
+} e8_sampler_variant;
+
+extern const e8_sampler_variant e8_sampler_variants[];
+extern const size_t e8_sampler_variant_count;
+
+/*
+ * Variant by name, or NULL; the default variant (hot64).
+ */
+const e8_sampler_variant *e8_sampler_variant_find(const char *name);
+
+const e8_sampler_variant *e8_sampler_variant_default(void);
+
+/*
  * Shared core of all sampler-backed signers, integer-only: the sampler
  * variant sample_z with its tables, rejection above norm_bound (compared
  * with ||P_n z||^2).  If salt is non-NULL, it is
@@ -484,7 +531,9 @@ int64_t e8_norm_bound_default(unsigned logn);
  * Implementation of e8_sign_finish() and e8_sign_finish_prepared() (see
  * hawk_e8.h), with the key format selected by priv_len as in HAWK's
  * sign_finish_inner(): E8_PRIVKEY_SIZE(logn) for an encoded key, or
- * E8_PRIVKEY_PREPARED_SIZE(logn) for a prepared key.  trace_attempts
+ * E8_PRIVKEY_PREPARED_SIZE(logn) for a prepared key.  variant selects the
+ * sampler variant (NULL: the default, hot64; the benchmarks select the
+ * others), always with the bound per-worker streams.  trace_attempts
  * (optional) receives the number of attempts; trace_timing (optional)
  * receives the sampler timing and, with HAWK_E8_PROFILE_SIGN, the
  * per-stage profile including key preparation.
@@ -493,6 +542,7 @@ int e8_sign_finish_inner(unsigned logn,
 	hawk_rng rng, void *rng_context,
 	void *sig, const shake_context *sc_data,
 	const void *priv, size_t priv_len, void *tmp, size_t tmp_len,
+	const e8_sampler_variant *variant,
 	unsigned *trace_attempts, e8_sign_trace_timing *trace_timing);
 
 /*
@@ -658,6 +708,35 @@ int e8_hot64_sample_block(const void *tables, int32_t *zblk, uint8_t tau,
  */
 int e8_hot64_sample_1d(const void *tables, unsigned cls, cmn_rng *stream,
 	int32_t *out);
+
+/*
+ * The hot32 variant: the same sampler with 32-bit thresholds and reads
+ * (e8_sampler_hot.c compiled with E8_HOT_BITS=32), over e8_hot32_tables
+ * (e8/tables/e8_tables_hot32.h).
+ */
+int e8_sample_z_hot32(const void *tables, int32_t *z0, int32_t *z1,
+	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, unsigned rng_mode,
+	const shake_context *prefix, uint64_t prefix_permutations,
+	hawk_rng rng, void *rng_context, e8_sampler_stats *stats);
+
+const void *e8_hot32_tables_get(unsigned logn);
+
+int e8_hot32_sample_block(const void *tables, int32_t *zblk, uint8_t tau,
+	cmn_rng *stream, uint64_t *norm2_out, e8_sampler_stats *stats,
+	e8_ca_sample_trace *trace);
+
+int e8_hot32_sample_1d(const void *tables, unsigned cls, cmn_rng *stream,
+	int32_t *out);
+
+int e8_hot64_sample_stream(const void *tables, int32_t *z0, int32_t *z1,
+	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, size_t start, size_t end, cmn_rng *stream);
+
+int e8_hot32_sample_stream(const void *tables, int32_t *z0, int32_t *z1,
+	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, size_t start, size_t end, cmn_rng *stream);
+
 
 /*
  * hot64 tables built at runtime in double for an arbitrary sigma_sign

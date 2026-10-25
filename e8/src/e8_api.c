@@ -295,6 +295,7 @@ e8_sign_finish_inner(unsigned logn,
 	hawk_rng rng, void *rng_context,
 	void *sig, const shake_context *sc_data,
 	const void *priv, size_t priv_len, void *tmp, size_t tmp_len,
+	const e8_sampler_variant *variant,
 	unsigned *trace_attempts, e8_sign_trace_timing *trace_timing)
 {
 	const e8_prepared_key *pk;
@@ -315,6 +316,9 @@ e8_sign_finish_inner(unsigned logn,
 		|| sc_data == NULL || priv == NULL)
 	{
 		return 0;
+	}
+	if (variant == NULL) {
+		variant = e8_sampler_variant_default();
 	}
 	size_t n = (size_t)1 << logn;
 
@@ -359,7 +363,7 @@ e8_sign_finish_inner(unsigned logn,
 		pk->hpub, (size_t)1 << (logn - 4),
 		pk->fgFG, pk->fgFG + n, pk->fgFG + 2 * n, pk->fgFG + 3 * n,
 		&pk->basis_ntt, &pk->basis_f2, NULL, salt_key, salt_key_len,
-		e8_sample_z_hot64, e8_hot64_tables_get(logn),
+		variant->sample_z, variant->tables(logn),
 		e8_norm_bound_default(logn), E8_SIGN_MAX_ATTEMPTS,
 		rng, rng_context, NULL, NULL, NULL, trace_attempts,
 		trace_timing);
@@ -385,7 +389,7 @@ e8_sign_finish(unsigned logn,
 		return 0;
 	}
 	return e8_sign_finish_inner(logn, rng, rng_context, sig, sc_data,
-		priv, E8_PRIVKEY_SIZE(logn), tmp, tmp_len, NULL, NULL);
+		priv, E8_PRIVKEY_SIZE(logn), tmp, tmp_len, NULL, NULL, NULL);
 }
 
 /* see hawk_e8.h */
@@ -400,7 +404,7 @@ e8_sign_finish_prepared(unsigned logn,
 	}
 	return e8_sign_finish_inner(logn, rng, rng_context, sig, sc_data,
 		priv_prepared, E8_PRIVKEY_PREPARED_SIZE(logn),
-		tmp, tmp_len, NULL, NULL);
+		tmp, tmp_len, NULL, NULL, NULL);
 }
 
 /* see hawk_e8.h */
