@@ -1,149 +1,34 @@
-#include "hawk_e8_inner.h"
+#include "e8_sampler_inner.h"
 
 #if HAWK_ENABLE_E8_EXPERIMENTAL
 
-#include <assert.h>
-#include <math.h>
 #include <limits.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include "cmn_pool.h"
-#include "cmn_rng.h"
-#include "cmn_timing.h"
-
-#define E8_BLOCK_DIM           8
-#define E8_CA_COSETS           16
-#define E8_CA_TAUS             256
-#define E8_CA_CACHE_INIT_TABLES 32
-#define E8_1D_TAIL_SIGMAS      20.0
-#define E8_1D_TAIL_FLOOR       32.0
-#define E8_TWO_PI              6.28318530717958647692528676655900576839
-#define E8_1D_TINY_VALUES      6
-#define E8_MASTER_SEED_BYTES   32
-#define E8_BOUND_SEED_BYTES    40
-#define E8_MAX_FULL_BLOCKS     (1u << (10 - 2))
-#define E8_SAMPLER_MAX_THREADS 24
-
-#ifndef HAWK_E8_DEBUG_CHECKS
-#define HAWK_E8_DEBUG_CHECKS   1
-#endif
-
-#ifndef HAWK_E8_PROFILE_SAMPLER
-#define HAWK_E8_PROFILE_SAMPLER   0
-#endif
-
-#ifndef HAWK_E8_SAMPLER_THREADS
-#define HAWK_E8_SAMPLER_THREADS 1
-#endif
+/*
+ * Shared, integer-only part of the experimental E8 samplers: block
+ * geometry, thread and RNG-mode controls, stream derivations, worker
+ * dispatch, profile and stream counters. The variant samplers
+ * (e8_sampler_hot.c) and the test/tool-only runtime table builder
+ * (e8_sampler_runtime.c) build on it. No side-channel hardening is
+ * claimed for the hot variants.
+ *
+ * The external sampler contract is the HAWK-E8-CM contract: tau is the
+ * internal P-coordinate label, the returned block is zblk in 2Z^8 + tau,
+ * and the measured E8-side vector is xblk = P zblk.
+ */
 
 static const uint8_t RM13_CHECK_ROWS[E8_CA_COSETS >> 2] = {
 	0xFF, 0xAA, 0xCC, 0xF0
 };
 
-static const uint8_t RM13_CODEWORDS[E8_CA_COSETS] = {
-	0x00, 0xFF, 0xAA, 0x55,
-	0xCC, 0x33, 0x66, 0x99,
-	0xF0, 0x0F, 0x5A, 0xA5,
-	0x3C, 0xC3, 0x96, 0x69
-};
-
-/*
- * Orthogonal product basis for the Construction-A kernel component
- *
- *     2P (RM(1,3) + 2Z^8).
- *
- * Vectors are stored by product coordinate.  Each vector has squared norm
- * 32 and is orthogonal to the seven others.  Thus a selected component
- *
- *     P tau + 2P r + 2P(RM(1,3) + 2Z^8)
- *
- * is sampled by eight independent shifted integer Gaussians in these
- * product coordinates, then reconstructed as an E8-side block xblk.
- */
-static const int32_t E8_CA_PRODUCT_BASIS[E8_BLOCK_DIM][E8_BLOCK_DIM] = {
-	{ -4,  0,  0,  0,  0,  0,  0, -4 },
-	{ -4,  0,  0,  0,  0,  0,  0,  4 },
-	{  0, -4,  0,  0, -4,  0,  0,  0 },
-	{  0, -4,  0,  0,  4,  0,  0,  0 },
-	{  0,  0, -4,  0,  0, -4,  0,  0 },
-	{  0,  0, -4,  0,  0,  4,  0,  0 },
-	{  0,  0,  0, -4,  0,  0, -4,  0 },
-	{  0,  0,  0, -4,  0,  0,  4,  0 }
-};
-
-#define E8_CA_PRODUCT_NORM2   32.0
-#define E8_CA_PRODUCT_NORM2_I 32
-
-static const int32_t E8_CA_DELTA_Z[E8_BLOCK_DIM][E8_BLOCK_DIM] = {
-	{  0, -2,  2,  0, -2,  0,  0, -2 },
-	{ -2,  4, -4,  2,  2,  0,  0,  2 },
-	{ -2, -2,  4, -4, -2,  2,  0,  0 },
-	{  0,  0, -2,  2,  2, -2,  0,  0 },
-	{  4, -2, -2,  4,  0, -2,  2,  0 },
-	{ -2,  0,  0, -2,  0,  2, -2,  0 },
-	{ -4,  4, -2, -2,  0,  0, -2,  2 },
-	{  2, -2,  0,  0,  0,  0,  2, -2 }
-};
-
-typedef struct {
-	uint64_t sigma_coord_bits;
-	int64_t center_num32;
-	int lo;
-	int hi;
-	size_t len;
-	double total;
-	double *cdf;
-} e8_1d_integer_table;
-
-typedef struct {
-	int64_t center_num32;
-	double tiny_mass;
-	double tail_mass;
-	uint8_t tiny_len;
-	size_t tail_len;
-	int32_t tiny_value[E8_1D_TINY_VALUES];
-	uint64_t tiny_cdf[E8_1D_TINY_VALUES];
-	int32_t *tail_value;
-	double *tail_cdf;
-} e8_1d_hot_row;
-
-typedef struct {
-	double masses[E8_CA_COSETS];
-	double prefix[E8_CA_COSETS];
-	double total;
-} e8_ca_component_table;
-
-typedef struct e8_ca_sigma_cache_s e8_ca_sigma_cache;
-struct e8_ca_sigma_cache_s {
-	uint64_t sigma_sign_bits;
-	uint64_t sigma_coord_bits;
-	double sigma_sign;
-	double sigma_coord;
-	size_t table_count;
-	size_t table_cap;
-	e8_1d_integer_table *tables;
-	e8_1d_hot_row *hot_rows;
-	uint64_t component_cdf[E8_CA_TAUS][E8_CA_COSETS];
-	uint8_t component_fallback[E8_CA_TAUS];
-	int32_t base_z[E8_CA_TAUS][E8_CA_COSETS][E8_BLOCK_DIM];
-	int64_t base_norm2[E8_CA_TAUS][E8_CA_COSETS];
-	e8_ca_component_table component[E8_CA_TAUS];
-	uint8_t coord_class[E8_CA_TAUS][E8_CA_COSETS][E8_BLOCK_DIM];
-	e8_ca_sigma_cache *next;
-};
-
-static e8_ca_sigma_cache *e8_ca_cache_list = NULL;
-static pthread_mutex_t e8_ca_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static unsigned e8_sampler_thread_override = UINT_MAX;
 static unsigned e8_sampler_rng_mode = E8_SAMPLER_RNG_PER_WORKER;
 static e8_sampler_profile e8_sampler_last_profile;
 static cmn_rng_counters e8_sampler_rng_total;
-
-typedef struct e8_sample_z_worker_args_s e8_sample_z_worker_args;
 
 /*
  * The sampler streams use the shared RNG module's buffer, which has the
@@ -158,18 +43,6 @@ typedef char e8_rng_buffer_size_check[CMN_RNG_BUF_BYTES == 128 ? 1 : -1];
 typedef char e8_pool_size_check[
 	E8_SAMPLER_MAX_THREADS - 1 <= CMN_POOL_MAX_THREADS ? 1 : -1];
 
-/*
- * Experimental E8 samplers.
- *
- * This file is intentionally a standalone research component.  It uses
- * floating-point weights, data-dependent control flow, and no side-channel
- * hardening.  It is not suitable for final cryptographic deployment.
- *
- * The external sampler contract is the HAWK-E8-CM contract: tau is the
- * internal P-coordinate label, the returned block is zblk in 2Z^8 + tau,
- * and the measured E8-side vector is xblk = P zblk.
- */
-
 static int32_t
 block_shift_get(const int32_t *a, unsigned u, unsigned shift)
 {
@@ -182,86 +55,6 @@ block_shift_get(const int32_t *a, unsigned u, unsigned shift)
 	}
 	return -a[4 + u - shift];
 }
-
-static int
-rng_stream_init(cmn_rng *stream, hawk_rng rng, void *rng_context)
-{
-	if (stream == NULL || rng == NULL) {
-		return 0;
-	}
-	cmn_rng_init_source(stream, rng, rng_context);
-	return 1;
-}
-
-static double
-rng_stream_double(cmn_rng *stream)
-{
-	uint64_t x = cmn_rng_read_u64le(stream);
-
-	return (double)(x >> 11) * 0x1.0p-53;
-}
-
-static uint64_t
-e8_cdf_threshold_u64(double prefix, double total)
-{
-	/*
-	 * Hot CDFs are stored as 64-bit fixed-point thresholds and compared
-	 * with a 64-bit uniform target.  The conceptual scale is 2^64, one
-	 * past UINT64_MAX, so full CDFs are saturated to UINT64_MAX.
-	 */
-	static const long double two64 = 0x1.0p64L;
-	long double ratio, scaled;
-
-	if (!(prefix > 0.0) || !(total > 0.0)) {
-		return 0;
-	}
-	if (prefix >= total) {
-		return UINT64_MAX;
-	}
-	ratio = (long double)prefix / (long double)total;
-	if (!(ratio < 1.0L)) {
-		return UINT64_MAX - 1;
-	}
-	scaled = ratio * two64;
-	if (!(scaled < two64)) {
-		return UINT64_MAX - 1;
-	}
-	return (uint64_t)scaled;
-}
-
-#if HAWK_E8_PROFILE_SAMPLER
-
-/*
- * Per-stage sampler profile (off by default: its timers sit inside the
- * timed sampling call).
- */
-#define e8_profile_wall_ns()          cmn_wall_ns()
-#define e8_profile_cycles_start()     cmn_tsc_start()
-
-static void
-e8_profile_add(uint64_t *cycles_total, uint64_t *wall_total,
-	uint64_t cycles_start, uint64_t wall_start)
-{
-	uint64_t wall_end = cmn_wall_ns();
-	uint64_t cycles_end = cmn_tsc_end();
-
-	*cycles_total += cmn_delta(cycles_start, cycles_end);
-	*wall_total += cmn_delta(wall_start, wall_end);
-}
-
-#else
-
-#define e8_profile_wall_ns()          ((uint64_t)0)
-#define e8_profile_cycles_start()     ((uint64_t)0)
-#define e8_profile_add(ct, wt, cs, ws) \
-	do { \
-		(void)(ct); \
-		(void)(wt); \
-		(void)(cs); \
-		(void)(ws); \
-	} while (0)
-
-#endif
 
 /* see hawk_e8_inner.h */
 void
@@ -305,18 +98,9 @@ e8_enc64le(uint8_t *dst, uint64_t x)
 	}
 }
 
-/*
- * Per-block sampler stream (legacy, regression-only mode; never used by
- * the public API or in benchmark rows): unbound, from a 32-byte master
- * seed drawn from the signing RNG,
- *
- *   SHAKE256("HAWK-E8-CM block sampler v1" || master_seed
- *            || u8 logn || u8 tau || u64le(block_index)
- *            || u64le(sigma_sign bits))
- */
-static void
-e8_block_rng_init(cmn_rng *rng,
-	const uint8_t master_seed[E8_MASTER_SEED_BYTES],
+/* see e8_sampler_inner.h */
+void
+e8_sampler_block_rng_init(cmn_rng *rng, const uint8_t *seed,
 	unsigned logn, uint64_t block_index, uint8_t tau,
 	uint64_t sigma_sign_bits)
 {
@@ -328,7 +112,7 @@ e8_block_rng_init(cmn_rng *rng,
 	e8_enc64le(label + 2, block_index);
 	e8_enc64le(label + 10, sigma_sign_bits);
 	cmn_rng_init(rng, domain, sizeof domain - 1,
-		master_seed, E8_MASTER_SEED_BYTES, label, sizeof label);
+		seed, E8_MASTER_SEED_BYTES, label, sizeof label);
 }
 
 /*
@@ -468,7 +252,7 @@ e8_sampler_resolve_thread_count(size_t block_count, unsigned logn)
 }
 
 static void
-e8_sampler_apply_auto_policy(unsigned logn, size_t block_count,
+e8_sampler_apply_auto_policy(size_t block_count,
 	unsigned configured_threads, unsigned *thread_count,
 	unsigned *rng_mode)
 {
@@ -476,10 +260,7 @@ e8_sampler_apply_auto_policy(unsigned logn, size_t block_count,
 	 * Automatic thread counts use the bound per-worker streams, also
 	 * when they resolve to one thread (one stream).
 	 */
-	(void)logn;
-	if (configured_threads != 0 || thread_count == NULL
-		|| rng_mode == NULL)
-	{
+	if (configured_threads != 0) {
 		return;
 	}
 	if (*thread_count <= 1 || block_count < 2) {
@@ -510,8 +291,8 @@ e8_sampler_get_thread_count(unsigned logn)
 void
 e8_sampler_set_rng_mode(unsigned mode)
 {
-	e8_sampler_rng_mode = mode == E8_SAMPLER_RNG_PER_WORKER
-		? E8_SAMPLER_RNG_PER_WORKER : E8_SAMPLER_RNG_PER_BLOCK;
+	e8_sampler_rng_mode = mode == E8_SAMPLER_RNG_PER_BLOCK
+		? E8_SAMPLER_RNG_PER_BLOCK : E8_SAMPLER_RNG_PER_WORKER;
 }
 
 /* see hawk_e8_inner.h */
@@ -521,7 +302,8 @@ e8_sampler_get_rng_mode(void)
 	return e8_sampler_rng_mode;
 }
 
-static void
+/* see e8_sampler_inner.h */
+void
 e8_sampler_stats_add(e8_sampler_stats *dst, const e8_sampler_stats *src)
 {
 	if (dst == NULL || src == NULL) {
@@ -539,40 +321,6 @@ e8_sampler_stats_add(e8_sampler_stats *dst, const e8_sampler_stats *src)
 	}
 }
 
-static uint64_t
-double_bits(double x)
-{
-	uint64_t bits;
-
-	memcpy(&bits, &x, sizeof bits);
-	return bits;
-}
-
-static unsigned
-parity8(uint8_t x)
-{
-	x ^= x >> 4;
-	x ^= x >> 2;
-	x ^= x >> 1;
-	return x & 1u;
-}
-
-static uint8_t
-rm13_component_rep(uint8_t component)
-{
-	/*
-	 * The RM(1,3) parity-check columns are the odd four-bit values
-	 * 1,3,5,...,15.  Columns 0,1,2,4 form an invertible 4x4 subsystem, so
-	 * this compact representative has the requested syndrome.
-	 */
-	uint8_t b1 = (uint8_t)((component >> 1) & 1u);
-	uint8_t b2 = (uint8_t)((component >> 2) & 1u);
-	uint8_t b4 = (uint8_t)((component >> 3) & 1u);
-	uint8_t b0 = (uint8_t)((component & 1u) ^ b1 ^ b2 ^ b4);
-
-	return (uint8_t)(b0 | (b1 << 1) | (b2 << 2) | (b4 << 4));
-}
-
 /* see hawk_e8_inner.h */
 uint8_t
 e8_rm13_syndrome(uint8_t p)
@@ -580,7 +328,7 @@ e8_rm13_syndrome(uint8_t p)
 	uint8_t s = 0;
 
 	for (unsigned u = 0; u < sizeof RM13_CHECK_ROWS; u ++) {
-		s |= (uint8_t)(parity8(p & RM13_CHECK_ROWS[u]) << u);
+		s |= (uint8_t)(e8_parity8(p & RM13_CHECK_ROWS[u]) << u);
 	}
 	return s;
 }
@@ -589,333 +337,7 @@ e8_rm13_syndrome(uint8_t p)
 uint8_t
 e8_rm13_codeword(unsigned u)
 {
-	return u < E8_CA_COSETS ? RM13_CODEWORDS[u] : 0;
-}
-
-#if HAWK_E8_DEBUG_CHECKS
-static uint8_t
-lift_parity_from_z(uint8_t tau, const int32_t *zblk)
-{
-	uint8_t p = 0;
-
-	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		int32_t d = zblk[u] - (int32_t)((tau >> u) & 1u);
-		int32_t y;
-
-		assert((d & 1) == 0);
-		y = d / 2;
-		p |= (uint8_t)((((uint32_t)y) & 1u) << u);
-	}
-	return p;
-}
-#endif
-
-static void
-make_u8_block(int32_t *blk, uint8_t bits)
-{
-	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		blk[u] = (int32_t)((bits >> u) & 1u);
-	}
-}
-
-/*
- * Finite Gaussian weights, normalisers, and cached probability tables are
- * built and held in double.  Runtime hot component and tiny-value CDF
- * thresholds use 64-bit integer thresholds in the hot path.
- */
-static int
-sample_1d_integer_bounds(double center, double sigma, int *lo, int *hi)
-{
-	if (!(sigma > 0.0)) {
-		return 0;
-	}
-
-	double radius = E8_1D_TAIL_SIGMAS * sigma + E8_1D_TAIL_FLOOR;
-	double lo_d = floor(center - radius);
-	double hi_d = ceil(center + radius);
-
-	if (lo_d < (double)INT32_MIN || hi_d > (double)INT32_MAX) {
-		return 0;
-	}
-
-	*lo = (int)lo_d;
-	*hi = (int)hi_d;
-	return *lo <= *hi;
-}
-
-static double
-sample_1d_integer_mass_range(double center, double sigma, int lo, int hi)
-{
-	double inv_2sigma2 = 1.0 / (2.0 * sigma * sigma);
-	double total = 0.0;
-
-	for (int x = lo; x <= hi; x ++) {
-		double d = (double)x - center;
-		total += exp(-(d * d) * inv_2sigma2);
-	}
-
-	return total;
-}
-
-static double
-sample_1d_integer_mass(double center, double sigma)
-{
-	int lo, hi;
-
-	if (!sample_1d_integer_bounds(center, sigma, &lo, &hi)) {
-		return 0.0;
-	}
-	return sample_1d_integer_mass_range(center, sigma, lo, hi);
-}
-
-static void
-sample_1d_hot_row_free(e8_1d_hot_row *row)
-{
-	if (row == NULL) {
-		return;
-	}
-	free(row->tail_value);
-	free(row->tail_cdf);
-	memset(row, 0, sizeof *row);
-}
-
-static int
-sample_1d_integer_table_build_tail(e8_1d_hot_row *row,
-	const e8_1d_integer_table *table, const double *weights)
-{
-	unsigned char *used;
-	size_t tail_cap = 0;
-	double tail_mass = 0.0;
-
-	if (row == NULL || table == NULL || weights == NULL) {
-		return 0;
-	}
-	used = calloc(table->len, sizeof *used);
-	if (used == NULL) {
-		return 0;
-	}
-	for (unsigned i = 0; i < row->tiny_len; i ++) {
-		int64_t idx = (int64_t)row->tiny_value[i] - table->lo;
-		if (idx >= 0 && (size_t)idx < table->len) {
-			used[idx] = 1;
-		}
-	}
-	for (size_t i = 0; i < table->len; i ++) {
-		if (!used[i] && weights[i] > 0.0) {
-			tail_cap ++;
-		}
-	}
-	if (tail_cap == 0) {
-		free(used);
-		row->tail_mass = 0.0;
-		return 1;
-	}
-
-	row->tail_value = malloc(tail_cap * sizeof *row->tail_value);
-	row->tail_cdf = malloc(tail_cap * sizeof *row->tail_cdf);
-	if (row->tail_value == NULL || row->tail_cdf == NULL) {
-		free(used);
-		free(row->tail_value);
-		free(row->tail_cdf);
-		row->tail_value = NULL;
-		row->tail_cdf = NULL;
-		return 0;
-	}
-
-	for (size_t out = 0; out < tail_cap; out ++) {
-		size_t best = table->len;
-		double best_weight = 0.0;
-
-		for (size_t i = 0; i < table->len; i ++) {
-			if (!used[i] && weights[i] > best_weight) {
-				best = i;
-				best_weight = weights[i];
-			}
-		}
-		if (best == table->len || !(best_weight > 0.0)) {
-			break;
-		}
-		used[best] = 1;
-		tail_mass += best_weight;
-		row->tail_value[row->tail_len] = (int32_t)(table->lo + (int)best);
-		row->tail_cdf[row->tail_len] = tail_mass;
-		row->tail_len ++;
-	}
-	free(used);
-	row->tail_mass = tail_mass;
-	return row->tail_len > 0 && tail_mass > 0.0;
-}
-
-static int
-sample_1d_integer_table_build_tiny(e8_1d_hot_row *row,
-	const e8_1d_integer_table *table, const double *weights,
-	double total)
-{
-	size_t chosen[E8_1D_TINY_VALUES];
-	unsigned chosen_len = 0;
-	double tiny_mass = 0.0;
-	double prefix = 0.0;
-
-	if (row == NULL || table == NULL || weights == NULL || table->len == 0
-		|| !(total > 0.0))
-	{
-		return 0;
-	}
-	memset(row, 0, sizeof *row);
-	row->center_num32 = table->center_num32;
-
-	for (unsigned out = 0; out < E8_1D_TINY_VALUES; out ++) {
-		size_t best = table->len;
-		double best_weight = 0.0;
-
-		for (size_t i = 0; i < table->len; i ++) {
-			int used = 0;
-
-			for (unsigned j = 0; j < chosen_len; j ++) {
-				used |= chosen[j] == i;
-			}
-			if (!used && weights[i] > best_weight) {
-				best = i;
-				best_weight = weights[i];
-			}
-		}
-		if (best == table->len || !(best_weight > 0.0)) {
-			break;
-		}
-		chosen[chosen_len ++] = best;
-	}
-
-	unsigned table_len = 0;
-	for (unsigned i = 0; i < chosen_len; i ++) {
-		size_t idx = chosen[i];
-		uint64_t q;
-
-		prefix = tiny_mass + weights[idx];
-		q = e8_cdf_threshold_u64(prefix, total);
-		if (table_len > 0 && q <= row->tiny_cdf[table_len - 1]) {
-			continue;
-		}
-		row->tiny_value[table_len] = (int32_t)(table->lo + (int)idx);
-		row->tiny_cdf[table_len] = q;
-		tiny_mass = prefix;
-		table_len ++;
-	}
-	row->tiny_len = (uint8_t)table_len;
-	row->tiny_mass = tiny_mass;
-	if (table_len == 0 || !(tiny_mass > 0.0)) {
-		return 0;
-	}
-	if (!sample_1d_integer_table_build_tail(row, table, weights)) {
-		return 0;
-	}
-	if (!(row->tail_mass > 0.0)) {
-		row->tiny_cdf[row->tiny_len - 1] = UINT64_MAX;
-	}
-	return 1;
-}
-
-static int
-sample_1d_integer_table_build(e8_1d_integer_table *table,
-	e8_1d_hot_row *row, int64_t center_num32, double sigma)
-{
-	double center = (double)center_num32 / E8_CA_PRODUCT_NORM2;
-	int lo, hi;
-
-	if (table == NULL || row == NULL
-		|| !sample_1d_integer_bounds(center, sigma, &lo, &hi))
-	{
-		return 0;
-	}
-
-	int64_t span = (int64_t)hi - (int64_t)lo + 1;
-	if (span <= 0) {
-		return 0;
-	}
-	size_t len = (size_t)span;
-	double *cdf = malloc(len * sizeof *cdf);
-	if (cdf == NULL) {
-		return 0;
-	}
-	double *weights = malloc(len * sizeof *weights);
-	if (weights == NULL) {
-		free(cdf);
-		return 0;
-	}
-
-	double inv_2sigma2 = 1.0 / (2.0 * sigma * sigma);
-	double total = 0.0;
-	for (size_t i = 0; i < len; i ++) {
-		int x = lo + (int)i;
-		double d = (double)x - center;
-		double w = exp(-(d * d) * inv_2sigma2);
-
-		weights[i] = w;
-		total += w;
-		cdf[i] = total;
-	}
-	if (!(total > 0.0)) {
-		free(weights);
-		free(cdf);
-		return 0;
-	}
-
-	table->center_num32 = center_num32;
-	table->sigma_coord_bits = double_bits(sigma);
-	table->lo = lo;
-	table->hi = hi;
-	table->len = len;
-	table->total = total;
-	table->cdf = cdf;
-	int ok = sample_1d_integer_table_build_tiny(row, table,
-		weights, total);
-	free(weights);
-	if (!ok) {
-		free(cdf);
-		memset(table, 0, sizeof *table);
-		sample_1d_hot_row_free(row);
-		return 0;
-	}
-	return 1;
-}
-
-static int
-sample_1d_integer_gaussian_hot(int32_t *out,
-	const e8_1d_hot_row *row, const e8_1d_integer_table *table,
-	cmn_rng *rng_stream)
-{
-	if (out == NULL || row == NULL || table == NULL || table->cdf == NULL
-		|| table->len == 0 || !(table->total > 0.0)
-		|| row->tiny_len == 0 || rng_stream == NULL)
-	{
-		return 0;
-	}
-
-	uint64_t target = cmn_rng_read_u64le(rng_stream);
-	for (unsigned i = 0; i < row->tiny_len; i ++) {
-		if (target <= row->tiny_cdf[i]) {
-			*out = row->tiny_value[i];
-			return 1;
-		}
-	}
-
-	double tail_total = row->tail_mass;
-	if (!(tail_total > 0.0)) {
-		*out = row->tiny_value[row->tiny_len - 1];
-		return 1;
-	}
-
-	double tail_target = rng_stream_double(rng_stream) * tail_total;
-	for (size_t i = 0; i < row->tail_len; i ++) {
-		if (row->tail_cdf[i] >= tail_target) {
-			*out = row->tail_value[i];
-			return 1;
-		}
-	}
-
-	*out = row->tail_len > 0
-		? row->tail_value[row->tail_len - 1]
-		: row->tiny_value[row->tiny_len - 1];
-	return 1;
+	return u < E8_CA_COSETS ? E8_RM13_CODEWORDS[u] : 0;
 }
 
 /* see hawk_e8_inner.h */
@@ -1047,725 +469,56 @@ e8_block_solve_P_checked(int32_t *zblk,
 	return 1;
 }
 
-/* see hawk_e8_inner.h */
-double
-e8_sigma_to_rho_s(double sigma)
-{
-	return sqrt(E8_TWO_PI) * sigma;
-}
-
-static int
-rm13_codeword_index(uint8_t codeword, uint8_t *index)
-{
-	for (unsigned u = 0; u < E8_CA_COSETS; u ++) {
-		if (RM13_CODEWORDS[u] == codeword) {
-			*index = (uint8_t)u;
-			return 1;
-		}
-	}
-	return 0;
-}
-
 static void
-e8_ca_component_offset_cm(int32_t *offset,
-	uint8_t tau, uint8_t component)
-{
-	int32_t taublk[E8_BLOCK_DIM];
-	int32_t repblk[E8_BLOCK_DIM];
-	int32_t prep[E8_BLOCK_DIM];
-
-	make_u8_block(taublk, tau);
-	make_u8_block(repblk, rm13_component_rep(component));
-	e8_block_apply_P(offset, taublk);
-	e8_block_apply_P(prep, repblk);
-	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		offset[u] += 2 * prep[u];
-	}
-}
-
-static int64_t
-e8_ca_component_center_num32(const int32_t *offset, unsigned coord)
-{
-	int64_t dot = 0;
-
-	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		dot += (int64_t)offset[u] * E8_CA_PRODUCT_BASIS[coord][u];
-	}
-	return -dot;
-}
-
-static double
-e8_ca_component_center(const int32_t *offset, unsigned coord)
-{
-	return (double)e8_ca_component_center_num32(offset, coord)
-		/ E8_CA_PRODUCT_NORM2;
-}
-
-static void
-e8_ca_sigma_cache_free(e8_ca_sigma_cache *cache)
-{
-	if (cache == NULL) {
-		return;
-	}
-	for (size_t i = 0; i < cache->table_count; i ++) {
-		free(cache->tables[i].cdf);
-		sample_1d_hot_row_free(&cache->hot_rows[i]);
-	}
-	free(cache->tables);
-	free(cache->hot_rows);
-	free(cache);
-}
-
-static int
-e8_ca_cache_get_1d_table(e8_ca_sigma_cache *cache,
-	int64_t center_num32, size_t *table_index)
-{
-	if (cache == NULL || table_index == NULL) {
-		return 0;
-	}
-
-	for (size_t i = 0; i < cache->table_count; i ++) {
-		if (cache->tables[i].center_num32 == center_num32
-			&& cache->tables[i].sigma_coord_bits
-				== cache->sigma_coord_bits)
-		{
-			*table_index = i;
-			return 1;
-		}
-	}
-
-	if (cache->table_count == cache->table_cap) {
-		size_t new_cap = cache->table_cap == 0
-			? E8_CA_CACHE_INIT_TABLES : cache->table_cap << 1;
-		e8_1d_integer_table *new_tables =
-			realloc(cache->tables, new_cap * sizeof *new_tables);
-		e8_1d_hot_row *new_hot_rows;
-
-		if (new_tables == NULL) {
-			return 0;
-		}
-		cache->tables = new_tables;
-		new_hot_rows = realloc(cache->hot_rows,
-			new_cap * sizeof *new_hot_rows);
-		if (new_hot_rows == NULL) {
-			return 0;
-		}
-		cache->hot_rows = new_hot_rows;
-		memset(cache->tables + cache->table_cap, 0,
-			(new_cap - cache->table_cap) * sizeof *cache->tables);
-		memset(cache->hot_rows + cache->table_cap, 0,
-			(new_cap - cache->table_cap) * sizeof *cache->hot_rows);
-		cache->table_cap = new_cap;
-	}
-
-	size_t new_index = cache->table_count;
-	if (new_index > UINT8_MAX) {
-		return 0;
-	}
-	if (!sample_1d_integer_table_build(&cache->tables[new_index],
-		&cache->hot_rows[new_index], center_num32, cache->sigma_coord))
-	{
-		return 0;
-	}
-	cache->table_count ++;
-	*table_index = new_index;
-	return 1;
-}
-
-static int
-e8_ca_component_cdf_build(e8_ca_sigma_cache *cache, unsigned tau,
-	const double *prefix, double total)
-{
-	uint8_t fallback = 0;
-	int have_fallback = 0;
-
-	if (cache == NULL || prefix == NULL || tau >= E8_CA_TAUS) {
-		return 0;
-	}
-	if (!(total > 0.0)) {
-		return 0;
-	}
-
-	for (unsigned component = 0; component < E8_CA_COSETS; component ++) {
-		uint64_t q = e8_cdf_threshold_u64(
-			prefix[component], total);
-
-		cache->component_cdf[tau][component] = q;
-		if (prefix[component] > (component == 0
-			? 0.0 : prefix[component - 1]))
-		{
-			fallback = (uint8_t)component;
-			have_fallback = 1;
-		}
-	}
-	if (!have_fallback) {
-		return 0;
-	}
-	cache->component_cdf[tau][E8_CA_COSETS - 1] = UINT64_MAX;
-	cache->component_fallback[tau] = fallback;
-	return 1;
-}
-
-static int
-e8_ca_sigma_cache_build(e8_ca_sigma_cache *cache)
-{
-	if (cache == NULL || !(cache->sigma_sign > 0.0)) {
-		return 0;
-	}
-
-	for (unsigned tau = 0; tau < E8_CA_TAUS; tau ++) {
-		double prefix[E8_CA_COSETS];
-		double total = 0.0;
-
-		for (unsigned component = 0;
-			component < E8_CA_COSETS; component ++)
-		{
-			int32_t offset[E8_BLOCK_DIM];
-			double mass = 1.0;
-			int64_t base_norm2 = 0;
-
-			e8_ca_component_offset_cm(offset,
-				(uint8_t)tau, (uint8_t)component);
-			if (!e8_block_solve_P_checked(
-				cache->base_z[tau][component],
-				offset, (uint8_t)tau))
-			{
-				return 0;
-			}
-			for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-				base_norm2 += (int64_t)offset[u] * offset[u];
-			}
-			cache->base_norm2[tau][component] = base_norm2;
-			for (unsigned coord = 0; coord < E8_BLOCK_DIM; coord ++) {
-				int64_t center_num32 =
-					e8_ca_component_center_num32(offset, coord);
-				size_t table_index;
-
-				if (!e8_ca_cache_get_1d_table(cache,
-					center_num32, &table_index))
-				{
-					return 0;
-				}
-				if (table_index > UINT8_MAX) {
-					return 0;
-				}
-				cache->coord_class[tau][component][coord]
-					= (uint8_t)table_index;
-				mass *= cache->tables[table_index].total;
-			}
-			cache->component[tau].masses[component] = mass;
-			total += mass;
-			prefix[component] = total;
-			cache->component[tau].prefix[component] = total;
-		}
-		if (!(total > 0.0)) {
-			return 0;
-		}
-		cache->component[tau].total = total;
-		if (!e8_ca_component_cdf_build(cache, tau, prefix, total)) {
-			return 0;
-		}
-	}
-	return 1;
-}
-
-static e8_ca_sigma_cache *
-e8_ca_get_sigma_cache(double sigma_sign)
-{
-	if (!(sigma_sign > 0.0)) {
-		return NULL;
-	}
-	if (pthread_mutex_lock(&e8_ca_cache_mutex) != 0) {
-		return NULL;
-	}
-
-	uint64_t sigma_bits = double_bits(sigma_sign);
-	for (e8_ca_sigma_cache *cur = e8_ca_cache_list;
-		cur != NULL; cur = cur->next)
-	{
-		if (cur->sigma_sign_bits == sigma_bits) {
-			(void)pthread_mutex_unlock(&e8_ca_cache_mutex);
-			return cur;
-		}
-	}
-
-	e8_ca_sigma_cache *cache = calloc(1, sizeof *cache);
-	if (cache == NULL) {
-		(void)pthread_mutex_unlock(&e8_ca_cache_mutex);
-		return NULL;
-	}
-	cache->sigma_sign = sigma_sign;
-	cache->sigma_sign_bits = sigma_bits;
-	cache->sigma_coord = sigma_sign / sqrt(E8_CA_PRODUCT_NORM2);
-	cache->sigma_coord_bits = double_bits(cache->sigma_coord);
-	if (!e8_ca_sigma_cache_build(cache)) {
-		e8_ca_sigma_cache_free(cache);
-		(void)pthread_mutex_unlock(&e8_ca_cache_mutex);
-		return NULL;
-	}
-	cache->next = e8_ca_cache_list;
-	e8_ca_cache_list = cache;
-	(void)pthread_mutex_unlock(&e8_ca_cache_mutex);
-	return cache;
-}
-
-/* see hawk_e8_inner.h */
-int
-e8_sampler_warm_cache(double sigma_sign)
-{
-	return e8_ca_get_sigma_cache(sigma_sign) != NULL;
-}
-
-static double
-e8_ca_component_mass_cm(uint8_t tau, uint8_t component_codeword,
-	double sigma_sign)
-{
-	uint8_t component;
-	int32_t offset[E8_BLOCK_DIM];
-	double sigma_coord = sigma_sign / sqrt(E8_CA_PRODUCT_NORM2);
-	double mass = 1.0;
-
-	if (!(sigma_sign > 0.0)
-		|| !rm13_codeword_index(component_codeword, &component))
-	{
-		return 0.0;
-	}
-
-	e8_ca_component_offset_cm(offset, tau, component);
-	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		double center = e8_ca_component_center(offset, u);
-		double m = sample_1d_integer_mass(center, sigma_coord);
-
-		if (!(m > 0.0)) {
-			return 0.0;
-		}
-		mass *= m;
-	}
-	return mass;
-}
-
-static int
-e8_ca_component_mass_cm_cached(double *mass_out, uint8_t tau,
-	uint8_t component, double sigma_sign)
-{
-	if (mass_out == NULL || component >= E8_CA_COSETS) {
-		return 0;
-	}
-
-	e8_ca_sigma_cache *cache = e8_ca_get_sigma_cache(sigma_sign);
-	if (cache == NULL) {
-		return 0;
-	}
-	*mass_out = cache->component[tau].masses[component];
-	return 1;
-}
-
-static int
-e8_ca_select_component_cm_cached(uint8_t *component,
-	uint8_t *component_codeword, uint8_t tau,
-	e8_ca_sigma_cache *cache, cmn_rng *rng_stream)
-{
-	if (component == NULL || component_codeword == NULL
-		|| cache == NULL || rng_stream == NULL)
-	{
-		return 0;
-	}
-
-	const uint64_t *cdf = cache->component_cdf[tau];
-	uint64_t target = cmn_rng_read_u64le(rng_stream);
-	for (unsigned u = 0; u < E8_CA_COSETS; u ++) {
-		if (target <= cdf[u]) {
-			*component = (uint8_t)u;
-			*component_codeword = RM13_CODEWORDS[u];
-			return 1;
-		}
-	}
-
-	*component = cache->component_fallback[tau];
-	*component_codeword = RM13_CODEWORDS[*component];
-	return 1;
-}
-
-/* see hawk_e8_inner.h */
-int
-e8_sampler_cache_compare_1d_mass(double sigma_sign,
-	int64_t center_num32, double *reference_mass, double *cached_mass)
-{
-	if (reference_mass == NULL || cached_mass == NULL
-		|| !(sigma_sign > 0.0))
-	{
-		return 0;
-	}
-
-	double sigma_coord = sigma_sign / sqrt(E8_CA_PRODUCT_NORM2);
-	double center = (double)center_num32 / E8_CA_PRODUCT_NORM2;
-	e8_ca_sigma_cache *cache = e8_ca_get_sigma_cache(sigma_sign);
-	size_t table_index;
-
-	if (cache == NULL
-		|| !e8_ca_cache_get_1d_table(cache,
-			center_num32, &table_index))
-	{
-		return 0;
-	}
-	*reference_mass = sample_1d_integer_mass(center, sigma_coord);
-	*cached_mass = cache->tables[table_index].total;
-	return 1;
-}
-
-/* see hawk_e8_inner.h */
-int
-e8_sampler_cache_compare_component_mass(uint8_t tau,
-	uint8_t component, double sigma_sign,
-	double *reference_mass, double *cached_mass)
-{
-	if (reference_mass == NULL || cached_mass == NULL
-		|| component >= E8_CA_COSETS)
-	{
-		return 0;
-	}
-
-	double cmass;
-	if (!e8_ca_component_mass_cm_cached(&cmass,
-		tau, component, sigma_sign))
-	{
-		return 0;
-	}
-	*reference_mass = e8_ca_component_mass_cm(tau,
-		RM13_CODEWORDS[component], sigma_sign);
-	*cached_mass = cmass;
-	return 1;
-}
-
-static int
-e8_ca_reconstruct_x(int32_t *xblk, const int32_t *offset,
-	const int32_t *coords)
-{
-	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		int64_t x = offset[u];
-
-		for (unsigned v = 0; v < E8_BLOCK_DIM; v ++) {
-			x += (int64_t)E8_CA_PRODUCT_BASIS[v][u] * coords[v];
-		}
-		if (x < INT32_MIN || x > INT32_MAX) {
-			return 0;
-		}
-		xblk[u] = (int32_t)x;
-	}
-	return 1;
-}
-
-static int
-e8_ca_reconstruct_z_affine(int32_t *zblk, const int32_t *base_z,
-	const int32_t *coords)
-{
-	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		int64_t z = base_z[u];
-
-		for (unsigned v = 0; v < E8_BLOCK_DIM; v ++) {
-			z += (int64_t)coords[v] * E8_CA_DELTA_Z[v][u];
-		}
-		if (z < INT32_MIN || z > INT32_MAX) {
-			return 0;
-		}
-		zblk[u] = (int32_t)z;
-	}
-	return 1;
-}
-
-static int
-e8_sample_block_construction_a_cm_inner_cached(int32_t *zblk, uint8_t tau,
-	e8_ca_sigma_cache *cache, cmn_rng *rng_stream,
-	uint64_t *norm2_out, e8_sampler_stats *stats,
-	e8_ca_sample_trace *trace)
-{
-	uint8_t component, component_codeword;
-	int32_t offset[E8_BLOCK_DIM];
-	int32_t coords[E8_BLOCK_DIM];
-	int32_t xblk[E8_BLOCK_DIM];
-	int64_t n2 = 0;
-
-	/*
-	 * Direct coset-matched Construction-A sampler for one HAWK-E8-CM
-	 * block.  Here M = PZ^8.  For z = tau + 2y, the E8-side coset is
-	 *
-	 *     C_tau = 2M + P tau = P tau + 2P Z^8.
-	 *
-	 * The lift y is first decomposed modulo the Construction-A lattice
-	 * RM(1,3)+2Z^8.  Each of the 16 RM(1,3)-labelled components is
-	 *
-	 *     P tau + 2P r + 2P(RM(1,3)+2Z^8),
-	 *
-	 * where r is a representative with the selected syndrome.  The kernel
-	 * lattice on the right has the orthogonal product basis above, so its
-	 * conditional Gaussian mass and sample are products of eight shifted
-	 * one-dimensional integer Gaussians in x-space.  After reconstructing
-	 * xblk in C_tau, the checked inverse map recovers zblk = P^{-1} xblk;
-	 * because xblk - P tau is in 2PZ^8, this inverse is integral and
-	 * zblk is congruent to tau modulo 2.
-	 */
-	if (zblk == NULL || cache == NULL || rng_stream == NULL) {
-		return 0;
-	}
-
-	if (!e8_ca_select_component_cm_cached(&component,
-			&component_codeword, tau, cache, rng_stream))
-	{
-		return 0;
-	}
-	n2 = cache->base_norm2[tau][component];
-	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		uint8_t center_class = cache->coord_class[tau][component][u];
-		const e8_1d_hot_row *row = &cache->hot_rows[center_class];
-
-		if (!sample_1d_integer_gaussian_hot(&coords[u],
-			row, &cache->tables[center_class], rng_stream))
-		{
-			return 0;
-		}
-		int64_t c = coords[u];
-		n2 += (int64_t)E8_CA_PRODUCT_NORM2_I * c * c
-			- 2 * c * row->center_num32;
-	}
-	if (!e8_ca_reconstruct_z_affine(zblk,
-		cache->base_z[tau][component], coords))
-	{
-		return 0;
-	}
-#if HAWK_E8_DEBUG_CHECKS
-	int32_t check_z[E8_BLOCK_DIM];
-	int64_t check_n2 = 0;
-
-	e8_ca_component_offset_cm(offset, tau, component);
-	if (!e8_ca_reconstruct_x(xblk, offset, coords)) {
-		return 0;
-	}
-	if (!e8_block_solve_P_checked(check_z, xblk, tau)) {
-		return 0;
-	}
-	for (unsigned u = 0; u < E8_BLOCK_DIM; u ++) {
-		check_n2 += (int64_t)xblk[u] * xblk[u];
-		if (check_z[u] != zblk[u]) {
-			return 0;
-		}
-	}
-	if (n2 < 0 || check_n2 != n2
-		|| (uint64_t)n2 != (uint64_t)e8_block_norm2(zblk)
-		|| e8_rm13_syndrome(lift_parity_from_z(tau, zblk))
-			!= component)
-	{
-		return 0;
-	}
-#else
-	if (n2 < 0) {
-		return 0;
-	}
-	if (trace != NULL) {
-		e8_ca_component_offset_cm(offset, tau, component);
-		if (!e8_ca_reconstruct_x(xblk, offset, coords)) {
-			return 0;
-		}
-	}
-#endif
-
-	if (norm2_out != NULL) {
-		*norm2_out = (uint64_t)n2;
-	}
-	if (stats != NULL) {
-		stats->blocks ++;
-		stats->one_dim_samples += E8_BLOCK_DIM;
-		stats->construction_a_cosets[component] ++;
-		stats->norm2_sum += (uint64_t)n2;
-		if ((uint64_t)n2 > stats->norm2_max) {
-			stats->norm2_max = (uint64_t)n2;
-		}
-	}
-	if (trace != NULL) {
-		trace->component = component;
-		trace->component_codeword = component_codeword;
-		memcpy(trace->product_coords, coords, sizeof coords);
-		memcpy(trace->xblk, xblk, sizeof xblk);
-		memcpy(trace->zblk, zblk, E8_BLOCK_DIM * sizeof *zblk);
-	}
-	return 1;
-}
-
-static int
-e8_sample_block_construction_a_cm_inner(int32_t *zblk, uint8_t tau,
-	double sigma_sign, cmn_rng *rng_stream,
-	uint64_t *norm2_out, e8_sampler_stats *stats,
-	e8_ca_sample_trace *trace)
-{
-	e8_ca_sigma_cache *cache;
-
-	if (!(sigma_sign > 0.0)) {
-		return 0;
-	}
-	cache = e8_ca_get_sigma_cache(sigma_sign);
-	return e8_sample_block_construction_a_cm_inner_cached(zblk, tau,
-		cache, rng_stream, norm2_out, stats, trace);
-}
-
-/* see hawk_e8_inner.h */
-int
-e8_sample_block_construction_a_cm_trace(int32_t *zblk, uint8_t tau,
-	double sigma_sign, hawk_rng rng, void *rng_context,
-	uint64_t *norm2_out, e8_sampler_stats *stats,
-	e8_ca_sample_trace *trace)
-{
-	cmn_rng rng_stream;
-
-	if (!rng_stream_init(&rng_stream, rng, rng_context)) {
-		return 0;
-	}
-	return e8_sample_block_construction_a_cm_inner(zblk, tau,
-		sigma_sign, &rng_stream, norm2_out, stats, trace);
-}
-
-/* see hawk_e8_inner.h */
-int
-e8_sample_block_construction_a_cm(int32_t *zblk, uint8_t tau,
-	double sigma_sign, hawk_rng rng, void *rng_context,
-	uint64_t *norm2_out, e8_sampler_stats *stats)
-{
-	cmn_rng rng_stream;
-
-	if (!rng_stream_init(&rng_stream, rng, rng_context)) {
-		return 0;
-	}
-	return e8_sample_block_construction_a_cm_inner(zblk, tau,
-		sigma_sign, &rng_stream, norm2_out, stats, NULL);
-}
-
-struct e8_sample_z_worker_args_s {
-	int32_t *z0;
-	int32_t *z1;
-	const uint8_t *t0;
-	const uint8_t *t1;
-	const uint8_t *master_seed;
-	const shake_context *prefix;
-	e8_ca_sigma_cache *cache;
-	unsigned logn;
-	unsigned worker_id;
-	unsigned rng_mode;
-	size_t start;
-	size_t end;
-	uint64_t sigma_sign_bits;
-	uint64_t norm2;
-	e8_sampler_stats stats;
-	e8_sampler_profile profile;
-	cmn_rng_counters rng;
-	int ok;
-};
-
-static void
-e8_sample_z_worker_run(e8_sample_z_worker_args *args)
+e8_sampler_worker_run(e8_sampler_worker *w)
 {
 	cmn_rng worker_stream;
-	cmn_rng_counters rng_counters;
-	int use_worker_rng;
 	uint64_t c0, w0;
 
-	args->ok = 0;
-	args->norm2 = 0;
-	memset(&args->stats, 0, sizeof args->stats);
-	memset(&args->profile, 0, sizeof args->profile);
-	memset(&args->rng, 0, sizeof args->rng);
-	use_worker_rng = args->rng_mode == E8_SAMPLER_RNG_PER_WORKER;
-	if (use_worker_rng) {
+	w->ok = 0;
+	w->norm2 = 0;
+	memset(&w->stats, 0, sizeof w->stats);
+	memset(&w->profile, 0, sizeof w->profile);
+	memset(&w->rng, 0, sizeof w->rng);
+	if (w->rng_mode == E8_SAMPLER_RNG_PER_WORKER) {
 		c0 = e8_profile_cycles_start();
 		w0 = e8_profile_wall_ns();
-		e8_worker_rng_init(&worker_stream, args->prefix,
-			args->master_seed, args->logn, args->worker_id,
-			(uint64_t)args->start, (uint64_t)args->end,
-			args->sigma_sign_bits);
-		e8_profile_add(&args->profile.cycles_block_rng_init,
-			&args->profile.wall_ns_block_rng_init, c0, w0);
+		e8_worker_rng_init(&worker_stream, w->prefix, w->seed,
+			w->logn, w->worker_id, (uint64_t)w->start,
+			(uint64_t)w->end, w->sigma_sign_bits);
+		e8_profile_add(&w->profile.cycles_block_rng_init,
+			&w->profile.wall_ns_block_rng_init, c0, w0);
+		w->ok = w->range_fn(w, &worker_stream);
+		cmn_rng_counters_get(&worker_stream, &w->rng);
+	} else {
+		w->ok = w->range_fn(w, NULL);
 	}
-	for (size_t r = args->start; r < args->end; r ++) {
-		int32_t zblk[E8_BLOCK_DIM];
-		uint64_t n2;
-		uint8_t tau = e8_extract_tau(args->t0, args->t1,
-			r, args->logn);
-		cmn_rng block_stream;
-		cmn_rng *stream = &worker_stream;
-
-		if (!use_worker_rng) {
-			c0 = e8_profile_cycles_start();
-			w0 = e8_profile_wall_ns();
-			e8_block_rng_init(&block_stream, args->master_seed,
-				args->logn, (uint64_t)r, tau,
-				args->sigma_sign_bits);
-			e8_profile_add(&args->profile.cycles_block_rng_init,
-				&args->profile.wall_ns_block_rng_init, c0, w0);
-			stream = &block_stream;
-		}
-
-		c0 = e8_profile_cycles_start();
-		w0 = e8_profile_wall_ns();
-		int sample_ok = e8_sample_block_construction_a_cm_inner_cached(
-			zblk, tau, args->cache, stream,
-			&n2, &args->stats, NULL);
-		e8_profile_add(&args->profile.cycles_block_sample,
-			&args->profile.wall_ns_block_sample, c0, w0);
-		if (!use_worker_rng) {
-			cmn_rng_counters_get(&block_stream, &rng_counters);
-			cmn_rng_counters_add(&args->rng, &rng_counters);
-		}
-		if (!sample_ok) {
-			return;
-		}
-		e8_write_block(args->z0, args->z1, r, zblk, args->logn);
-		if (UINT64_MAX - args->norm2 < n2) {
-			return;
-		}
-		args->norm2 += n2;
-	}
-	if (use_worker_rng) {
-		cmn_rng_counters_get(&worker_stream, &args->rng);
-	}
-	args->ok = 1;
 }
 
 /*
- * Pool job (cmn_pool.h): worker w runs the sampler arguments args[w].
+ * Pool job (cmn_pool.h): worker k runs the arguments w[k].
  */
 static void
-e8_sample_z_worker_job(void *ctx, unsigned worker)
+e8_sampler_worker_job(void *ctx, unsigned worker)
 {
-	e8_sample_z_worker_args *args = ctx;
+	e8_sampler_worker *w = ctx;
 
-	e8_sample_z_worker_run(&args[worker]);
+	e8_sampler_worker_run(&w[worker]);
 }
 
-/* see hawk_e8_inner.h */
+/* see e8_sampler_inner.h */
 int
-e8_sample_z_construction_a_cm(int32_t *z0, int32_t *z1,
+e8_sampler_run(e8_sample_range_fn range_fn, const void *tables,
+	uint64_t sigma_sign_bits, int32_t *z0, int32_t *z1,
 	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
-	unsigned logn, double sigma_sign, hawk_rng rng, void *rng_context,
-	e8_sampler_stats *stats)
-{
-	return e8_sample_z_construction_a_cm_ex(z0, z1, pnorm_out, t0, t1,
-		logn, sigma_sign, e8_sampler_rng_mode, NULL, 0,
-		rng, rng_context, stats);
-}
-
-/* see hawk_e8_inner.h */
-int
-e8_sample_z_construction_a_cm_ex(int32_t *z0, int32_t *z1,
-	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
-	unsigned logn, double sigma_sign, unsigned rng_mode,
+	unsigned logn, unsigned rng_mode,
 	const shake_context *prefix, uint64_t prefix_permutations,
 	hawk_rng rng, void *rng_context, e8_sampler_stats *stats)
 {
 	if (logn < 8 || logn > 10 || z0 == NULL || z1 == NULL
 		|| pnorm_out == NULL || t0 == NULL || t1 == NULL
-		|| !(sigma_sign > 0.0) || rng == NULL)
+		|| range_fn == NULL || tables == NULL || rng == NULL)
 	{
-		return 0;
-	}
-	e8_ca_sigma_cache *cache = e8_ca_get_sigma_cache(sigma_sign);
-	if (cache == NULL) {
 		return 0;
 	}
 
@@ -1773,19 +526,19 @@ e8_sample_z_construction_a_cm_ex(int32_t *z0, int32_t *z1,
 	size_t k = n >> 2;
 	unsigned configured_threads = e8_sampler_configured_thread_count();
 	unsigned thread_count = e8_sampler_resolve_thread_count(k, logn);
-	uint8_t master_seed[E8_BOUND_SEED_BYTES];
+	uint8_t seed[E8_BOUND_SEED_BYTES];
 	size_t seed_len;
 	uint64_t acc = 0;
-	e8_sample_z_worker_args worker_args[E8_SAMPLER_MAX_THREADS];
+	e8_sampler_worker workers[E8_SAMPLER_MAX_THREADS];
 	e8_sampler_profile profile;
 	uint64_t c0, w0;
 
-	rng_mode = rng_mode == E8_SAMPLER_RNG_PER_BLOCK
-		? E8_SAMPLER_RNG_PER_BLOCK : E8_SAMPLER_RNG_PER_WORKER;
 	if (thread_count == 0 || thread_count > E8_SAMPLER_MAX_THREADS) {
 		return 0;
 	}
-	e8_sampler_apply_auto_policy(logn, k, configured_threads,
+	rng_mode = rng_mode == E8_SAMPLER_RNG_PER_BLOCK
+		? E8_SAMPLER_RNG_PER_BLOCK : E8_SAMPLER_RNG_PER_WORKER;
+	e8_sampler_apply_auto_policy(k, configured_threads,
 		&thread_count, &rng_mode);
 	seed_len = rng_mode == E8_SAMPLER_RNG_PER_WORKER
 		? E8_BOUND_SEED_BYTES : E8_MASTER_SEED_BYTES;
@@ -1795,31 +548,31 @@ e8_sample_z_construction_a_cm_ex(int32_t *z0, int32_t *z1,
 	profile.rng_mode = rng_mode;
 	c0 = e8_profile_cycles_start();
 	w0 = e8_profile_wall_ns();
-	rng(rng_context, master_seed, seed_len);
+	rng(rng_context, seed, seed_len);
 	e8_profile_add(&profile.cycles_master_seed,
 		&profile.wall_ns_master_seed, c0, w0);
 	memset(z0, 0, n * sizeof *z0);
 	memset(z1, 0, n * sizeof *z1);
 
 	for (unsigned u = 0; u < thread_count; u ++) {
-		size_t start = (k * (size_t)u) / thread_count;
-		size_t end = (k * (size_t)(u + 1)) / thread_count;
+		e8_sampler_worker *w = &workers[u];
 
-		memset(&worker_args[u], 0, sizeof worker_args[u]);
-		worker_args[u].z0 = z0;
-		worker_args[u].z1 = z1;
-		worker_args[u].t0 = t0;
-		worker_args[u].t1 = t1;
-		worker_args[u].master_seed = master_seed;
-		worker_args[u].prefix =
-			rng_mode == E8_SAMPLER_RNG_PER_WORKER ? prefix : NULL;
-		worker_args[u].cache = cache;
-		worker_args[u].logn = logn;
-		worker_args[u].worker_id = u;
-		worker_args[u].rng_mode = rng_mode;
-		worker_args[u].start = start;
-		worker_args[u].end = end;
-		worker_args[u].sigma_sign_bits = cache->sigma_sign_bits;
+		memset(w, 0, sizeof *w);
+		w->z0 = z0;
+		w->z1 = z1;
+		w->t0 = t0;
+		w->t1 = t1;
+		w->seed = seed;
+		w->prefix = rng_mode == E8_SAMPLER_RNG_PER_WORKER
+			? prefix : NULL;
+		w->tables = tables;
+		w->range_fn = range_fn;
+		w->logn = logn;
+		w->worker_id = u;
+		w->rng_mode = rng_mode;
+		w->start = (k * (size_t)u) / thread_count;
+		w->end = (k * (size_t)(u + 1)) / thread_count;
+		w->sigma_sign_bits = sigma_sign_bits;
 	}
 
 	/*
@@ -1828,15 +581,15 @@ e8_sample_z_construction_a_cm_ex(int32_t *z0, int32_t *z1,
 	 * (cmn_pool.h); harnesses size it outside timed regions.
 	 */
 	if (thread_count == 1) {
-		e8_sample_z_worker_run(&worker_args[0]);
+		e8_sampler_worker_run(&workers[0]);
 	} else {
 		int dispatch_ok;
 		int wait_ok;
 
 		c0 = e8_profile_cycles_start();
 		w0 = e8_profile_wall_ns();
-		dispatch_ok = cmn_pool_dispatch(e8_sample_z_worker_job,
-			worker_args, thread_count - 1);
+		dispatch_ok = cmn_pool_dispatch(e8_sampler_worker_job,
+			workers, thread_count - 1);
 		e8_profile_add(&profile.cycles_worker_dispatch,
 			&profile.wall_ns_worker_dispatch, c0, w0);
 		if (!dispatch_ok) {
@@ -1844,7 +597,7 @@ e8_sample_z_construction_a_cm_ex(int32_t *z0, int32_t *z1,
 			return 0;
 		}
 
-		e8_sample_z_worker_run(&worker_args[0]);
+		e8_sampler_worker_run(&workers[0]);
 
 		c0 = e8_profile_cycles_start();
 		w0 = e8_profile_wall_ns();
@@ -1861,16 +614,16 @@ e8_sample_z_construction_a_cm_ex(int32_t *z0, int32_t *z1,
 	w0 = e8_profile_wall_ns();
 	for (unsigned u = 0; u < thread_count; u ++) {
 		profile.cycles_block_rng_init +=
-			worker_args[u].profile.cycles_block_rng_init;
+			workers[u].profile.cycles_block_rng_init;
 		profile.wall_ns_block_rng_init +=
-			worker_args[u].profile.wall_ns_block_rng_init;
+			workers[u].profile.wall_ns_block_rng_init;
 		profile.cycles_block_sample +=
-			worker_args[u].profile.cycles_block_sample;
+			workers[u].profile.cycles_block_sample;
 		profile.wall_ns_block_sample +=
-			worker_args[u].profile.wall_ns_block_sample;
-		cmn_rng_counters_add(&profile.rng, &worker_args[u].rng);
-		if (!worker_args[u].ok
-			|| UINT64_MAX - acc < worker_args[u].norm2)
+			workers[u].profile.wall_ns_block_sample;
+		cmn_rng_counters_add(&profile.rng, &workers[u].rng);
+		if (!workers[u].ok
+			|| UINT64_MAX - acc < workers[u].norm2)
 		{
 			e8_profile_add(&profile.cycles_reduction,
 				&profile.wall_ns_reduction, c0, w0);
@@ -1878,10 +631,10 @@ e8_sample_z_construction_a_cm_ex(int32_t *z0, int32_t *z1,
 			e8_sampler_last_profile = profile;
 			return 0;
 		}
-		acc += worker_args[u].norm2;
+		acc += workers[u].norm2;
 	}
 	for (unsigned u = 0; u < thread_count; u ++) {
-		e8_sampler_stats_add(stats, &worker_args[u].stats);
+		e8_sampler_stats_add(stats, &workers[u].stats);
 	}
 	e8_profile_add(&profile.cycles_reduction,
 		&profile.wall_ns_reduction, c0, w0);

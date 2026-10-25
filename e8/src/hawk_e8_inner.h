@@ -97,6 +97,12 @@
 #define e8_sample_z_construction_a_cm  Zh(e8_sample_z_construction_a_cm)
 #define e8_sample_z_construction_a_cm_ex  Zh(e8_sample_z_construction_a_cm_ex)
 #define e8_sampler_prefix_init  Zh(e8_sampler_prefix_init)
+#define e8_sample_z_hot64  Zh(e8_sample_z_hot64)
+#define e8_hot64_sample_block  Zh(e8_hot64_sample_block)
+#define e8_hot64_sample_1d  Zh(e8_hot64_sample_1d)
+#define e8_hot64_tables_get  Zh(e8_hot64_tables_get)
+#define e8_sampler_runtime_hot64  Zh(e8_sampler_runtime_hot64)
+#define e8_norm_bound_default  Zh(e8_norm_bound_default)
 #define e8_sampler_warm_cache  Zh(e8_sampler_warm_cache)
 #define e8_sampler_set_thread_count  Zh(e8_sampler_set_thread_count)
 #define e8_sampler_get_thread_count  Zh(e8_sampler_get_thread_count)
@@ -415,7 +421,25 @@ int e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
 	e8_sign_trace_timing *trace_timing);
 
 /*
- * Shared core of all sampler-backed signers.  If salt is non-NULL, it is
+ * Full-dimension sampler of one variant (integer-only): samples z0, z1 in
+ * the internal coset t (2R^2 + t) from the variant's tables (const
+ * pointer to the variant's generated or runtime-built table type), sets
+ * *pnorm_out to ||P_n z||^2, and draws its seed from rng (40 bytes in
+ * per-worker mode, 32 in per-block mode). In per-worker mode the streams
+ * start from prefix (NULL: empty), whose absorption took
+ * prefix_permutations permutations. Uses the configured thread count.
+ * Returns 1 on success, 0 on error.
+ */
+typedef int (*e8_sample_z_fn)(const void *tables, int32_t *z0, int32_t *z1,
+	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, unsigned rng_mode,
+	const shake_context *prefix, uint64_t prefix_permutations,
+	hawk_rng rng, void *rng_context, e8_sampler_stats *stats);
+
+/*
+ * Shared core of all sampler-backed signers, integer-only: the sampler
+ * variant sample_z with its tables, rejection above norm_bound (compared
+ * with ||P_n z||^2).  If salt is non-NULL, it is
  * used unchanged for every attempt, and h and the target coset are
  * computed once (the e8_sign_sampler_* entry points above).  If salt is
  * NULL, each attempt derives a fresh salt exactly as HAWK does:
@@ -441,11 +465,20 @@ int e8_sign_sampler_core(unsigned logn,
 	const e8_inverse_w_ntt_basis *basis_ntt,
 	const e8_coset_f2_basis *basis_f2, const uint8_t *salt,
 	const void *salt_key, size_t salt_key_len,
-	double sigma_sign, double sigma_verify,
+	e8_sample_z_fn sample_z, const void *tables, int64_t norm_bound,
 	unsigned max_attempts, hawk_rng rng, void *rng_context,
 	int32_t *trace_z0, int32_t *trace_z1,
 	int64_t *trace_pnorm, unsigned *trace_attempts,
 	e8_sign_trace_timing *trace_timing);
+
+/*
+ * Integer norm bound of the public API for logn (8, 9 or 10):
+ * floor(8 n sigma_verify^2) with the default sigma_verify, precomputed
+ * (8439, 16220, 31150); equal to e8_verify_bound_from_sigma() with
+ * e8_sigma_verify_default() (checked by test_e8_api). Returns 0 for any
+ * other logn.
+ */
+int64_t e8_norm_bound_default(unsigned logn);
 
 /*
  * Implementation of e8_sign_finish() and e8_sign_finish_prepared() (see
@@ -463,9 +496,8 @@ int e8_sign_finish_inner(unsigned logn,
 	unsigned *trace_attempts, e8_sign_trace_timing *trace_timing);
 
 /*
- * Experimental E8 sampler helpers.  These are floating-point,
- * data-dependent, non-constant-time research functions and are not
- * production signing code.
+ * Experimental E8 sampler helpers (block layout and geometry; integer
+ * research functions, not production signing code).
  */
 uint8_t e8_extract_tau(const uint8_t *t0, const uint8_t *t1,
 	size_t r, unsigned logn);
@@ -529,11 +561,11 @@ double e8_sigma_to_rho_s(double sigma);
  * internal P-coordinate coset label; the returned zblk always satisfies
  * zblk[i] = bit_i(tau) mod 2, and norm2 is ||P zblk||^2.
  *
- * The default sampler uses a runtime cache of one-dimensional shifted
- * Gaussian tables and tau/component selection masses.  Cached probability
- * tables and finite Gaussian normalisers are held in double, while runtime
- * hot-path CDF thresholds are 64-bit integers.  It remains an
- * experimental, floating-point, data-dependent research sampler.
+ * The double-sigma entry points below (tests and tools) run the hot64
+ * variant on tables built at runtime in double for the given sigma_sign
+ * (e8_sampler_runtime_hot64()); the signing API uses the generated
+ * integer tables instead.  The hot variants are data-dependent and not
+ * constant-time.
  *
  * Cache lookup and publication are mutex-protected.  The sampler as a whole
  * is not reentrant across application threads because its worker pool,
@@ -602,6 +634,37 @@ int e8_sample_z_construction_a_cm_ex(int32_t *z0, int32_t *z1,
 	unsigned logn, double sigma_sign, unsigned rng_mode,
 	const shake_context *prefix, uint64_t prefix_permutations,
 	hawk_rng rng, void *rng_context, e8_sampler_stats *stats);
+
+/*
+ * The hot64 variant (e8_sampler_hot.c, integer-only): an e8_sample_z_fn
+ * over e8_hot64_tables (e8/tables/e8_tables_hot64.h), the generated
+ * tables of logn (NULL for other logn), and one block from a caller's
+ * stream (tests and the legacy single-block entry points).
+ */
+int e8_sample_z_hot64(const void *tables, int32_t *z0, int32_t *z1,
+	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, unsigned rng_mode,
+	const shake_context *prefix, uint64_t prefix_permutations,
+	hawk_rng rng, void *rng_context, e8_sampler_stats *stats);
+
+const void *e8_hot64_tables_get(unsigned logn);
+
+int e8_hot64_sample_block(const void *tables, int32_t *zblk, uint8_t tau,
+	cmn_rng *stream, uint64_t *norm2_out, e8_sampler_stats *stats,
+	e8_ca_sample_trace *trace);
+
+/*
+ * Test hook: one draw from the 1D table of centre class cls.
+ */
+int e8_hot64_sample_1d(const void *tables, unsigned cls, cmn_rng *stream,
+	int32_t *out);
+
+/*
+ * hot64 tables built at runtime in double for an arbitrary sigma_sign
+ * (e8_sampler_runtime.c, tests and tools only; cached per sigma_sign bit
+ * pattern), in the generated table format. NULL on error.
+ */
+const void *e8_sampler_runtime_hot64(double sigma_sign);
 
 /*
  * Binding prefix of the sampler streams for one attempt, as upstream

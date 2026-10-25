@@ -34,13 +34,15 @@
 /*
  * Fenced TSC readings. They are inline so that taking a timestamp adds no
  * call to the measured interval. They return 0 on platforms without a
- * TSC.
+ * TSC. The fence is an inline lfence instruction (as _mm_lfence() emits)
+ * so that the module also compiles with -mgeneral-regs-only (make
+ * check-integer-only).
  */
 static inline uint64_t
 cmn_tsc_start(void)
 {
 #if defined(__x86_64__)
-	_mm_lfence();
+	__asm__ __volatile__ ("lfence" : : : "memory");
 	return __rdtsc();
 #else
 	return 0;
@@ -55,7 +57,7 @@ cmn_tsc_end(void)
 	uint64_t x;
 
 	x = __rdtscp(&aux);
-	_mm_lfence();
+	__asm__ __volatile__ ("lfence" : : : "memory");
 	return x;
 #else
 	return 0;

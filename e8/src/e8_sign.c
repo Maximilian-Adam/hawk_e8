@@ -610,7 +610,7 @@ e8_sign_sampler_core(unsigned logn,
 	const e8_inverse_w_ntt_basis *basis_ntt,
 	const e8_coset_f2_basis *basis_f2, const uint8_t *salt,
 	const void *salt_key, size_t salt_key_len,
-	double sigma_sign, double sigma_verify,
+	e8_sample_z_fn sample_z, const void *tables, int64_t norm_bound,
 	unsigned max_attempts, hawk_rng rng, void *rng_context,
 	int32_t *trace_z0, int32_t *trace_z1,
 	int64_t *trace_pnorm, unsigned *trace_attempts,
@@ -623,7 +623,6 @@ e8_sign_sampler_core(unsigned logn,
 	const uint8_t *sig_salt;
 	int32_t z0[E8_MAXN], z1[E8_MAXN];
 	int16_t s0[E8_MAXN], s1[E8_MAXN];
-	int64_t threshold;
 	size_t n;
 	shake_context prefix;
 	uint64_t prefix_permutations;
@@ -638,12 +637,13 @@ e8_sign_sampler_core(unsigned logn,
 	}
 
 	/*
-	 * Experimental HAWK-E8-CM sampler path.  This calls the
-	 * coset-matched Construction-A CM sampler, which returns internal
-	 * P-coordinate samples z in 2R^2 + t and measures ||P_n z||^2.  This
-	 * path is floating-point, data-dependent, not constant-time, and not
-	 * parameter-calibrated.  It is separate from the dummy signing helpers
-	 * above and from all ordinary HAWK signing.
+	 * Experimental HAWK-E8-CM sampler path.  This calls the selected
+	 * coset-matched Construction-A CM sampler variant, which returns
+	 * internal P-coordinate samples z in 2R^2 + t and measures
+	 * ||P_n z||^2, and rejects above the integer norm bound.  This path
+	 * is integer-only (make check-integer-only); the variants define
+	 * their own timing behaviour.  It is separate from the dummy signing
+	 * helpers above and from all ordinary HAWK signing.
 	 */
 	if (logn < 8 || logn > 10 || salt_len == 0
 		|| sig_len != e8_sig_uncompressed_size(logn)
@@ -655,7 +655,7 @@ e8_sign_sampler_core(unsigned logn,
 		|| basis_ntt->magic != E8_INVERSE_W_NTT_MAGIC
 		|| basis_f2->magic != E8_COSET_F2_MAGIC
 		|| basis_ntt->logn != logn || basis_f2->logn != logn
-		|| sigma_sign <= 0.0 || sigma_verify <= 0.0
+		|| sample_z == NULL || tables == NULL || norm_bound <= 0
 		|| max_attempts == 0 || rng == NULL)
 	{
 		return 0;
@@ -686,13 +686,6 @@ e8_sign_sampler_core(unsigned logn,
 		sign_profile_stage_start(&sign_c0, &sign_w0);
 	}
 #endif
-	if (!e8_verify_bound_from_sigma(logn, sigma_verify, &threshold)) {
-#if HAWK_E8_PROFILE_SIGN
-		sign_profile_finish(trace_timing, sign_c0, sign_w0);
-#endif
-		return 0;
-	}
-
 #if HAWK_E8_PROFILE_SIGN
 	if (trace_timing != NULL) {
 		sign_profile_stage_start(&stage_c0, &stage_w0);
@@ -805,9 +798,9 @@ e8_sign_sampler_core(unsigned logn,
 			sample_c0 = cmn_tsc_start();
 			sample_w0 = cmn_wall_ns();
 		}
-		int sample_ok = e8_sample_z_construction_a_cm_ex(z0, z1,
-			&pnorm_u, t0, t1, logn, sigma_sign, rng_mode,
-			&prefix, prefix_permutations, rng, rng_context, NULL);
+		int sample_ok = sample_z(tables, z0, z1, &pnorm_u, t0, t1,
+			logn, rng_mode, &prefix, prefix_permutations,
+			rng, rng_context, NULL);
 		if (trace_timing != NULL) {
 			uint64_t sample_w1 = cmn_wall_ns();
 			uint64_t sample_c1 = cmn_tsc_end();
@@ -839,7 +832,7 @@ e8_sign_sampler_core(unsigned logn,
 			sign_profile_stage_start(&stage_c0, &stage_w0);
 		}
 #endif
-		rejected = pnorm > threshold;
+		rejected = pnorm > norm_bound;
 #if HAWK_E8_PROFILE_SIGN
 		if (trace_timing != NULL) {
 			sign_profile_stage_add(
@@ -941,104 +934,6 @@ e8_sign_sampler_core(unsigned logn,
 	sign_profile_finish(trace_timing, sign_c0, sign_w0);
 #endif
 	return 0;
-}
-
-/* see hawk_e8_inner.h */
-int
-e8_sign_sampler_trace_timed_uncompressed_prepared(unsigned logn,
-	void *sig, size_t sig_len, const shake_context *sc_data,
-	const void *hpub, size_t hpub_len,
-	const int8_t *f, const int8_t *g,
-	const int8_t *F, const int8_t *G,
-	const e8_inverse_w_ntt_basis *basis_ntt,
-	const e8_coset_f2_basis *basis_f2, const uint8_t *salt,
-	double sigma_sign, double sigma_verify,
-	unsigned max_attempts, hawk_rng rng, void *rng_context,
-	int32_t *trace_z0, int32_t *trace_z1,
-	int64_t *trace_pnorm, unsigned *trace_attempts,
-	e8_sign_trace_timing *trace_timing)
-{
-	if (salt == NULL) {
-		if (trace_timing != NULL) {
-			memset(trace_timing, 0, sizeof *trace_timing);
-		}
-		return 0;
-	}
-	return e8_sign_sampler_core(logn,
-		sig, sig_len, sc_data, hpub, hpub_len,
-		f, g, F, G, basis_ntt, basis_f2, salt, NULL, 0,
-		sigma_sign, sigma_verify, max_attempts, rng, rng_context,
-		trace_z0, trace_z1, trace_pnorm, trace_attempts,
-		trace_timing);
-}
-
-/* see hawk_e8_inner.h */
-int
-e8_sign_sampler_trace_timed_uncompressed(unsigned logn,
-	void *sig, size_t sig_len, const shake_context *sc_data,
-	const void *hpub, size_t hpub_len,
-	const int8_t *f, const int8_t *g,
-	const int8_t *F, const int8_t *G, const uint8_t *salt,
-	double sigma_sign, double sigma_verify,
-	unsigned max_attempts, hawk_rng rng, void *rng_context,
-	int32_t *trace_z0, int32_t *trace_z1,
-	int64_t *trace_pnorm, unsigned *trace_attempts,
-	e8_sign_trace_timing *trace_timing)
-{
-	e8_inverse_w_ntt_basis basis_ntt;
-	e8_coset_f2_basis basis_f2;
-
-	if (trace_timing != NULL) {
-		memset(trace_timing, 0, sizeof *trace_timing);
-	}
-	if (logn < 8 || logn > 10
-		|| f == NULL || g == NULL || F == NULL || G == NULL)
-	{
-		return 0;
-	}
-	e8_inverse_w_ntt_prepare(&basis_ntt, f, g, F, G, logn);
-	e8_coset_f2_prepare(&basis_f2, f, g, F, G, (size_t)1 << logn);
-	return e8_sign_sampler_trace_timed_uncompressed_prepared(logn,
-		sig, sig_len, sc_data, hpub, hpub_len,
-		f, g, F, G, &basis_ntt, &basis_f2, salt,
-		sigma_sign, sigma_verify, max_attempts, rng, rng_context,
-		trace_z0, trace_z1, trace_pnorm, trace_attempts,
-		trace_timing);
-}
-
-/* see hawk_e8_inner.h */
-int
-e8_sign_sampler_trace_uncompressed(unsigned logn,
-	void *sig, size_t sig_len, const shake_context *sc_data,
-	const void *hpub, size_t hpub_len,
-	const int8_t *f, const int8_t *g,
-	const int8_t *F, const int8_t *G, const uint8_t *salt,
-	double sigma_sign, double sigma_verify,
-	unsigned max_attempts, hawk_rng rng, void *rng_context,
-	int32_t *trace_z0, int32_t *trace_z1,
-	int64_t *trace_pnorm, unsigned *trace_attempts)
-{
-	return e8_sign_sampler_trace_timed_uncompressed(logn,
-		sig, sig_len, sc_data, hpub, hpub_len,
-		f, g, F, G, salt, sigma_sign, sigma_verify,
-		max_attempts, rng, rng_context, trace_z0, trace_z1,
-		trace_pnorm, trace_attempts, NULL);
-}
-
-/* see hawk_e8_inner.h */
-int
-e8_sign_sampler_uncompressed(unsigned logn,
-	void *sig, size_t sig_len, const shake_context *sc_data,
-	const void *hpub, size_t hpub_len,
-	const int8_t *f, const int8_t *g,
-	const int8_t *F, const int8_t *G, const uint8_t *salt,
-	double sigma_sign, double sigma_verify,
-	unsigned max_attempts, hawk_rng rng, void *rng_context)
-{
-	return e8_sign_sampler_trace_uncompressed(logn,
-		sig, sig_len, sc_data, hpub, hpub_len, f, g, F, G, salt,
-		sigma_sign, sigma_verify, max_attempts,
-		rng, rng_context, NULL, NULL, NULL, NULL);
 }
 
 #endif

@@ -11,7 +11,7 @@
  * costs.
  *
  * The pool is process-global and holds up to CMN_POOL_MAX_THREADS threads.
- * Idle threads spin on a generation counter (_mm_pause, with
+ * Idle threads spin on a generation counter (pause, with
  * sched_yield() every 1024 spins); __sync builtins order memory. A
  * dispatch publishes a job and bumps the generation; the calling thread
  * then does its own share (as worker 0) and calls cmn_pool_wait(), which

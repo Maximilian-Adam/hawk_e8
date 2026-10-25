@@ -7,10 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#if defined(__x86_64__)
-#include <x86intrin.h>
-#endif
-
 #include "cmn_pool.h"
 
 /*
@@ -70,7 +66,8 @@ static void
 cmn_pool_spin_relax(unsigned *spins)
 {
 #if defined(__x86_64__)
-	_mm_pause();
+	/* pause, as _mm_pause() emits (no SSE dependency). */
+	__asm__ __volatile__ ("pause");
 #endif
 	(*spins) ++;
 	if ((*spins & 1023u) == 0) {

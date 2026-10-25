@@ -29,13 +29,23 @@
 #define E8_PREPARED_KEY_MAGIC   UINT32_C(0x45385052)
 
 /*
- * Prototype signing standard deviations (the values used by the E8 tests,
- * diagnostics and benchmarks). The verification standard deviations are
- * those of e8_sigma_verify_default().
+ * The public API is integer-only (make check-integer-only). Its sampler
+ * uses the generated tables of the prototype signing standard deviations
+ * sigma_sign = 3.592, 3.631, 3.669 (the values used by the E8 tests,
+ * diagnostics and benchmarks; e8/tables/gen_tables.py), and its norm
+ * bound is floor(8 n sigma_verify^2) with the default sigma_verify = 2.03,
+ * 1.99, 1.95 (e8_sigma_verify_default()), precomputed here.
  */
-static const double E8_SIGMA_SIGN[] = {
-	3.592, 3.631, 3.669
+static const int64_t E8_NORM_BOUND[] = {
+	8439, 16220, 31150
 };
+
+/* see hawk_e8_inner.h */
+int64_t
+e8_norm_bound_default(unsigned logn)
+{
+	return logn >= 8 && logn <= 10 ? E8_NORM_BOUND[logn - 8] : 0;
+}
 
 /*
  * Prepared private key layout (8-byte aligned inside the caller's
@@ -290,7 +300,6 @@ e8_sign_finish_inner(unsigned logn,
 	const e8_prepared_key *pk;
 	const void *salt_key;
 	size_t salt_key_len;
-	double sigma_verify;
 	int r;
 #if HAWK_E8_PROFILE_SIGN
 	uint64_t prep_cycles = 0, prep_wall_ns = 0;
@@ -303,8 +312,7 @@ e8_sign_finish_inner(unsigned logn,
 		*trace_attempts = 0;
 	}
 	if (logn < 8 || logn > 10 || rng == NULL || sig == NULL
-		|| sc_data == NULL || priv == NULL
-		|| !e8_sigma_verify_default(logn, &sigma_verify))
+		|| sc_data == NULL || priv == NULL)
 	{
 		return 0;
 	}
@@ -351,7 +359,8 @@ e8_sign_finish_inner(unsigned logn,
 		pk->hpub, (size_t)1 << (logn - 4),
 		pk->fgFG, pk->fgFG + n, pk->fgFG + 2 * n, pk->fgFG + 3 * n,
 		&pk->basis_ntt, &pk->basis_f2, NULL, salt_key, salt_key_len,
-		E8_SIGMA_SIGN[logn - 8], sigma_verify, E8_SIGN_MAX_ATTEMPTS,
+		e8_sample_z_hot64, e8_hot64_tables_get(logn),
+		e8_norm_bound_default(logn), E8_SIGN_MAX_ATTEMPTS,
 		rng, rng_context, NULL, NULL, NULL, trace_attempts,
 		trace_timing);
 #if HAWK_E8_PROFILE_SIGN
