@@ -8,6 +8,7 @@
 #include "e8_tables_geom.h"
 #include "e8_tables_hot64.h"
 #include "e8_tables_hot32.h"
+#include "e8_tables_ref.h"
 
 /*
  * Tests of the generated E8 sampler tables (e8/tables/) and the
@@ -23,8 +24,9 @@
  *     far too small to be hit);
  *   - the integer norm bounds equal the double computation;
  *   - a coarse distribution check of every generated 1D table (hot64,
- *     hot32): empirical mean and variance against the values implied
- *     exactly by the integer thresholds.
+ *     hot32, and ref for every centre class): empirical mean and
+ *     variance against the values implied exactly by the integer
+ *     thresholds.
  */
 
 #define MAXN            1024
@@ -356,6 +358,58 @@ distribution_hot32(unsigned logn)
 	return 1;
 }
 
+#define REF_DIST_SAMPLES   50000
+
+/*
+ * ref: class with centre num32 / 32 = k / 4 uses residue k mod 4, shifted
+ * by floor(k / 4); value lo + j has probability (T[j-1] - T[j]) / 2^78
+ * with T[-1] = 2^78 and T[j] = 0 past the table.
+ */
+static int
+distribution_ref(unsigned logn)
+{
+	static int32_t x[REF_DIST_SAMPLES];
+	const e8_ref_tables *g = e8_ref_tables_get(logn);
+
+	for (unsigned j = 0; j < E8_TAB_CLASSES; j ++) {
+		int64_t c = e8_tab_center_num32[j];
+		unsigned kk = (unsigned)((c + 32) >> 3);
+		unsigned res = kk & 3;
+		int32_t lo = (int32_t)(kk >> 2) - 1 + g->lo_value[res];
+		long double scale = ldexpl(1.0L, 78), prev = scale;
+		long double m1 = 0.0L, m2 = 0.0L, mean, var;
+		uint8_t seed[2] = { (uint8_t)logn, (uint8_t)j };
+		cmn_rng s;
+
+		for (unsigned i = 0; i <= E8_REF_1D_LEN; i ++) {
+			long double t = i < E8_REF_1D_LEN
+				? ldexpl((long double)g->hi[res][i], 63)
+					+ (long double)g->lo[res][i]
+				: 0.0L;
+			long double p = (prev - t) / scale;
+			int32_t v = lo + (int32_t)i;
+
+			m1 += p * v;
+			m2 += p * v * v;
+			prev = t;
+		}
+		mean = m1;
+		var = m2 - m1 * m1;
+		cmn_rng_init(&s, "test_e8_tables ref", 18, seed, 2, NULL, 0);
+		for (size_t u = 0; u < REF_DIST_SAMPLES; u ++) {
+			if (!e8_ref_sample_1d(g, c, &s, &x[u])) {
+				return 0;
+			}
+		}
+		if (!moments_ok("ref", logn, j, mean, var, x,
+			REF_DIST_SAMPLES))
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
 int
 main(void)
 {
@@ -369,12 +423,13 @@ main(void)
 		fflush(stdout);
 		if (!norm_bounds(logn) || !sampler_equivalence(logn)
 			|| !distribution_hot64(logn)
-			|| !distribution_hot32(logn))
+			|| !distribution_hot32(logn)
+			|| !distribution_ref(logn))
 		{
 			return 1;
 		}
 		printf("norm bound %lld, generated = runtime sampling,"
-			" hot64 and hot32 distributions done.\n",
+			" ref, hot64 and hot32 distributions done.\n",
 			(long long)e8_norm_bound_default(logn));
 	}
 	return 0;

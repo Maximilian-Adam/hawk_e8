@@ -105,6 +105,11 @@
 #define e8_hot32_sample_1d  Zh(e8_hot32_sample_1d)
 #define e8_hot64_sample_stream  Zh(e8_hot64_sample_stream)
 #define e8_hot32_sample_stream  Zh(e8_hot32_sample_stream)
+#define e8_sample_z_ref  Zh(e8_sample_z_ref)
+#define e8_ref_tables_get  Zh(e8_ref_tables_get)
+#define e8_ref_sample_stream  Zh(e8_ref_sample_stream)
+#define e8_ref_sample_1d  Zh(e8_ref_sample_1d)
+#define e8_ref_ops_get  Zh(e8_ref_ops_get)
 #define e8_hot32_tables_get  Zh(e8_hot32_tables_get)
 #define e8_sampler_variants  Zh(e8_sampler_variants)
 #define e8_sampler_variant_count  Zh(e8_sampler_variant_count)
@@ -451,6 +456,7 @@ typedef int (*e8_sample_z_fn)(const void *tables, int32_t *z0, int32_t *z1,
  * compiled into one binary with its own symbols:
  *
  *   name   threshold_bits  technique
+ *   ref    78              ct_full_scan
  *   hot64  64              vt_hot_table  (default; the public API)
  *   hot32  32              vt_hot_table
  *
@@ -736,6 +742,31 @@ int e8_hot64_sample_stream(const void *tables, int32_t *z0, int32_t *z1,
 int e8_hot32_sample_stream(const void *tables, int32_t *z0, int32_t *z1,
 	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
 	unsigned logn, size_t start, size_t end, cmn_rng *stream);
+
+/*
+ * The ref variant (e8_sampler_ref.c): 78-bit thresholds, constant-time
+ * full scans and HAWK's 78-bit draw format, over e8_ref_tables
+ * (e8/tables/e8_tables_ref.h). e8_ref_sample_1d() (tests) draws one
+ * coordinate with centre center_num32 / 32 from a fresh group of four
+ * draws; e8_ref_ops_get() returns and clears the loop iteration counts of
+ * an E8_REF_COUNT_OPS build (0 otherwise).
+ */
+int e8_sample_z_ref(const void *tables, int32_t *z0, int32_t *z1,
+	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, unsigned rng_mode,
+	const shake_context *prefix, uint64_t prefix_permutations,
+	hawk_rng rng, void *rng_context, e8_sampler_stats *stats);
+
+const void *e8_ref_tables_get(unsigned logn);
+
+int e8_ref_sample_stream(const void *tables, int32_t *z0, int32_t *z1,
+	uint64_t *pnorm_out, const uint8_t *t0, const uint8_t *t1,
+	unsigned logn, size_t start, size_t end, cmn_rng *stream);
+
+int e8_ref_sample_1d(const void *tables, int64_t center_num32,
+	cmn_rng *stream, int32_t *out);
+
+int e8_ref_ops_get(uint64_t ops[4]);
 
 
 /*

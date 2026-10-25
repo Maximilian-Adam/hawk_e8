@@ -12,6 +12,8 @@
  */
 
 const e8_sampler_variant e8_sampler_variants[] = {
+	{ "ref", 78, "ct_full_scan", e8_sample_z_ref,
+		e8_ref_tables_get, e8_ref_sample_stream },
 	{ "hot64", 64, "vt_hot_table", e8_sample_z_hot64,
 		e8_hot64_tables_get, e8_hot64_sample_stream },
 	{ "hot32", 32, "vt_hot_table", e8_sample_z_hot32,
@@ -40,7 +42,7 @@ e8_sampler_variant_find(const char *name)
 const e8_sampler_variant *
 e8_sampler_variant_default(void)
 {
-	return &e8_sampler_variants[0];
+	return &e8_sampler_variants[1];
 }
 
 #endif
