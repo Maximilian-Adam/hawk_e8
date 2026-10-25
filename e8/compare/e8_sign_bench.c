@@ -11,19 +11,19 @@
 #include <x86intrin.h>
 #endif
 
-#include "../hawk_e8_inner.h"
+#include "../src/hawk_e8_inner.h"
 
 /*
- * Pull in the HAWK signing implementation and the E8
- * signer/verifier for this standalone full signature benchmark.
+ * Pull in the E8 signer/verifier for this standalone full signature
+ * benchmark.  Ordinary HAWK is used only through its public API and is
+ * linked as the unmodified upstream object.
  */
-#include "../hawk_sign.c"
 #define get_bit e8_vrfy_bench_get_bit
 #define hash_to_h e8_vrfy_bench_hash_to_h
-#include "../e8_vrfy.c"
+#include "../src/e8_vrfy.c"
 #undef get_bit
 #undef hash_to_h
-#include "../e8_sign.c"
+#include "../src/e8_sign.c"
 
 #define MAXN                         1024
 #define DEFAULT_SIGN_BENCH_TRIALS    16

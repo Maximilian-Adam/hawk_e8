@@ -1,5 +1,7 @@
 # Hawk implementation
 
+> **Fork note:** this repository adds an experimental HAWK-E8-CM variant, kept entirely under [`e8/`](e8/README.md). All other files are upstream HAWK and are unchanged (`make check-upstream`).
+
 Hawk is a post-quantum signature scheme, which has a hash-then-sign design and is based on the lattice isomorphism problem. The scheme allows efficient signature generation and verification, even on constrained devices. The signatures and public keys are relatively compact compared to prior post-quantum signature schemes.
 This repository was used to provide the code for the on-ramp call for post-quantum signature schemes, organized by NIST.
 Specifically, compared to the original Hawk paper [1], this repository contains improvements in terms of efficiency of all algorithms, as well as smaller private key sizes.

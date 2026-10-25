@@ -57,15 +57,15 @@ keys are not implemented.
 
 Core experimental sources:
 
-- `src/hawk_e8_inner.h`: gated internal E8 declarations.
-- `src/e8_math.c`: `P_n`, `S_n`, `Delta_n`, and `Q_E8` helpers.
-- `src/e8_f2.c`: bit-packed F2 negacyclic arithmetic used for the signing
+- `e8/src/hawk_e8_inner.h`: gated internal E8 declarations.
+- `e8/src/e8_math.c`: `P_n`, `S_n`, `Delta_n`, and `Q_E8` helpers.
+- `e8/src/e8_f2.c`: bit-packed F2 negacyclic arithmetic used for the signing
   target coset.
-- `src/e8_ntt.c`: shared internal NTT, inverse NTT, modular multiplication,
+- `e8/src/e8_ntt.c`: shared internal NTT, inverse NTT, modular multiplication,
   and CRT helpers for verifier/signing arithmetic.
-- `src/e8_sampler.c`: coset-matched Construction-A CM E8 sampler.
-- `src/e8_sign.c`: dummy E8 signers and sampler-backed uncompressed signer.
-- `src/e8_vrfy.c`: uncompressed signature codec, sign symmetry break, and
+- `e8/src/e8_sampler.c`: coset-matched Construction-A CM E8 sampler.
+- `e8/src/e8_sign.c`: dummy E8 signers and sampler-backed uncompressed signer.
+- `e8/src/e8_vrfy.c`: uncompressed signature codec, sign symmetry break, and
   E8 completion-norm verifier.
 
 The experimental E8 path targets GCC or Clang and is not strict
@@ -75,8 +75,12 @@ fails with a clear diagnostic when 128-bit integer support is unavailable.
 These extensions are confined to the gated E8 path; ordinary HAWK retains its
 existing portability profile.
 
-The corresponding files under `Reference_Implementation/` are the reference
-test/build copies.
+All E8 code lives under `e8/`, separate from upstream HAWK: sources in
+`e8/src/`, tests in `e8/tests/`, diagnostics in `e8/tools/`, and comparison
+benchmarks in `e8/compare/`.  `e8/Makefile` compiles the E8 code against the
+generated, unmodified HAWK reference sources in `Reference_Implementation/`.
+Benchmarks reach static HAWK internals only through `e8/compare/hawk_shim.c`,
+and `make check-upstream` verifies that the upstream HAWK files are unchanged.
 
 ## Sampler Contract
 
@@ -269,6 +273,12 @@ Build the reference implementation:
 make -C Reference_Implementation
 ```
 
+Build all E8 tests, tools and benchmarks:
+
+```sh
+make -C e8
+```
+
 Run the ordinary reference tests:
 
 ```sh
@@ -280,7 +290,7 @@ Reference_Implementation/bin/test_sampler
 Run all E8 correctness tests:
 
 ```sh
-make -C Reference_Implementation test-e8
+make -C e8 test-e8
 ```
 
 Current E8 tests:
@@ -301,7 +311,7 @@ test_e8_sign_sampler  sampler-backed uncompressed sign/verify, dynamic-range
 Histogram diagnostics:
 
 ```sh
-make -C Reference_Implementation e8-histograms
+make -C e8 e8-histograms
 ```
 supports:
 
@@ -314,57 +324,57 @@ E8_HIST_TRIALS=<positive integer>
 writes:
 
 ```text
-Reference_Implementation/e8_hist_public.csv
-Reference_Implementation/e8_hist_signatures.csv
+e8/e8_hist_public.csv
+e8/e8_hist_signatures.csv
 ```
 
 Sampler timing:
 
 ```sh
-make -C Reference_Implementation sampler-bench
+make -C e8 sampler-bench
 ```
 
 or for a proper comparison with checks disabled:
 ```sh
-make -C Reference_Implementation clean
-make -C Reference_Implementation sampler-bench E8_CFLAGS='-O2 -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0 -DHAWK_E8_PROFILE_SAMPLER=0'
+make -C e8 clean
+make -C e8 sampler-bench E8_CFLAGS='-O2 -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0 -DHAWK_E8_PROFILE_SAMPLER=0'
 ```
 
-writes `Reference_Implementation/e8_sampler_bench.csv` with ordinary HAWK
+writes `e8/e8_sampler_bench.csv` with ordinary HAWK
 sampler rows and selected E8 sampler rows.  Defined modes are available after
 building the benchmark binary:
 
 ```sh
-make -C Reference_Implementation bin/e8_sampler_bench
-Reference_Implementation/bin/e8_sampler_bench --selected-configs --trials 50 --warmups 1
-Reference_Implementation/bin/e8_sampler_bench --isolated-matrix --trials 50 --warmups 1
-Reference_Implementation/bin/e8_sampler_bench --single-hawk-sampler --logn 10 --trials 50
-Reference_Implementation/bin/e8_sampler_bench --single-config --logn 10 --threads 16 --worker-mode spin --rng-mode per_worker --trials 50 --warmups 1
+make -C e8 bin/e8_sampler_bench
+e8/bin/e8_sampler_bench --selected-configs --trials 50 --warmups 1
+e8/bin/e8_sampler_bench --isolated-matrix --trials 50 --warmups 1
+e8/bin/e8_sampler_bench --single-hawk-sampler --logn 10 --trials 50
+e8/bin/e8_sampler_bench --single-config --logn 10 --threads 16 --worker-mode spin --rng-mode per_worker --trials 50 --warmups 1
 ```
 
 Signature timing:
 
 ```sh
-make -C Reference_Implementation sign-bench
-make -C Reference_Implementation profile-sign-bench
+make -C e8 sign-bench
+make -C e8 profile-sign-bench
 ```
 
-`sign-bench` writes `Reference_Implementation/e8_sign_bench.csv`.
+`sign-bench` writes `e8/e8_sign_bench.csv`.
 `profile-sign-bench` builds the dedicated signature benchmark with
 `HAWK_E8_PROFILE_SIGN=1` and prints per-stage E8 signing timings to the
 terminal.  For optimization timing, build profile runs with
 `HAWK_E8_DEBUG_CHECKS=0`; debug-check builds deliberately retain schoolbook
 cross-checks for the reconstructed signer coefficients.  The final symmetric
 HAWK/E8 accounting, methods, and reproduction commands are recorded in
-`docs/perf_comparison_final.md`.
+`e8/docs/perf_comparison_final.md`.
 
 Rejection and norm summaries:
 
 ```sh
-make -C Reference_Implementation e8-rejection-summary
+make -C e8 e8-rejection-summary
 ```
 
-writes `Reference_Implementation/e8_rejection_summary.csv`.  The target
+writes `e8/e8_rejection_summary.csv`.  The target
 supports:
 
 ```text
@@ -376,12 +386,12 @@ E8_REJECTION_LOGN=8|9|10
 Sigma sweeps are available through:
 
 ```sh
-make -C Reference_Implementation e8-sigma-verify-sweep
-make -C Reference_Implementation e8-sigma-sign-sweep
+make -C e8 e8-sigma-verify-sweep
+make -C e8 e8-sigma-sign-sweep
 ```
 
-These write `Reference_Implementation/e8_sigma_verify_sweep.csv` and
-`Reference_Implementation/e8_sigma_sign_sweep.csv`.  The verify sweep uses the
+These write `e8/e8_sigma_verify_sweep.csv` and
+`e8/e8_sigma_sign_sweep.csv`.  The verify sweep uses the
 rounded up smoothing `sigma_sign` values and tests `sigma_verify`.  The sign
 sweep starts at the full signing space smoothing threshold with `eps_bits=32`,
 rounds the tested `sigma_sign` up to 3 decimal places, and steps upward by
@@ -390,14 +400,14 @@ rounds the tested `sigma_sign` up to 3 decimal places, and steps upward by
 To run more trials:
 
 ```sh
-E8_SIGMA_VERIFY_SWEEP_TRIALS=100 make -C Reference_Implementation e8-sigma-verify-sweep
-E8_SIGMA_SIGN_SWEEP_SIGN_TRIALS=100 make -C Reference_Implementation e8-sigma-sign-sweep
+E8_SIGMA_VERIFY_SWEEP_TRIALS=100 make -C e8 e8-sigma-verify-sweep
+E8_SIGMA_SIGN_SWEEP_SIGN_TRIALS=100 make -C e8 e8-sigma-sign-sweep
 ```
 
 Validation summaries:
 
 ```sh
-make -C Reference_Implementation e8-validation-summary
+make -C e8 e8-validation-summary
 ```
 
 writes:

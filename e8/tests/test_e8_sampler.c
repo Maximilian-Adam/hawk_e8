@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../hawk_e8_inner.h"
+#include "../src/hawk_e8_inner.h"
 
 #define MAXN             1024
 #define SAMPLE_SIGMA     3.592

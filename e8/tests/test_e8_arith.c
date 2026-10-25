@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../hawk_e8_inner.h"
+#include "../src/hawk_e8_inner.h"
 
 #define MAXN          1024
 #define ARITH_TRIALS  64

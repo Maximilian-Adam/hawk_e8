@@ -14,7 +14,7 @@
 #include <x86intrin.h>
 #endif
 
-#include "../hawk_e8_inner.h"
+#include "../src/hawk_e8_inner.h"
 
 #define MAXN   1024
 #define DEFAULT_KEYS     2

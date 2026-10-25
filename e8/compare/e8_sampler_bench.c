@@ -15,15 +15,14 @@
 #include <x86intrin.h>
 #endif
 
-#include "../hawk_e8_inner.h"
+#include "../src/hawk_e8_inner.h"
 
 /*
- * Pull in the ordinary HAWK signing sampler for this standalone benchmark.
- * The sampler helper is static in hawk_sign.c; this mirrors test_sampler.c
- * and keeps the benchmark as a thin wrapper around the real implementation
- * instead of copying sampler tables or logic.
+ * The ordinary HAWK signing sampler is static in hawk_sign.c; hawk_shim
+ * exports it, so this benchmark stays a thin wrapper around the real
+ * implementation instead of copying sampler tables or logic.
  */
-#include "../hawk_sign.c"
+#include "hawk_shim.h"
 
 #define MAXN                         1024
 #define DEFAULT_BENCH_TRIALS         16
@@ -589,7 +588,7 @@ bench_hawk_sampler(unsigned logn, unsigned trial_index)
 
 	c0 = bench_cycles_start();
 	w0 = bench_wall_ns();
-	(void)sig_gauss(logn, bench_rng, &rng, NULL, x, t);
+	(void)hawk_shim_sig_gauss(logn, bench_rng, &rng, NULL, x, t);
 	w1 = bench_wall_ns();
 	c1 = bench_cycles_end();
 

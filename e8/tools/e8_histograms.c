@@ -12,7 +12,7 @@
 #include <x86intrin.h>
 #endif
 
-#include "../hawk_e8_inner.h"
+#include "../src/hawk_e8_inner.h"
 
 #define MAXN   1024
 #define E8_HIST_DEFAULT_KEYS         3

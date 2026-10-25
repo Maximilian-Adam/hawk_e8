@@ -9,14 +9,14 @@
 #include <string.h>
 #include <time.h>
 
-#include "../hawk_e8_inner.h"
+#include "../src/hawk_e8_inner.h"
 
 /*
- * Pull in the ordinary HAWK signing sampler for the serial stability
- * comparison.  The helper is static in hawk_sign.c; this mirrors
- * test_sampler.c and e8_sampler_bench.c, so no sampler logic is copied here.
+ * The ordinary HAWK signing sampler for the serial stability comparison is
+ * static in hawk_sign.c; hawk_shim exports it, so no sampler logic is
+ * copied here.
  */
-#include "../hawk_sign.c"
+#include "../compare/hawk_shim.h"
 
 #define MAXN                    1024
 #define SAMPLE_SIGMA            3.592
@@ -590,7 +590,7 @@ collect_hawk_stability(unsigned logn, uint64_t *samples, unsigned trials)
 		memset(x, 0, sizeof x);
 		fill_hawk_parities(t, n >> 2, logn, trial);
 		t0 = wall_ns();
-		(void)sig_gauss(logn, test_rng, &rng_state, NULL, x, t);
+		(void)hawk_shim_sig_gauss(logn, test_rng, &rng_state, NULL, x, t);
 		t1 = wall_ns();
 		samples[trial] = wall_delta(t0, t1);
 	}

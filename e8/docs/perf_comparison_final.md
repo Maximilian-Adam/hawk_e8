@@ -89,11 +89,11 @@ the amortization of E8's measured NTT and F2 preparation; it defaults to 1000.
 ## Reproduction
 
 ```sh
-make -B -C Reference_Implementation \
+make -B -C e8 \
   E8_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0' \
   E8_PROFILE_SIGN_CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0 -DHAWK_E8_PROFILE_SIGN=1' \
   bin/e8_sign_profile_bench
-cd Reference_Implementation
+cd e8
 ./bin/e8_sign_profile_bench --trials 1000 --key-reuse 1000 \
   > e8_comparison_final.csv 2> e8_comparison_final.txt
 ```
