@@ -13,7 +13,9 @@ covers the harness, its builds, the run layout and the analysis.
 | signing core | `compare/bench_sign_core.{c,h}` | keygen, preparation, the timed `sign_finish` of every variant, verification, seeds, messages, row fields; shared with `e8_sign_bench` |
 | pool affinity | `common/cmn_pool.{c,h}` | `cmn_pool_set_affinity()`, `cmn_pin_current_thread()` (both schemes alike) |
 | environment | `compare/env_capture.sh` | `env.txt` beside every run's CSVs |
-| driver | `compare/run_compare.sh` | one run directory per run and flag set, then the analysis |
+| preflight | `compare/preflight.sh` | machine-state checks before every run (Step 8) |
+| CPU lists | `compare/ccd_cpus.sh` | Step 9's pinned CPU lists from the L3 topology (Step 8) |
+| driver | `compare/run_compare.sh` | run sets; one run directory per run and flag set, then the analysis |
 | analysis | `compare/analysis/analyze.py`, `compare_data.py`, `compare_tables.py` | statistics, ratios with bootstrap CIs, joins, acceptance checks, LaTeX and Markdown tables |
 | sampler only | `compare/e8_sampler_bench.c --variant-matrix` | Step 10 table 3 |
 | stages | `e8_sign_profile_bench`, `hawk_sign_profile_bench` (`--stage-csv`) | Step 10 table 6 |
@@ -29,21 +31,68 @@ make bench-compare         # one run at Step 9's volume (10 keys x 1,000
 
 Both forward to `e8/` and call `compare/run_compare.sh`; make variables
 `COMPARE_FLAGSETS` (default `O2`), `COMPARE_RUNS` (default 1) and
-`COMPARE_ARGS` (passed to the driver) select more.  Step 9, for example, on
-one CCD with SMT off:
+`COMPARE_ARGS` (passed to the driver) select more.  Step 9's two run sets
+(the exact commands, machine setup and checks: the run book,
+[`step9_runbook.md`](step9_runbook.md)):
 
 ```sh
 make bench-compare COMPARE_FLAGSETS="O2 O3native" COMPARE_RUNS=5 \
-  COMPARE_ARGS="--cpus 0,1,2,3,4,5,6,7 --procs 8 --threads 1,2,4,8 --name step9"
+  COMPARE_ARGS="--run-set headline --cpus $(sh e8/compare/ccd_cpus.sh headline) --name step9-headline"
+make bench-compare COMPARE_FLAGSETS="O2 O3native" COMPARE_RUNS=5 \
+  COMPARE_ARGS="--run-set cross-ccd --cpus $(sh e8/compare/ccd_cpus.sh cross-ccd) --name step9-cross-ccd"
 ```
 
-Driver options: `--smoke`, `--flagsets`, `--runs R` (runs and flag sets
-alternate: r1/O2, r1/O3native, r2/O2, ...), `--keys`, `--sigs-per-key`,
-`--procs`, `--cpus`, `--threads`, `--logn`, `--warmup`,
-`--sampler-trials`, `--stage-trials`, `--bootstrap`, `--name` (the analysis
-directory; default the first run's `run_id`), `--no-analysis`.  Defaults:
-smoke 2 keys x 4 signatures, `P = 4`, 50 sampler trials, 20 stage trials,
-200 bootstrap resamples; full 10 x 1,000, `P = 4`, 2,000, 1,000, 2,000.
+Driver options: `--smoke`, `--run-set all|headline|cross-ccd` (below),
+`--flagsets`, `--runs R` (runs and flag sets alternate: r1/O2,
+r1/O3native, r2/O2, ...), `--keys`, `--sigs-per-key`, `--procs`, `--cpus`,
+`--threads`, `--logn`, `--warmup`, `--sampler-trials`, `--stage-trials`,
+`--bootstrap`, `--name` (the analysis directory; default the first run's
+`run_id`, prefixed `RUNSET-` for the Step 9 run sets), `--no-analysis`,
+`--force` (run despite a failed preflight; recorded), `--freq-tolerance
+PCT` (the preflight's frequency check, default 1).  Defaults: smoke 2 keys
+x 4 signatures, `P = 4`, 50 sampler trials, 20 stage trials, 200 bootstrap
+resamples; full 10 x 1,000, `P = 4`, 2,000, 1,000, 2,000.
+
+Run sets (`--run-set`; written as `run_set` to `env.txt` and
+`commands.txt`):
+
+| run set | steps | `T` (default) | `P` (default) | `--cpus` |
+| --- | --- | --- | --- | --- |
+| `all` (default) | all six | 1, 2, 4, 8, 16 | 4 | optional |
+| `headline` | all six | 1, 2, 4, 8 | `\|--cpus\|` | required (not for `--smoke`) |
+| `cross-ccd` | latency only | 1, 2, 4, 8, 16 | none | required (not for `--smoke`) |
+
+`all` is the smoke run's and any ad hoc run's; `headline` and `cross-ccd`
+are Step 9's (plan.md, decided before Step 8).  `--threads` and `--procs`
+override the defaults.  Before any step the driver refuses (exit 2) a
+`--cpus` list that is not a comma-separated list of CPU numbers, repeats a
+CPU, or has fewer CPUs than the largest `T` (latency) or than `P`
+(throughput), so a run cannot fail in its first step after the others
+have run.  The sampler matrix runs with `--threads 1` (Table 3 uses
+`T = 1` only; its default 1, 8, 16 put 16 spinning threads on an 8-CPU
+list) and, like the stage benches, is pinned to the list's first CPU.
+
+Preflight (`compare/preflight.sh --cpus LIST --binary BIN [--repo DIR]
+[--freq-tolerance PCT] [--capture FILE]`): before every run (and before
+its directory exists) the driver checks, through `env_capture.sh` taken
+while a busy loop holds each pinned CPU: boost off; governor `performance`
+on every pinned CPU; SMT off; no two pinned CPUs SMT siblings;
+`perf_event_paranoid <= 2` with a working core-cycle counter; the pinned
+CPUs' current frequencies within 1%; a clean tree.  Each condition is
+`ok`, `FAIL` or `unavailable`.  A non-smoke run starts only if every
+condition is `ok`, otherwise the driver exits 3 (refused) unless `--force`
+is given; smoke runs go on.  `env.txt` and `commands.txt` record
+`preflight: passed`, `failed (forced: --force)` or `failed (smoke run, not
+enforced)` and every `preflight_NAME: STATUS (detail)` line.  On WSL
+boost, governor and frequency are `unavailable` and SMT is on, so only
+smoke runs pass without `--force`.  `--capture FILE` checks a given
+capture instead (used to test the checks on WSL).
+
+Exit status of the driver: 0 if every step succeeded and the analysis's
+checks passed; 1 if a step or a check failed (each failed step is reported
+with its exit status, and `commands.txt` records every step's command,
+start, duration and exit status); 2 on a usage or configuration error; 3
+if the preflight refused a run.
 
 `bench_compare` itself: `--mode latency|throughput`, `--keys K`,
 `--sigs-per-key M`, `--warmup W`, `--logn LIST`, `--threads LIST` (default
@@ -110,8 +159,8 @@ counter).  Exit status 1 on any signing or verification failure.
   elsewhere, and costing nothing per dispatch); the harness requires
   `|LIST| >= max T`, so the `T` threads run on distinct CPUs;
 - throughput: process `p` is pinned to `LIST[p]`; `|LIST| >= P`;
-- the sampler and stage benches run under `taskset -c LIST` (stages:
-  `LIST[0]`).
+- the sampler and stage benches (one thread each) run under `taskset -c
+  LIST[0]`.
 
 The pool affinity is a shared-module addition used identically by both
 schemes; without a list nothing changes.  `test_cmn_common` checks pinning
@@ -192,8 +241,10 @@ by `--build-info`, recorded in `env.txt` and written to every row's
 ```text
 e8/results/compare/
   FS/RUN_ID/                one harness run (self-describing)
-    env.txt                 env_capture.sh
-    commands.txt            every command, start time, duration, exit status
+    env.txt                 env_capture.sh, then run_set and the preflight
+    commands.txt            run parameters (run_set, steps, threads, ...),
+                            the preflight, every command, start time,
+                            duration, exit status
     latency.csv/.txt        bench_compare-FS --mode latency (CSV / summary)
     throughput.csv/.txt     bench_compare-FS --mode throughput
     latency_avx2.csv/.txt   bench_compare_avx2-FS (context)
@@ -222,7 +273,8 @@ pinned CPU: which CCD and whether it has the V-cache), `perf_event_paranoid`,
 `compiler_built` (from the binary's `--build-info`), `cc`, `cc_version`,
 `march_native` (what `-march=native` resolves to), `binary`, `git_commit`,
 `git_dirty` (tracked files only), `loadavg`.  Anything it cannot read is
-`unavailable`; it never fails.  On WSL: governor, scaling driver, frequency
+`unavailable`; it never fails.  The driver appends `run_set`, `preflight`
+and the `preflight_NAME` lines (Step 8).  On WSL: governor, scaling driver, frequency
 and boost are unavailable, microcode reads `0xffffffff`, SMT is on.
 
 ## Analysis
@@ -232,12 +284,28 @@ and boost are unavailable, microcode reads `0xffffffff`, SMT is on.
 [--validation CSV] [--no-fail] PATH...` (standard library, no bytecode
 written).  `PATH`: run directories, or single CSVs in the schema (an
 `e8_sign_bench` output works; missing Step 7 columns default to `mode =
-latency`).  `--self-test` checks the bootstrap against brute-force
-resampling, determinism, and that the checks pass on good synthetic runs
-and fail on a verification failure, a missing row and a 20% slower run.
+latency`); `NAME.csv.gz` is read like `NAME.csv`.  `--self-test` checks
+the bootstrap against brute-force resampling, determinism, and that the
+checks pass on good synthetic runs and fail on a verification failure, a
+missing row, a 20% slower run, a truncated CSV and a forced preflight,
+and that a missing run directory and mixed run sets are refused.
+Exit status: 0, 1 if a check fails, 2 if the inputs cannot be analysed (a
+missing path, a single CSV that is empty or not in the schema, inputs of
+more than one run set, no signature rows).
 
 - **Keys** of the statistics: (flags, mode, scheme, variant, threads,
   logn, accounting); runs are combined, flag sets never.
+- **Run sets**: every input must belong to one run set (`run_set` in
+  `env.txt` or `commands.txt`; runs written before Step 8 have none and
+  count as `all`); mixed inputs are refused, so the headline and
+  cross-CCD runs never share a key or a table.  The run set is named in
+  the header and the table titles.
+- **Memory**: per run and key, the timing columns are kept as sorted
+  compact arrays (4 bytes per value, 8 if a value needs it) and attempts
+  and `rng_bytes` as sums (all the statistics use), read with
+  `csv.reader`; see "Step 8" for the measurements.  The statistics are
+  those of Step 7 (identical `summary.csv`, `runs.csv`, `ratios.csv` on
+  the same inputs and seed).
 - **Per key and timing column** (`core_cycles`, primary; `tsc_cycles`,
   `wall_ns`, `cpu_ns_all_threads`): per-run median; the estimate is the
   mean of the per-run medians; the run spread is (max - min) / estimate;
@@ -267,7 +335,11 @@ and fail on a verification failure, a missing row and a 20% slower run.
     the grid (every variant at every thread count and degree seen;
     serial-only variants at `T = 1`), both accounting modes, equal
     signature counts, warm-up rows, `keygen` and `prepare` rows for every
-    key signed with, flags equal to `env.txt`'s;
+    key signed with, flags equal to `env.txt`'s; and per run directory
+    written by the driver: every step of the run set started and exited
+    0 (`commands.txt`), its CSV and `env.txt` present, no CSV empty,
+    header-only, unreadable or with malformed rows (a wrong column count
+    or an unreadable number, as a killed process leaves);
   - `attempts`: per key, the excess attempts within 5 sigma (geometric
     variance) of Step 6's `attempts_per_sig` (HAWK n = 256 about 1.1796,
     the rest about 1.0000), plus 2 attempts of slack for rare retries;
@@ -278,16 +350,24 @@ and fail on a verification failure, a missing row and a 20% slower run.
     the serial latency keys' median core / TSC ratios within
     `--core-tsc-tolerance` (default 2%); SKIP otherwise;
   - `joins`: every key has its precision and validation rows and the same
-    `threshold_bits`.
+    `threshold_bits`;
+  - `preflight`: PASS if every run passed the preflight (`env.txt`); FAIL
+    if a run on bare metal was forced past it; SKIP for smoke runs, WSL
+    runs and runs without a preflight record.
 - **Tables** (one set per flag set; `tables.md` for review, `tables.tex`
-  with booktabs): 1 headline `ref` vs `ref` (one core, both accountings,
+  with booktabs and graphicx: a table wider than the text is shrunk to the
+  line width, one longer than 40 rows continues in further floats with the
+  same number): 1 headline `ref` vs `ref` (one core, both accountings,
   cycles / TSC / us, attempts, signature and random bytes, precision
   columns, ratio and CI); 2 `hot64` and `hot32` pairs; 3 sampler only
   (cycles and bytes per 8 coordinates, `T = 1`); 4 parallel latency
   (HAWK `ref-T` / `hot64` / `hot32` vs E8, wall-clock TSC and total core
   cycles per `T`); 5 throughput per core; 6 stage breakdown (`ref`, one
   thread, all-in; includes the profile timers); 7 HAWK AVX2 context,
-  labelled as not a fair pair.
+  labelled as not a fair pair.  A `cross-ccd` run set gives Table 4b
+  alone, "Parallel latency across both CCDs", whose note gives its
+  conditions and the known asymmetry (E8's sampler workers write 8n bytes
+  per call, HAWK's 2n).
 - **Other outputs**: `summary.csv` (every key with statistics and joins),
   `runs.csv` (per key and run), `ratios.csv` (every ratio and CI),
   `acceptance.txt`.
@@ -363,3 +443,192 @@ See plan.md, Step 7 status, for the smoke-run figures.
   verification and between batches): about 0.2 / 0.7 / 1.7 / 4.4 ms per
   signature for `T` = 2 / 4 / 8 / 16 in the smoke run; it is excluded from
   every row and reported per group.
+
+## Step 8: the dress rehearsal (WSL)
+
+Everything Step 9 runs was run here (WSL, 32 CPUs, SMT siblings (2k,
+2k + 1), so the pinned lists use even CPUs), from a clean build, at small
+and at full volume, with every failure path exercised.  No number here
+goes into the paper; the timings only check the machinery and estimate
+Step 9's run time.  The run book for Step 9 is
+[`step9_runbook.md`](step9_runbook.md).
+
+### What was run
+
+- **Clean build**: `make -C e8 clean`, `make`: no warnings, all twelve
+  `bin/*-O2` / `bin/*-O3native` binaries, `check-upstream` passes (the
+  regenerated AVX2 sources are gitignored).
+- **Smoke** (`make bench-compare-smoke`, 4.3 s): 0 failures, every check
+  PASS or SKIP; rows counted by hand from `--list` (sign = configurations
+  x K x M x 2 (x P), warm-up = configurations x W x 2 (x P), `keygen` /
+  `prepare` = K per scheme and degree, 24 columns): every CSV matches.
+- **Step-9-shaped**, both flag sets, 2 runs each, 2 x 20 signatures:
+  headline (`--run-set headline --cpus 0,2,...,14`: T 1, 2, 4, 8, P = 8;
+  55 s) and cross-CCD (`--run-set cross-ccd --cpus 0,2,...,30`: T 1, 2,
+  4, 8, 16, latency only; 21 s).  Pinning checked by sampling every
+  thread's `Cpus_allowed_list` and last CPU (`/proc/PID/task/*/stat`)
+  every 50 ms: every latency thread, throughput signer, sampler and stage
+  bench ran only on its own listed CPU (the throughput parent, which only
+  generates the keys before forking and then waits, is not pinned).
+  Hand counts match; `ratios.csv` CIs come from both runs (`runs` = 2);
+  `run_spread` reports (FAIL at 40 signatures on WSL, see below); the two
+  flag sets stay apart in every table; all 14 tables (7 per flag set) are
+  non-empty, the cross-CCD analysis gives Table 4b alone.
+- **Tables**: `tables.tex` compiles in a minimal `article` with `booktabs`
+  and `graphicx` (`latexmk -pdf`, out of tree) with no error, overfull box
+  or float warning.  Before the fix: 12 overfull boxes (Tables 1, 2, 4,
+  5, 7 up to 258 pt too wide) and 4 floats too tall (Tables 4 and 6, 72
+  and 66 rows).
+- **Failure paths** (copies of real run directories in a scratch
+  directory; a real driver run for the kill): `verify_ok` 0 -> `verify`
+  FAIL, exit 1; `bench_compare` killed with `SIGKILL` mid-run -> the
+  driver reports `latency failed (exit 137 (signal 9))` and the failed
+  steps, exits 1, and `complete` FAILs (exit status, malformed last row,
+  unequal counts); missing `latency.csv`, an empty or header-only CSV ->
+  `complete` FAIL; a missing run directory, an empty CSV given directly,
+  mixed run sets -> exit 2 with a message; two copies of the full run ->
+  `run_spread` PASS, one with its timing columns x 1.1 -> FAIL (the 150
+  latency keys); `boost: off` with real WSL data -> `core_vs_tsc` PASS,
+  with core = 1.25 TSC everywhere -> PASS, with E8's core cycles x 1.1 ->
+  FAIL; a forced or refused preflight (below).
+- **Full volume** (10 x 1,000, O2, headline, pinned): see "Measurements".
+
+### Fixes
+
+1. **Sampler matrix oversubscription** (known issue 1): the driver runs
+   `e8_sampler_bench --variant-matrix --threads 1` pinned to the list's
+   first CPU (Table 3 uses `T = 1` only).  Full trials (2,000) under an
+   8-CPU `taskset`: 5.7 s before (T = 16 rows on 8 CPUs), 1.5 s after.
+2. **`--cpus` without a matching `--threads`** (known issue 2): run sets
+   (`--run-set`, "Running") set the thread list and `P`; the driver
+   checks the list (comma-separated numbers, no repeats, at least max T
+   and P CPUs) before any step and exits 2 with a message.
+3. **Analysis memory** (known issue 3): compact sorted arrays for the
+   timing columns, sums for attempts and `rng_bytes`, `csv.reader`; the
+   default output directory no longer loads the first run twice.  Same
+   statistics (below).
+4. **Preflight** (known issue 4): `compare/preflight.sh` ("Running").
+   Tested on WSL: refusing (exit 3, no run directory created: SMT on,
+   dirty tree, boost / governor / frequency unavailable), `--force` (runs,
+   records `preflight: failed (forced: --force)` and every condition in
+   `env.txt` and `commands.txt`), smoke (reported, not enforced), and
+   every condition's `ok` and `FAIL` branch through `--capture` with
+   synthetic captures (boost on, `powersave`, SMT on, siblings pinned
+   together, paranoid 3, a 16% frequency spread, a dirty tree).
+5. **`attempts` check counted copies as independent** (found in Step 8):
+   every run and every throughput process signs the same messages with the
+   same seeds, so their attempts are identical copies (checked: all 8
+   processes of the full run, every key).  The check summed them as
+   independent, which shrinks its 5 sigma tolerance by sqrt(R P): at Step
+   9's 5 runs x 8 processes to about 0.8 sigma, so it would have failed
+   HAWK n = 256 keys by chance (the old code fails 5 of 198 keys on 10
+   copies of one run).  It now requires the copies to agree (n, attempts
+   and `rng_bytes` sums per run and process; a disagreement means
+   non-deterministic signing and FAILs) and tests one copy against Step 6.
+6. **Step failures reported into the step's own log** (found in Step 8):
+   `run_step`'s "failed" message was inside the caller's `2> STEP.txt`
+   redirection, so it went to `latency.txt` instead of the console.  The
+   driver now writes it to its own stderr and lists the failed steps at the
+   end.
+7. **Silent or crashing inputs** (found in Step 8): a missing run directory
+   crashed the analysis (`FileNotFoundError`); an empty CSV, a missing step
+   CSV and a header-only CSV were ignored (their keys simply absent, so
+   `complete` could PASS); a truncated last row could crash `int()`.  Now:
+   a clear error and exit 2, or a `complete` FAIL naming the problem;
+   `commands.txt` step exit statuses are checked too.
+8. **LaTeX**: wide tables shrink to the line width (`\resizebox`, only
+   when wider), tables over 40 rows continue in further floats with the
+   same number ("continued").  Table notes now define all-in / prepared,
+   sig B (HAWK compressed, E8 uncompressed), attempts and rng B, and say
+   that the throughput processes sign the same signatures.
+
+Left as they are: the throughput parent is not pinned (it only generates
+keys, untimed, then waits); LaTeX numbers the second flag set's tables 8-14
+(the Markdown and the labels say which is which; Step 10 chooses the
+paper's layout); Tables 1 and 2 are shrunk to about 60% in an `article`
+column (15 columns), so Step 10 should split or rotate them.
+
+### Decisions (Step 8)
+
+- **Run sets**: a driver option, `--run-set all|headline|cross-ccd`, with
+  the thread list, `P`, steps and `--cpus` requirement of the decided
+  Step 9 runs; `all` keeps the former behaviour for the smoke run.  The
+  analysis keeps run sets apart by refusing mixed inputs (exit 2) rather
+  than adding a key column: the run sets never share a table, each has its
+  own analysis directory (`--name`), and the statistics of a single run
+  set are unchanged.
+- **Analysis storage**: compact in-memory columns (the default), not a
+  streaming pass with per-key sorted files: at Step 9's volume the
+  analysis then needs under 1 GB and 2 minutes, so the extra complexity
+  buys nothing.
+- **CSV compression**: plain CSV (the default).  A headline run writes 672
+  MB of CSV (latency 201 MB, throughput 463 MB, AVX2 8 MB); gzip (level 6)
+  makes it 78 MB (8.6x) in 5.4 s per run, and the analysis reads
+  `NAME.csv.gz` like `NAME.csv` in 10% more time (13.6 s against 12.4 s,
+  identical outputs).  Step 9 needs about 10 GB of disk for both run sets,
+  which is no constraint; compressing inside the run would add a step
+  that can fail; the copy back is compressed anyway (run book).
+- **Failure messages**: the driver's exit status distinguishes a failed
+  step or check (1), a usage or configuration error (2) and a refused
+  preflight (3).
+- **CPU lists**: `compare/ccd_cpus.sh` derives both Step 9 lists from the
+  L3 topology (one CPU per core, the larger-L3 CCD first), so the run book
+  needs no hand-typed list (tested on synthetic sysfs trees with SMT on
+  and off and the V-cache on either CCD; on WSL it refuses: one L3
+  domain).
+
+### Measurements (WSL, not for the paper)
+
+| what | value |
+| --- | --- |
+| clean `make -j16` | 4.2 s |
+| smoke (both flag sets) | 4.3 s |
+| Step-9-shaped headline, 2 x 20, 2 runs x 2 flag sets | 55 s |
+| Step-9-shaped cross-CCD, 2 x 20, 2 runs x 2 flag sets | 21 s |
+| full volume headline run (10 x 1,000, O2, T 1-8, P = 8) | 8 min 49 s: latency 373 s, throughput 111 s, AVX2 2 s, sampler 2 s, stages 11 + 29 s |
+| full volume cross-CCD run (O2, T 1-16, 16 CPUs, latency only) | 7 min 53 s (latency 472 s) |
+| CSV per headline run | latency 201 MB (1.50 M rows), throughput 463 MB (3.36 M rows), AVX2 8 MB |
+| CSV per cross-CCD run | latency 250 MB (1.86 M rows; gzip 31 MB) |
+| analysis, 1 full cross-CCD run | 6.1 s, 53 MB |
+| analysis, 1 full run: before / after | 25 s, 1.04 GB / 12.4 s, 109 MB |
+| analysis, 10 copies (Step 9's 5 runs x 2 flag sets): before / after | 4 min 26 s, 10.2 GB / 1 min 59 s, 865 MB |
+
+Statistics unchanged: the new analysis writes byte-identical
+`summary.csv`, `runs.csv` and `ratios.csv` (same seed) on the smoke
+output, the full run and 10 copies of it; `tables.md` and `tables.tex`
+differ only in the header (run set), the table titles and notes and the
+new `preflight` line.
+
+### Findings for Step 9
+
+- **Run time**: per run and flag set here, headline 8.8 min (latency 6.2,
+  throughput 1.9, the rest 0.7) and cross-CCD 7.9 min; most of it is
+  verification, messages and keys, not timed signing.  Step 9 (5 runs x 2
+  flag sets per run set) at this speed: 88 + 79 min, about 2.8 h.  On bare
+  metal with boost off the cores run at the base clock instead of WSL's
+  boosted one (core / TSC about 1.3 here), so expect about 1.3x: headline
+  about 1.9 h, cross-CCD about 1.7 h, 3.6 h in all, plus the smoke run and
+  the analyses (minutes); plan for 4 h.  (Step 7's estimate, 1.75 h for
+  one run set at T up to 16 and P = 4 at WSL speed, becomes 1.5 h for the
+  headline at T up to 8.)  Disk: 6.7 GB of CSV for the headline run set,
+  2.5 GB for the cross-CCD one (0.8 and 0.3 GB gzipped).
+- **Determinism**: every run and every throughput process signs the same
+  signatures (fixed seeds); the analysis now relies on it (`attempts`).
+  Repeated runs therefore vary only in timing, which is what `run_spread`
+  and the bootstrap over runs measure.
+- **Run spread on WSL**: at 2 x 20 signatures, 124 of 396 headline keys
+  and 133 of 372 cross-CCD keys exceeded 3%, the worst threaded ones
+  (HAWK `ref-T` T = 4, E8 `ref` T = 4: 30-34%); at full volume one run
+  only was taken.  Bare metal with boost off, pinned cores and no desktop
+  should be far quieter; if threaded keys still fail, look at the pool's
+  spinning workers and interrupts on the listed CPUs before anything else.
+- **`core_vs_tsc`** passes on real WSL data with `boost: off` forced into
+  `env.txt` (the serial ratios agree within 2% even with boost), so on
+  bare metal it is a meaningful check only together with the preflight.
+- **Do not touch the repository during a run**: the driver is a shell
+  script that `dash` reads as it goes, so editing or checking out
+  `run_compare.sh` mid-run can corrupt the rest of the run (noticed here
+  while editing during a run, and reverted before the script read the
+  changed part).  The preflight checks a clean
+  tree only at the start of each run.
+- **`make clean` deletes `e8/results/`**, the runs included.

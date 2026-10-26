@@ -1,6 +1,6 @@
 """
 The tables of plan.md Step 10 from the comparison harness's runs, as
-LaTeX (booktabs) and Markdown.  Python standard library only; imported by
+LaTeX (booktabs, graphicx) and Markdown.  Python standard library only; imported by
 analyze.py.  One set of tables per flag set:
 
   1  headline, single core: HAWK ref vs E8 ref, both accounting modes
@@ -156,16 +156,32 @@ def table_sampler(runs, flags):
     return t
 
 
-def table_parallel(keys, ratios, flags):
-    t = Table(4, 'Parallel latency: wall-clock and total CPU cycles per'
-              ' signature', ['pair', 'n', 'acct', 'T', 'HAWK TSC', 'HAWK core',
-                             'E8 TSC', 'E8 core', 'E8/HAWK TSC [95% CI]',
-                             'E8/HAWK core'],
-              'lrlrrrrrlr',
-              'TSC: wall-clock cycles of the signing call; core: core cycles'
-              ' summed over the caller and the pool workers\' jobs (total CPU'
-              ' cycles; empty if the counter is unavailable). HAWK ref-T is'
-              ' HAWK\'s split ref on the same bound worker streams as E8.')
+PARALLEL_NOTE = ('TSC: wall-clock cycles of the signing call; core: core'
+                 ' cycles summed over the caller and the pool workers\' jobs'
+                 ' (total CPU cycles; empty if the counter is unavailable).'
+                 ' HAWK ref-T is HAWK\'s split ref on the same bound worker'
+                 ' streams as E8.')
+
+CROSS_CCD_NOTE = (
+    ' Cross-CCD run set, kept apart from the headline tables: latency on 16'
+    ' cores of both CCDs (SMT off, the same clock on both), the V-cache'
+    ' CCD\'s 8 cores first, so T <= 8 runs on the V-cache CCD (compare'
+    ' with Table 4) and T = 16 spans both CCDs (split L3, V-cache on one'
+    ' CCD only, cross-CCD transfers). Fair within the run: same process,'
+    ' interleaving, pinning, pool, RNG split, build, keys and messages for'
+    ' both schemes. Known asymmetry: E8\'s sampler workers write 32-bit'
+    ' outputs (8n bytes per call), HAWK\'s 8-bit outputs (2n bytes), so at'
+    ' T = 16 E8 moves more data across the CCDs; an implementation'
+    ' property, not the lattice\'s.')
+
+
+def table_parallel(keys, ratios, flags, number=4,
+                   title='Parallel latency: wall-clock and total CPU cycles'
+                   ' per signature', note=PARALLEL_NOTE):
+    t = Table(number, title,
+              ['pair', 'n', 'acct', 'T', 'HAWK TSC', 'HAWK core',
+               'E8 TSC', 'E8 core', 'E8/HAWK TSC [95% CI]', 'E8/HAWK core'],
+              'lrlrrrrrlr', note)
     ri = ratio_index(ratios)
     threads = sorted({k[4] for k in keys if k[0] == flags and k[1] == 'latency'})
     for ev, hv in (('ref', 'ref-T'), ('hot64', 'hot64'), ('hot32', 'hot32')):
@@ -197,7 +213,9 @@ def table_throughput(keys, ratios, flags):
                'E8/HAWK [95% CI]'], 'lrlrrrl',
               'Signatures per second of signing time per process (count /'
               ' sum of wall_ns), mean over the P processes, which run the'
-              ' same schedule at the same time on their own (pinned) CPUs.')
+              ' same schedule (the same keys, messages and seeds, so the'
+              ' same signatures) at the same time on their own (pinned)'
+              ' CPUs.')
     ri = ratio_index(ratios)
     for ev, hv in cd.PAIRS:
         for logn in (8, 9, 10):
@@ -282,14 +300,30 @@ def table_avx2(keys, ratios, flags):
 
 
 def build_tables(runs, keys, ratios, precision):
+    """The tables of each flag set.  A cross-CCD run set (latency only)
+    gives Table 4b alone; any other run set tables 1-7."""
     out = []
+    run_set = runs[0].run_set if runs else 'all'
     for flags in sorted({k[0] for k in keys}):
+        if run_set == 'cross-ccd':
+            t = table_parallel(keys, ratios, flags, '4b',
+                               'Parallel latency across both CCDs',
+                               PARALLEL_NOTE + CROSS_CCD_NOTE)
+            t.title += ' (flags %s, run set cross-ccd)' % flags
+            t.label = 'tab:cmp4b-%s' % flags.lower()
+            out.append(t)
+            continue
         lat = [a for k, a in keys.items() if k[0] == flags]
         prim = {a.primary() for a in lat if a.mode == 'latency'}
         note = ('cycles: core cycles (primary); TSC and us secondary.'
                 if prim == {'core_cycles'} else
                 'cycles: TSC (core cycles unavailable in some rows).')
-        note += (' Estimates: median per run, mean over runs. Precision:'
+        note += (' Estimates: median per run, mean over runs. all-in: from'
+                 ' the encoded private key; prepared: from a prepared key'
+                 ' (HAWK decoded, E8 prepared basis; preparation timed'
+                 ' separately). attempts, sig B (encoded signature bytes:'
+                 ' HAWK compressed, E8 uncompressed) and rng B (random bytes)'
+                 ' per signature. Precision:'
                  ' threshold bits, per-signature SD bound (log2), RD loss'
                  ' factor at the optimal order and eq. (6) of the HAWK spec'
                  ' (e8/docs/precision_summary.csv).')
@@ -307,8 +341,9 @@ def build_tables(runs, keys, ratios, precision):
             table_avx2(keys, ratios, flags),
         ]
         for t in tabs:
-            t.title += ' (flags %s)' % flags
-            t.label = 'tab:cmp%d-%s' % (t.number, flags.lower())
+            t.title += ' (flags %s%s)' % (
+                flags, '' if run_set == 'all' else ', run set ' + run_set)
+            t.label = 'tab:cmp%s-%s' % (t.number, flags.lower())
         out.extend(tabs)
     return out
 
@@ -316,7 +351,7 @@ def build_tables(runs, keys, ratios, precision):
 def render_markdown(tables, header):
     lines = [header, '']
     for t in tables:
-        lines.append('## Table %d: %s' % (t.number, t.title))
+        lines.append('## Table %s: %s' % (t.number, t.title))
         lines.append('')
         if t.notes:
             lines.append(t.notes)
@@ -343,30 +378,49 @@ def _tex(s):
     return re.sub(r'(?<=\d),(?=\d{3})', '{,}', s)
 
 
+# Rows per LaTeX float: a longer table continues in further floats
+# ("continued", same number) so that each fits a page.
+TEX_MAX_ROWS = 40
+
+
 def render_latex(tables, header):
     lines = ['% ' + header,
              '% Generated by e8/compare/analysis/analyze.py; requires'
-             ' booktabs.', '']
+             ' booktabs and graphicx.', '']
     for t in tables:
-        lines.append('%% Table %d: %s' % (t.number, t.title))
-        lines.append('\\begin{table}[t]')
-        lines.append('\\centering\\footnotesize')
-        lines.append('\\caption{%s}' % _tex(t.title))
-        lines.append('\\label{%s}' % t.label)
-        lines.append('\\begin{tabular}{%s}' % t.align)
-        lines.append('\\toprule')
-        lines.append(' & '.join(_tex(c) for c in t.columns) + ' \\\\')
-        lines.append('\\midrule')
-        if not t.rows:
-            lines.append('\\multicolumn{%d}{c}{(no data)} \\\\'
-                         % len(t.columns))
-        for row in t.rows:
-            lines.append(' & '.join(_tex(c) for c in row) + ' \\\\')
-        lines.append('\\bottomrule')
-        lines.append('\\end{tabular}')
-        if t.notes:
-            lines.append('\\par\\smallskip\\parbox{\\linewidth}{\\scriptsize'
-                         ' %s}' % _tex(t.notes))
-        lines.append('\\end{table}')
-        lines.append('')
+        nparts = max(1, -(-len(t.rows) // TEX_MAX_ROWS))
+        size = -(-len(t.rows) // nparts) if t.rows else 0
+        for part in range(nparts):
+            rows = t.rows[part * size:(part + 1) * size]
+            lines.append('%% Table %s: %s%s' % (
+                t.number, t.title, ' (part %d of %d)' % (part + 1, nparts)
+                if nparts > 1 else ''))
+            lines.append('\\begin{table}[t]')
+            lines.append('\\centering\\footnotesize')
+            if part == 0:
+                lines.append('\\caption{%s}' % _tex(t.title))
+                lines.append('\\label{%s}' % t.label)
+            else:
+                lines.append('\\addtocounter{table}{-1}')
+                lines.append('\\caption{%s (continued)}' % _tex(t.title))
+            # Shrink a table wider than the text to fit; narrower ones
+            # keep their size.
+            lines.append('\\resizebox{\\ifdim\\width>\\linewidth'
+                         '\\linewidth\\else\\width\\fi}{!}{%')
+            lines.append('\\begin{tabular}{%s}' % t.align)
+            lines.append('\\toprule')
+            lines.append(' & '.join(_tex(c) for c in t.columns) + ' \\\\')
+            lines.append('\\midrule')
+            if not rows:
+                lines.append('\\multicolumn{%d}{c}{(no data)} \\\\'
+                             % len(t.columns))
+            for row in rows:
+                lines.append(' & '.join(_tex(c) for c in row) + ' \\\\')
+            lines.append('\\bottomrule')
+            lines.append('\\end{tabular}}')
+            if t.notes and part == nparts - 1:
+                lines.append('\\par\\smallskip\\parbox{\\linewidth}'
+                             '{\\scriptsize %s}' % _tex(t.notes))
+            lines.append('\\end{table}')
+            lines.append('')
     return '\n'.join(lines)

@@ -48,9 +48,13 @@ e8/
                              throughput modes, pinning
     bench_sign_core.c/.h     signing core shared by bench_compare and
                              e8_sign_bench (keys, timed sign_finish, verify)
-    run_compare.sh           run driver: one results/compare/<flag set>/
+    run_compare.sh           run driver: run sets (all, headline,
+                             cross-ccd), one results/compare/<flag set>/
                              <run_id>/ per run, then the analysis
     env_capture.sh           environment record (env.txt) of a run
+    preflight.sh             machine-state checks before a run (boost,
+                             governor, SMT, perf, frequencies, clean tree)
+    ccd_cpus.sh              Step 9's CPU lists from the L3 topology
     analysis/                analyze.py (+ compare_data.py,
                              compare_tables.py): statistics, bootstrap
                              ratios, acceptance checks, Step 10 tables
@@ -70,8 +74,9 @@ e8/
   results/    generated outputs (gitignored), see "Usage"
   docs/       design notes, recorded performance results and accounting
               (perf_comparison_final.md), the harness (harness.md), the
-              precision audit (precision_audit.md, precision_summary.csv),
-              the validation (validation.md, validation_summary.csv)
+              Step 9 run book (step9_runbook.md), the precision audit
+              (precision_audit.md, precision_summary.csv), the validation
+              (validation.md, validation_summary.csv)
 ```
 
 Dependencies run one way: `src/` may use `common/` and `tables/`;
@@ -99,8 +104,13 @@ make bench-builds        # the timed binaries of every flag set (part of make)
 make bench-compare-smoke # Step 8: the harness on every configuration of both
                          # flag sets at small counts, plus the analysis
 make bench-compare       # one harness run at Step 9's volume (flag set O2;
-                         # COMPARE_FLAGSETS, COMPARE_RUNS, COMPARE_ARGS)
+                         # COMPARE_FLAGSETS, COMPARE_RUNS, COMPARE_ARGS;
+                         # --run-set headline|cross-ccd, --cpus, --force)
 ```
+
+Step 9 (bare metal): machine setup, CPU lists, preflight, the exact
+commands of both run sets, run time, acceptance and what to copy back are
+in [`docs/step9_runbook.md`](docs/step9_runbook.md).
 
 The validation builds `bin/e8_correctness_nodebug` from its own E8 objects
 in `build/nodebug/` (`HAWK_E8_DEBUG_CHECKS=0`, the timed build's setting)

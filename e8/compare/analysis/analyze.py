@@ -12,8 +12,10 @@ usage: analyze.py [--out-dir DIR] [--bootstrap B] [--seed S]
 PATH: run directories of compare/run_compare.sh
 (results/compare/<flag set>/<run_id>/) or single CSV files in the
 per-signature schema (e8/common/cmn_csv.h; for example e8_sign_bench
-output).  Repeated runs of one configuration (Step 9: at least 5 process
-restarts per flag set) are combined; different flag sets stay apart.
+output; NAME.csv.gz is read like NAME.csv).  Repeated runs of one
+configuration (Step 9: at least 5 process restarts per flag set) are
+combined; different flag sets stay apart; inputs of more than one run set
+(run_set in env.txt: all, headline, cross-ccd) are refused.
 
 Writes to DIR (default results/compare/analysis/<first run_id>):
 
@@ -29,9 +31,11 @@ Writes to DIR (default results/compare/analysis/<first run_id>):
   ratios.csv      E8 / HAWK for matched pairs, bootstrap 95% CIs
   acceptance.txt  the run-acceptance checks of Step 9
   tables.md       the Step 10 tables for review
-  tables.tex      the same tables in LaTeX (booktabs)
+  tables.tex      the same tables in LaTeX (booktabs, graphicx)
 
-Exit status 1 if an acceptance check fails (unless --no-fail).  The
+Exit status 1 if an acceptance check fails (unless --no-fail); 2 if the
+inputs cannot be analysed (a missing path, a single CSV that is empty or
+not in the schema, mixed run sets, no signature rows).  The
 statistics and checks are described in compare_data.py, the tables in
 compare_tables.py.
 """
@@ -115,7 +119,7 @@ def write_runs(path, keys):
                 n = c.count()
                 row = [a.flags, a.mode, a.scheme, a.variant, a.threads,
                        a.logn, a.accounting, rid, n,
-                       fmt(sum(c.attempts) / n, 6) if n else '']
+                       fmt(c.attempts_sum / n, 6) if n else '']
                 for m in cd.TIMING_METRICS:
                     v = sorted(c.values[m])
                     row.append(fmt(cd.quantile(v, 0.5))
@@ -146,11 +150,24 @@ def acceptance(runs, keys, precision, validation, args):
         cd.check_spread(keys, args.run_tolerance),
         cd.check_core_tsc(runs, keys, args.core_tsc_tolerance),
         cd.check_joins(keys, precision, validation),
+        cd.check_preflight(runs),
     ]
 
 
 def analyse(paths, out_dir, args):
-    runs = [cd.load_run(p) for p in paths]
+    try:
+        runs = [cd.load_run(p) for p in paths]
+    except cd.LoadError as e:
+        print('analyze.py: %s' % e, file=sys.stderr)
+        return 2
+    run_sets = sorted({r.run_set for r in runs})
+    if len(run_sets) > 1:
+        print('analyze.py: the inputs mix run sets (%s); the headline and'
+              ' cross-CCD runs are analysed separately, each under its own'
+              ' --out-dir' % ', '.join('%s: %d run(s)' % (
+                  s, sum(r.run_set == s for r in runs)) for s in run_sets),
+              file=sys.stderr)
+        return 2
     keys = cd.aggregate(runs)
     if not keys:
         print('analyze.py: no signature rows in %s' % ' '.join(paths),
@@ -166,8 +183,9 @@ def analyse(paths, out_dir, args):
     write_runs(os.path.join(out_dir, 'runs.csv'), keys)
     write_ratios(os.path.join(out_dir, 'ratios.csv'), ratios)
 
-    header = ('HAWK vs E8 comparison: %d run(s): %s' % (
-        len(runs), ', '.join('%s (%s)' % (r.run_id, r.flags) for r in runs)))
+    header = ('HAWK vs E8 comparison, run set %s: %d run(s): %s' % (
+        run_sets[0], len(runs),
+        ', '.join('%s (%s)' % (r.run_id, r.flags) for r in runs)))
     env_notes = []
     for r in runs:
         e = r.env
@@ -216,12 +234,14 @@ def analyse(paths, out_dir, args):
 # Self-test
 
 def _synthetic_run(dirpath, run_id, flags='O2', verify_fail=False,
-                   drop_row=False, scale=1.0):
+                   drop_row=False, scale=1.0, env_extra='', truncate=False,
+                   extra_attempt=False):
     """A small latency run: HAWK ref and E8 ref, n = 256, T = 1, 2 keys x
-    3 signatures."""
+    3 signatures.  truncate cuts the last row in half (a killed run)."""
     os.makedirs(dirpath, exist_ok=True)
     with open(os.path.join(dirpath, 'env.txt'), 'w') as f:
-        f.write('run_id: %s\nflags: %s\nboost: off\n' % (run_id, flags))
+        f.write('run_id: %s\nflags: %s\nboost: off\n%s'
+                % (run_id, flags, env_extra))
     cols = ['kind', 'run_id', 'scheme', 'variant', 'threshold_bits',
             'technique', 'threads', 'logn', 'key_index', 'msg_index',
             'attempts', 'sig_bytes', 'rng_bytes', 'tsc_cycles', 'core_cycles',
@@ -266,12 +286,20 @@ def _synthetic_run(dirpath, run_id, flags='O2', verify_fail=False,
             batch += 1
     if verify_fail:
         rows[-1]['verify_ok'] = '0'
+    if extra_attempt:
+        rows[-1]['attempts'] = '2'
     if drop_row:
         del rows[-2]
     with open(os.path.join(dirpath, 'latency.csv'), 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=cols, lineterminator='\n')
         w.writeheader()
         w.writerows(rows)
+    if truncate:
+        p = os.path.join(dirpath, 'latency.csv')
+        with open(p, 'rb') as f:
+            data = f.read()
+        with open(p, 'wb') as f:
+            f.write(data[:-40])
 
 
 def self_test():
@@ -348,6 +376,39 @@ def self_test():
         rs = [cd.load_run(good[0]), cd.load_run(spread)]
         expect(cd.check_spread(cd.aggregate(rs), 0.03).status == 'FAIL',
                'a 20% slower run fails the run-spread check')
+
+        # Step 8: copies, inputs, run sets and the preflight record.
+        copies = [cd.load_run(good[0])]
+        for i in range(1, 40):      # 5 runs x 8 processes, identical
+            copies.append(cd.load_run(good[0]))
+        prec = cd.read_summary(A.validation, cd.VALIDATION_COLUMNS)
+        expect(cd.check_attempts(cd.aggregate(copies), prec).status
+               == 'PASS', 'identical copies of the signatures pass attempts')
+        other = os.path.join(tmp, 'other')
+        _synthetic_run(other, 'other', extra_attempt=True)
+        expect(cd.check_attempts(cd.aggregate(
+            [cd.load_run(good[0]), cd.load_run(other)]), prec).status
+            == 'FAIL', 'copies with different attempts fail attempts')
+        cut = os.path.join(tmp, 'cut')
+        _synthetic_run(cut, 'cut', truncate=True)
+        rs = [cd.load_run(cut)]
+        expect(cd.check_complete(rs).status == 'FAIL',
+               'a truncated CSV fails completeness')
+        expect(analyse([os.path.join(tmp, 'none')], os.path.join(
+            tmp, 'out_none'), A) == 2, 'a missing run directory is an error')
+        cross = os.path.join(tmp, 'cross')
+        _synthetic_run(cross, 'cross', env_extra='run_set: cross-ccd\n')
+        expect(analyse([good[0], cross], os.path.join(tmp, 'out_mix'), A)
+               == 2, 'mixed run sets are refused')
+        forced = os.path.join(tmp, 'forced')
+        _synthetic_run(forced, 'forced', env_extra=(
+            'preflight: failed (forced: --force)\n'
+            'preflight_boost: FAIL (on)\n'))
+        passed = os.path.join(tmp, 'passed')
+        _synthetic_run(passed, 'passed', env_extra='preflight: passed\n')
+        expect(cd.check_preflight([cd.load_run(forced)]).status == 'FAIL'
+               and cd.check_preflight([cd.load_run(passed)]).status
+               == 'PASS', 'a forced preflight fails, a passed one passes')
     return 0 if ok else 1
 
 
@@ -372,8 +433,8 @@ def main():
         ap.error('no run directory or CSV given')
     out_dir = args.out_dir
     if out_dir is None:
-        first = cd.load_run(args.paths[0])
-        out_dir = os.path.join(RESULTS, 'compare', 'analysis', first.run_id)
+        out_dir = os.path.join(RESULTS, 'compare', 'analysis',
+                               cd.peek_run_id(args.paths[0]))
     return analyse(args.paths, out_dir, args)
 
 

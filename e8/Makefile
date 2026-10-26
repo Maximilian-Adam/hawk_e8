@@ -144,8 +144,11 @@ validate: build bin $(VALIDATE_BINS)
 # results/compare/<flag set>/<run_id>/ with env.txt, then the analysis
 # (compare/analysis/analyze.py) into results/compare/analysis/<name>/.
 # bench-compare: Step 9's volume per run (10 keys x 1,000 signatures);
-# COMPARE_FLAGSETS, COMPARE_RUNS and COMPARE_ARGS (for example
-# COMPARE_ARGS='--cpus 0,2,4,6,8,10,12,14,16 --procs 8') select more.
+# COMPARE_FLAGSETS, COMPARE_RUNS and COMPARE_ARGS select more, for example
+# Step 9's run sets (docs/step9_runbook.md):
+#   COMPARE_ARGS="--run-set headline --cpus $(sh e8/compare/ccd_cpus.sh headline)"
+#   COMPARE_ARGS="--run-set cross-ccd --cpus $(sh e8/compare/ccd_cpus.sh cross-ccd)"
+# A non-smoke run first passes compare/preflight.sh (or --force).
 # bench-compare-smoke (Step 8): every configuration of both flag sets at
 # small counts, the analysis self-test and the analysis.
 COMPARE_FLAGSETS = O2
