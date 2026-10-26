@@ -13,9 +13,10 @@ make validate         # the full run below, about 30 minutes on 32 CPUs
 Both targets (from the repository root or `e8/`) run `e8/tools/validate.py`,
 which prints its expected duration, runs every part as single-threaded
 processes in parallel (up to `os.cpu_count()` CPU slots; a 4-thread shard
-takes 4), and writes, in `e8/` (gitignored, like every `e8/*.csv`):
+takes 4), and writes, in `e8/results/validation/` (`make validate`) or
+`e8/results/validation-quick/` (`make validate-quick`), both gitignored:
 
-| file (`validation_` / `validation_quick_` prefix) | contents |
+| file | contents |
 |---|---|
 | `correctness.csv` | one row per correctness shard and build (counts, attempts, signature digest, seconds) |
 | `hist.csv` | the merged sampler histograms (kind, scheme, variant, logn, id, value, count) |
@@ -27,9 +28,10 @@ takes 4), and writes, in `e8/` (gitignored, like every `e8/*.csv`):
 
 `make validate` fails unless every signature verified, every debug check
 and digest matched, every distribution test passed and every eligible
-control was rejected, and also if the fresh `validation_summary.csv`
-differs from the committed `e8/docs/validation_summary.csv` (seeds are
-fixed, so the summary is reproducible; to update it, copy it there).
+control was rejected, and also if the fresh
+`e8/results/validation/summary.csv` differs from the committed
+`e8/docs/validation_summary.csv` (seeds are fixed, so the summary is
+reproducible; to update it, copy it there).
 
 ## What the tests target
 

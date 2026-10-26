@@ -60,6 +60,8 @@ Optimized_Implementation/avx2/*.h
 # Build directories
 **/build/
 **/bin/
+# Generated outputs (e8/results/); e8/*.csv covers outputs of older runs
+e8/results/
 e8/*.csv
 
 **/NIST/

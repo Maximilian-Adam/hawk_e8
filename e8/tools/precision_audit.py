@@ -1000,7 +1000,8 @@ def sanity(configs):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out-dir", default=os.path.join(HERE, ".."))
+    ap.add_argument("--out-dir", default=os.path.join(HERE, "..", "results",
+                                                  "precision"))
     ap.add_argument("--orders", default=",".join(str(a) for a in
                                                  ORDERS_DEFAULT))
     ap.add_argument("--self-test", action="store_true")

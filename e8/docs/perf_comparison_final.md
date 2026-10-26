@@ -156,9 +156,9 @@ joined, job CPU and idle CPU).
 make -C e8 clean
 make -C e8 bin/e8_sign_bench bin/e8_sign_profile_bench \
   CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_E8_DEBUG_CHECKS=0'
-cd e8
-./bin/e8_sign_bench --trials 1000 > e8_sign_bench.csv 2> e8_sign_bench.txt
-./bin/e8_sign_profile_bench --trials 1000 > /dev/null 2> e8_sign_profile.txt
+cd e8 && mkdir -p results/bench
+./bin/e8_sign_bench --trials 1000 > results/bench/e8_sign_bench.csv 2> results/bench/e8_sign_bench.txt
+./bin/e8_sign_profile_bench --trials 1000 > /dev/null 2> results/bench/e8_sign_profile.txt
 ```
 
 Setting `CFLAGS` applies the same flags to the HAWK, shared and E8 objects

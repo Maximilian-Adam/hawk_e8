@@ -76,49 +76,64 @@ test-e8: build bin $(E8_TEST_PROGS)
 	./bin/test_e8_ref_ct
 	./bin/test_hawk_variants
 	./bin/test_cmn_common
+# Generated outputs live under results/ (gitignored), one directory per
+# kind: results/bench/ (benchmarks), results/diagnostics/ (diagnostic
+# tools), results/precision/ (precision audit), results/validation/ and
+# results/validation-quick/ (Step 6); results/compare/ is reserved for the
+# comparison harness. Committed reference copies live in docs/.
+BENCH_OUT = results/bench
+DIAG_OUT = results/diagnostics
 e8-histograms: build bin bin/e8_histograms
-	./bin/e8_histograms
+	@mkdir -p $(DIAG_OUT)
+	cd $(DIAG_OUT) && ../../bin/e8_histograms
 sampler-bench: build bin bin/e8_sampler_bench
-	@./bin/e8_sampler_bench --selected-configs > e8_sampler_bench.csv
-	@printf 'wrote e8_sampler_bench.csv\n'
+	@mkdir -p $(BENCH_OUT)
+	@./bin/e8_sampler_bench --selected-configs > $(BENCH_OUT)/e8_sampler_bench.csv
+	@printf 'wrote $(BENCH_OUT)/e8_sampler_bench.csv\n'
 variant-sampler-bench: build bin bin/e8_sampler_bench
-	@./bin/e8_sampler_bench --variant-matrix --trials 2000 > e8_variant_sampler_bench.csv
-	@printf 'wrote e8_variant_sampler_bench.csv\n'
+	@mkdir -p $(BENCH_OUT)
+	@./bin/e8_sampler_bench --variant-matrix --trials 2000 > $(BENCH_OUT)/e8_variant_sampler_bench.csv
+	@printf 'wrote $(BENCH_OUT)/e8_variant_sampler_bench.csv\n'
 profile-sampler-bench: build bin bin/e8_sampler_profile_bench
-	@./bin/e8_sampler_profile_bench --selected-configs > e8_sampler_profile_bench.csv
-	@printf 'wrote e8_sampler_profile_bench.csv\n'
+	@mkdir -p $(BENCH_OUT)
+	@./bin/e8_sampler_profile_bench --selected-configs > $(BENCH_OUT)/e8_sampler_profile_bench.csv
+	@printf 'wrote $(BENCH_OUT)/e8_sampler_profile_bench.csv\n'
 sign-bench: build bin bin/e8_sign_bench
-	@./bin/e8_sign_bench > e8_sign_bench.csv
-	@printf 'wrote e8_sign_bench.csv\n'
+	@mkdir -p $(BENCH_OUT)
+	@./bin/e8_sign_bench > $(BENCH_OUT)/e8_sign_bench.csv
+	@printf 'wrote $(BENCH_OUT)/e8_sign_bench.csv\n'
 profile-sign-bench: build bin bin/e8_sign_profile_bench
 	@./bin/e8_sign_profile_bench > /dev/null
 profile-hawk-sign-bench: build bin bin/hawk_sign_profile_bench
 	@./bin/hawk_sign_profile_bench > /dev/null
 e8-rejection-summary: build bin bin/e8_rejection_summary
-	@./bin/e8_rejection_summary > e8_rejection_summary.csv
-	@printf 'wrote e8_rejection_summary.csv\n'
+	@mkdir -p $(DIAG_OUT)
+	@./bin/e8_rejection_summary > $(DIAG_OUT)/e8_rejection_summary.csv
+	@printf 'wrote $(DIAG_OUT)/e8_rejection_summary.csv\n'
 e8-validation-summary: build bin bin/e8_validation_summary
-	@./bin/e8_validation_summary
-	@printf 'wrote e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv\n'
+	@mkdir -p $(DIAG_OUT)
+	@cd $(DIAG_OUT) && ../../bin/e8_validation_summary
+	@printf 'wrote e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv in $(DIAG_OUT)\n'
 e8-sigma-verify-sweep: build bin bin/e8_rejection_summary
-	@E8_SIGMA_VERIFY_SWEEP=1 ./bin/e8_rejection_summary > e8_sigma_verify_sweep.csv
-	@printf 'wrote e8_sigma_verify_sweep.csv\n'
+	@mkdir -p $(DIAG_OUT)
+	@E8_SIGMA_VERIFY_SWEEP=1 ./bin/e8_rejection_summary > $(DIAG_OUT)/e8_sigma_verify_sweep.csv
+	@printf 'wrote $(DIAG_OUT)/e8_sigma_verify_sweep.csv\n'
 e8-sigma-sign-sweep: build bin bin/e8_rejection_summary
-	@E8_SIGMA_SIGN_SWEEP=1 ./bin/e8_rejection_summary > e8_sigma_sign_sweep.csv
-	@printf 'wrote e8_sigma_sign_sweep.csv\n'
+	@mkdir -p $(DIAG_OUT)
+	@E8_SIGMA_SIGN_SWEEP=1 ./bin/e8_rejection_summary > $(DIAG_OUT)/e8_sigma_sign_sweep.csv
+	@printf 'wrote $(DIAG_OUT)/e8_sigma_sign_sweep.csv\n'
 
 # Step 6 validation (tools/validate.py, see docs/validation.md): signature
 # correctness of every variant of both schemes (no-debug build), the E8
 # debug-build run, sampler histograms and the distribution tests. Outputs
-# validation_quick_*.csv / validation_*.csv in e8/. validate fails if the
-# fresh validation_summary.csv differs from the committed
+# in results/validation-quick/ and results/validation/. validate fails if
+# the fresh results/validation/summary.csv differs from the committed
 # docs/validation_summary.csv (to update it, copy it there).
-VALIDATE_CSV = $(foreach p,validation_ validation_quick_,$(foreach f,correctness hist tests controls ideal signorm summary,$(p)$(f).csv))
 VALIDATE_BINS = bin/e8_correctness bin/e8_correctness_nodebug bin/e8_distribution_sample
 validate-quick: build bin $(VALIDATE_BINS)
-	python3 -I tools/validate.py --quick --out-dir .
+	python3 -I tools/validate.py --quick --out-dir results/validation-quick
 validate: build bin $(VALIDATE_BINS)
-	python3 -I tools/validate.py --out-dir . --check docs/validation_summary.csv
+	python3 -I tools/validate.py --out-dir results/validation --check docs/validation_summary.csv
 
 # Regenerate the sampler tables into build/tables and fail if any differs
 # from the committed tables/ (to update them, run the generator command in
@@ -135,15 +150,16 @@ tables: build
 # self-tests, including the exact 1D moments against the C moments of
 # test_e8_tables and test_hawk_variants, then the audit of every variant's
 # committed tables (precision_audit.csv, precision_audit_dists.csv,
-# precision_summary.csv in e8/); fails if the committed
+# precision_summary.csv in results/precision/); fails if the committed
 # docs/precision_summary.csv differs from the fresh summary (to update it,
-# copy precision_summary.csv to docs/).
+# copy results/precision/precision_summary.csv to docs/).
+PRECISION_OUT = results/precision
 precision-audit: build bin bin/test_e8_tables bin/test_hawk_variants
 	@./bin/test_e8_tables --moments > build/precision_moments.csv
 	@./bin/test_hawk_variants --moments >> build/precision_moments.csv
-	python3 -I tools/precision_audit.py --self-test --c-moments build/precision_moments.csv --out-dir .
-	@cmp -s precision_summary.csv docs/precision_summary.csv \
-		|| { echo "precision-audit: docs/precision_summary.csv differs from the fresh precision_summary.csv"; exit 1; }; \
+	python3 -I tools/precision_audit.py --self-test --c-moments build/precision_moments.csv --out-dir $(PRECISION_OUT)
+	@cmp -s $(PRECISION_OUT)/precision_summary.csv docs/precision_summary.csv \
+		|| { echo "precision-audit: docs/precision_summary.csv differs from the fresh $(PRECISION_OUT)/precision_summary.csv"; exit 1; }; \
 		echo "precision-audit: committed docs/precision_summary.csv matches"
 
 # Integer-only signing path. Every E8 and HAWK-variant translation unit on
@@ -186,9 +202,7 @@ build:
 bin:
 	-mkdir -p bin
 clean:
-	-rm -rf build bin
-	-rm -f e8_variant_sampler_bench.csv e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sampler_profile_bench.csv e8_sign_bench.csv hawk_sign_profile_bench.csv e8_rejection_summary.csv e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv e8_sigma_verify_sweep.csv e8_sigma_sign_sweep.csv precision_audit.csv precision_audit_dists.csv precision_summary.csv
-	-rm -f $(VALIDATE_CSV)
+	-rm -rf build bin results
 
 # Generated upstream HAWK sources:
 $(HAWK_STAMP): ../build.py ../src/*.c ../src/*.h

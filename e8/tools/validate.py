@@ -26,11 +26,11 @@ slots in use, default os.cpu_count()):
                   256 taus, and signature norms for one fixed target.
   4. tests        tools/distribution_tests.py on the merged histograms.
 
-Outputs in --out-dir, with prefix validation_ (validation_quick_ for
---quick): correctness.csv (one row per shard and build), hist.csv (merged
-histograms), tests.csv, controls.csv, ideal.csv, signorm.csv, and
-summary.csv (one row per scheme, variant, logn; no timings, so equal
-seeds give an identical file). With --check FILE the summary must equal
+Outputs in --out-dir (default e8/results/validation, or
+e8/results/validation-quick with --quick): correctness.csv (one row per
+shard and build), hist.csv (merged histograms), tests.csv, controls.csv,
+ideal.csv, signorm.csv, and summary.csv (one row per scheme, variant,
+logn; no timings, so equal seeds give an identical file). With --check FILE the summary must equal
 FILE. Exit status 0 if every signature verified, every debug check and
 digest matched, every distribution test passed and every eligible
 negative control was rejected.
@@ -206,15 +206,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
-    ap.add_argument("--out-dir", default=os.path.join(HERE, ".."))
+    ap.add_argument("--out-dir")
     ap.add_argument("--bin-dir", default=os.path.join(HERE, "..", "bin"))
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--alpha", type=float, default=dt.ALPHA_DEFAULT)
     ap.add_argument("--check")
     args = ap.parse_args()
     cfg = QUICK if args.quick else FULL
-    prefix = os.path.join(args.out_dir, "validation_quick_" if args.quick
-                          else "validation_")
+    out_dir = args.out_dir or os.path.join(
+        HERE, "..", "results", "validation-quick" if args.quick
+        else "validation")
+    os.makedirs(out_dir, exist_ok=True)
+    prefix = os.path.join(out_dir, "")
 
     cjobs = correctness_jobs(cfg, args.bin_dir, args.seed)
     sjobs = sampling_jobs(cfg, args.bin_dir, args.seed)
@@ -377,9 +380,9 @@ def main():
           % (len(controls), sum(r["eligible"] for r in controls),
              sum(r["rejected"] for r in controls), missed,
              sum(r["rejected"] for r in ideal), len(ideal)))
-    print("validate: wrote %s{correctness,hist,tests,controls,ideal,"
-          "signorm,summary}.csv; total %.0f s"
-          % (os.path.relpath(prefix), time.time() - t0))
+    print("validate: wrote {correctness,hist,tests,controls,ideal,"
+          "signorm,summary}.csv in %s; total %.0f s"
+          % (os.path.relpath(out_dir), time.time() - t0))
     if fails or dfail or digest_mismatch or rej or missed:
         ok = False
     if args.check is not None and not os.path.exists(args.check):

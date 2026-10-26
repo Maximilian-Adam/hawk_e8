@@ -13,7 +13,7 @@ make precision-audit          # from the repository root or e8/ (about 2 minutes
 ```
 
 `e8/tools/precision_audit.py` (Python standard library) runs its self-tests,
-audits every variant and writes, in `e8/`:
+audits every variant and writes, in `e8/results/precision/`:
 
 - `precision_audit.csv`: one row per distribution (scheme, variant, logn,
   kind `1d` / `component` / `block`, id = parity, class or tau);

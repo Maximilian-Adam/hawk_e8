@@ -712,8 +712,8 @@ E8_HIST_TRIALS=<positive integer>
 writes:
 
 ```text
-e8/e8_hist_public.csv
-e8/e8_hist_signatures.csv
+e8/results/diagnostics/e8_hist_public.csv
+e8/results/diagnostics/e8_hist_signatures.csv
 ```
 
 Sampler timing:
@@ -728,11 +728,12 @@ make -C e8 clean
 make -C e8 sampler-bench CFLAGS='-O2 -DHAWK_E8_DEBUG_CHECKS=0'
 ```
 
-writes `e8/e8_sampler_bench.csv` with ordinary HAWK
+writes `e8/results/bench/e8_sampler_bench.csv` with ordinary HAWK
 sampler rows and selected E8 sampler rows.  In-path sampler profiling is off
 by default, so the `profile_*` columns are empty; `make -C e8
 profile-sampler-bench` builds the same benchmark against a sampler compiled
-with `HAWK_E8_PROFILE_SAMPLER=1` and writes `e8/e8_sampler_profile_bench.csv`
+with `HAWK_E8_PROFILE_SAMPLER=1` and writes
+`e8/results/bench/e8_sampler_profile_bench.csv`
 with those columns filled (its timings include the profile timers).  Defined
 modes are available after building the benchmark binary:
 
@@ -746,7 +747,7 @@ e8/bin/e8_sampler_bench --variant-matrix [--logn N] [--threads N] --trials 2000
 ```
 
 `--variant-matrix` (also `make -C e8 variant-sampler-bench`, writing
-`e8/e8_variant_sampler_bench.csv`) times every sampler variant of both
+`e8/results/bench/e8_variant_sampler_bench.csv`) times every sampler variant of both
 schemes, one full-dimension call per trial through the signers' own entry
 points with bound streams (a fixed prefix of encoded-key length), at
 `T = 1, 8, 16` by default, and reports medians, cycles per 8 coordinates
@@ -760,7 +761,7 @@ make -C e8 sign-bench
 make -C e8 profile-sign-bench
 ```
 
-`sign-bench` writes `e8/e8_sign_bench.csv`: HAWK and E8 signed through
+`sign-bench` writes `e8/results/bench/e8_sign_bench.csv`: HAWK and E8 signed through
 their own `sign_finish` calls under the same two accounting modes (`all_in`,
 `prepared`), one CSV row per signature in the shared schema
 (`e8/common/cmn_csv.h`), every signature verified.  Both schemes draw from
@@ -784,7 +785,7 @@ Rejection and norm summaries:
 make -C e8 e8-rejection-summary
 ```
 
-writes `e8/e8_rejection_summary.csv`.  The target
+writes `e8/results/diagnostics/e8_rejection_summary.csv`.  The target
 supports:
 
 ```text
@@ -800,8 +801,8 @@ make -C e8 e8-sigma-verify-sweep
 make -C e8 e8-sigma-sign-sweep
 ```
 
-These write `e8/e8_sigma_verify_sweep.csv` and
-`e8/e8_sigma_sign_sweep.csv`.  The verify sweep uses the
+These write `e8/results/diagnostics/e8_sigma_verify_sweep.csv` and
+`e8/results/diagnostics/e8_sigma_sign_sweep.csv`.  The verify sweep uses the
 rounded up smoothing `sigma_sign` values and tests `sigma_verify`.  The sign
 sweep starts at the full signing space smoothing threshold with `eps_bits=32`,
 rounds the tested `sigma_sign` up to 3 decimal places, and steps upward by
@@ -820,7 +821,7 @@ Validation summaries:
 make -C e8 e8-validation-summary
 ```
 
-writes:
+writes, in `e8/results/diagnostics/`:
 
 ```text
 e8_validation_summary.csv     manifest of generated validation CSVs

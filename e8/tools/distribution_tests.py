@@ -65,7 +65,10 @@ rejected. The same samples are also tested against the ideal Gaussians
 (1d, component, blockcoord), for information only.
 
 Usage (normally through tools/validate.py):
-    distribution_tests.py --hist FILE [--out-prefix PREFIX] [--alpha A]
+    distribution_tests.py --hist FILE [--out-dir DIR] [--alpha A]
+
+Writes tests.csv, controls.csv, ideal.csv and signorm.csv in --out-dir
+(default e8/results/distribution-tests).
 """
 
 import argparse
@@ -570,7 +573,8 @@ def summarise(tests, controls, ideal):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hist", action="append", required=True)
-    ap.add_argument("--out-prefix", default="validation_")
+    ap.add_argument("--out-dir", default=os.path.join(
+        HERE, "..", "results", "distribution-tests"))
     ap.add_argument("--alpha", type=float, default=ALPHA_DEFAULT)
     ap.add_argument("--hawk-src", default=os.path.join(
         HERE, "..", "..", "src", "hawk_sign.c"))
@@ -578,10 +582,12 @@ def main():
     refs = References(args.hawk_src)
     hist = read_hist(args.hist)
     tests, controls, ideal, signorm = run_tests(refs, hist, args.alpha)
-    write_rows(args.out_prefix + "tests.csv", tests, TEST_FIELDS)
-    write_rows(args.out_prefix + "controls.csv", controls, CONTROL_FIELDS)
-    write_rows(args.out_prefix + "ideal.csv", ideal, TEST_FIELDS)
-    write_rows(args.out_prefix + "signorm.csv", signorm, SIGNORM_FIELDS)
+    os.makedirs(args.out_dir, exist_ok=True)
+    for name, rows, fields in (("tests", tests, TEST_FIELDS),
+                               ("controls", controls, CONTROL_FIELDS),
+                               ("ideal", ideal, TEST_FIELDS),
+                               ("signorm", signorm, SIGNORM_FIELDS)):
+        write_rows(os.path.join(args.out_dir, name + ".csv"), rows, fields)
     bad = sum(r["rejected"] for r in tests)
     missed = sum(1 for r in controls if r["eligible"] and not r["rejected"])
     print("distribution tests: %d tests, %d rejected (Holm, alpha %g);"

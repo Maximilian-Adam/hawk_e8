@@ -54,6 +54,7 @@ e8/
       hawk_variants.c/.h        registry, selection, bound worker streams
       hawk_sampler_hot.c        hot64/hot32 (built once per width)
       hawk_sampler_ref.c        ref-T (upstream table and scan)
+  results/    generated outputs (gitignored), see "Usage"
   docs/       design notes, recorded performance results, the precision
               audit (precision_audit.md, precision_summary.csv), the
               validation (validation.md, validation_summary.csv)
@@ -91,8 +92,28 @@ Benchmarks and diagnostics: `sampler-bench`, `variant-sampler-bench`,
 `profile-sampler-bench`,
 `sign-bench`, `profile-sign-bench`, `profile-hawk-sign-bench`,
 `e8-histograms`, `e8-rejection-summary`, `e8-validation-summary`,
-`e8-sigma-verify-sweep`, `e8-sigma-sign-sweep`. CSV outputs are written to
-`e8/`.
+`e8-sigma-verify-sweep`, `e8-sigma-sign-sweep`.
+
+Generated outputs go under `e8/results/` (gitignored; `make clean` removes
+it), one directory per kind:
+
+```text
+results/
+  bench/              sign-bench, sampler-bench, variant-sampler-bench,
+                      profile-sampler-bench
+  diagnostics/        e8-histograms, e8-rejection-summary,
+                      e8-validation-summary, the sigma sweeps
+  precision/          precision-audit
+  validation/         validate (Step 6)
+  validation-quick/   validate-quick
+  distribution-tests/ tools/distribution_tests.py run on its own
+  compare/            reserved for the comparison harness (Step 7):
+                      compare/<flag set>/<run_id>/
+```
+
+The committed reference copies (`precision_summary.csv`,
+`validation_summary.csv`) live in `docs/`; the targets compare the fresh
+results with them.
 
 For timing, disable the prototype debug checks, for every object alike:
 
