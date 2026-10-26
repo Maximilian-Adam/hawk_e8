@@ -10,7 +10,8 @@ const char *const cmn_csv_sign_columns[CMN_CSV_SIGN_COLUMN_COUNT] = {
 	"technique", "threads", "logn", "key_index", "msg_index",
 	"attempts", "sig_bytes", "rng_bytes",
 	"tsc_cycles", "core_cycles", "wall_ns", "cpu_ns_all_threads",
-	"accounting", "encoding_included", "verify_ok"
+	"accounting", "encoding_included", "verify_ok",
+	"mode", "proc", "flags", "batch"
 };
 
 static void
@@ -127,6 +128,10 @@ cmn_sign_row_clear(cmn_sign_row *row)
 	row->accounting = NULL;
 	row->encoding_included = CMN_UNAVAILABLE;
 	row->verify_ok = CMN_UNAVAILABLE;
+	row->mode = NULL;
+	row->proc = CMN_UNAVAILABLE;
+	row->flags = NULL;
+	row->batch = CMN_UNAVAILABLE;
 }
 
 /* see cmn_csv.h */
@@ -161,5 +166,9 @@ cmn_csv_sign_row(cmn_csv *csv, const cmn_sign_row *row)
 	cmn_csv_str(csv, row->accounting);
 	cmn_csv_u64(csv, row->encoding_included);
 	cmn_csv_u64(csv, row->verify_ok);
+	cmn_csv_str(csv, row->mode);
+	cmn_csv_u64(csv, row->proc);
+	cmn_csv_str(csv, row->flags);
+	cmn_csv_u64(csv, row->batch);
 	cmn_csv_end_row(csv);
 }

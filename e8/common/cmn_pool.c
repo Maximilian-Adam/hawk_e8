@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include "cmn_pool.h"
 
 /*
@@ -14,8 +15,8 @@
  * protocol, thread limit, atexit shutdown and error paths) are those of
  * the former E8 sampler pool (e8_sampler_spin_pool_* in e8_sampler.c),
  * with the job generalised from the sampler's worker arguments to a
- * function and context, plus the optional accounting, grow-only dispatch,
- * and one fix: a thread starts from the generation current at its
+ * function and context, plus the optional accounting and affinity,
+ * grow-only dispatch, and one fix: a thread starts from the generation current at its
  * creation (start_generation), not 0.
  */
 
@@ -49,6 +50,10 @@ typedef struct {
 	volatile int initialized;
 	volatile int stopping;
 	volatile int accounting;
+
+	/* CPU list for pinning (cmn_pool_set_affinity()); 0 entries: none. */
+	unsigned affinity[CMN_POOL_MAX_THREADS + 1];
+	unsigned affinity_count;
 
 	/* Caller-side state. */
 	int dispatch_accounting;
@@ -230,6 +235,46 @@ cmn_pool_shrink(unsigned threads)
 }
 
 /*
+ * The CPU of pool thread u under the affinity list as a one-CPU set;
+ * returns 0 if no list is set.
+ */
+static int
+cmn_pool_thread_cpuset(const cmn_pool_state *pool, unsigned u,
+	cpu_set_t *set)
+{
+	if (pool->affinity_count == 0) {
+		return 0;
+	}
+	CPU_ZERO(set);
+	CPU_SET(pool->affinity[(u + 1) % pool->affinity_count], set);
+	return 1;
+}
+
+/*
+ * Create pool thread u, pinned at creation if an affinity list is set.
+ */
+static int
+cmn_pool_create_thread(cmn_pool_state *pool, unsigned u)
+{
+	pthread_attr_t attr;
+	cpu_set_t set;
+	int ok;
+
+	if (!cmn_pool_thread_cpuset(pool, u, &set)) {
+		return pthread_create(&pool->threads[u], NULL,
+			cmn_pool_thread_main, &pool->workers[u]) == 0;
+	}
+	if (pthread_attr_init(&attr) != 0) {
+		return 0;
+	}
+	ok = pthread_attr_setaffinity_np(&attr, sizeof set, &set) == 0
+		&& pthread_create(&pool->threads[u], &attr,
+			cmn_pool_thread_main, &pool->workers[u]) == 0;
+	(void)pthread_attr_destroy(&attr);
+	return ok;
+}
+
+/*
  * Start pool threads up to threads (no-op if the pool is already at
  * least that large). Returns 0 under the conditions of cmn_pool_ensure().
  */
@@ -269,9 +314,7 @@ cmn_pool_grow(unsigned threads)
 		 * writing.
 		 */
 		pool->workers[u].start_generation = pool->generation;
-		if (pthread_create(&pool->threads[u], NULL,
-			cmn_pool_thread_main, &pool->workers[u]) != 0)
-		{
+		if (!cmn_pool_create_thread(pool, u)) {
 			for (unsigned v = old_count; v < started; v ++) {
 				pool->workers[v].stopping = 1;
 			}
@@ -413,6 +456,70 @@ int
 cmn_pool_get_accounting(void)
 {
 	return cmn_pool.accounting;
+}
+
+/* see cmn_pool.h */
+int
+cmn_pool_set_affinity(const unsigned *cpus, unsigned count)
+{
+	cmn_pool_state *pool = &cmn_pool;
+	long conf = sysconf(_SC_NPROCESSORS_CONF);
+	int ok = 1;
+
+	if (count > CMN_POOL_MAX_THREADS + 1 || pool->remaining != 0) {
+		return 0;
+	}
+	for (unsigned u = 0; u < count; u ++) {
+		if (cpus[u] >= CPU_SETSIZE || conf <= 0
+			|| cpus[u] >= (unsigned long)conf)
+		{
+			return 0;
+		}
+	}
+	for (unsigned u = 0; u < count; u ++) {
+		pool->affinity[u] = cpus[u];
+	}
+	pool->affinity_count = count;
+	if (count == 0 || !pool->initialized) {
+		return 1;
+	}
+	for (unsigned u = 0; u < pool->thread_count; u ++) {
+		cpu_set_t set;
+
+		(void)cmn_pool_thread_cpuset(pool, u, &set);
+		if (pthread_setaffinity_np(pool->threads[u],
+			sizeof set, &set) != 0)
+		{
+			ok = 0;
+		}
+	}
+	return ok;
+}
+
+/* see cmn_pool.h */
+unsigned
+cmn_pool_get_affinity(unsigned *cpus, unsigned max)
+{
+	const cmn_pool_state *pool = &cmn_pool;
+
+	for (unsigned u = 0; u < pool->affinity_count && u < max; u ++) {
+		cpus[u] = pool->affinity[u];
+	}
+	return pool->affinity_count;
+}
+
+/* see cmn_pool.h */
+int
+cmn_pin_current_thread(unsigned cpu)
+{
+	cpu_set_t set;
+
+	if (cpu >= CPU_SETSIZE) {
+		return 0;
+	}
+	CPU_ZERO(&set);
+	CPU_SET(cpu, &set);
+	return pthread_setaffinity_np(pthread_self(), sizeof set, &set) == 0;
 }
 
 /* see cmn_pool.h */

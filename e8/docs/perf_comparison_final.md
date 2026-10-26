@@ -1,5 +1,12 @@
 # HAWK and Experimental E8 Signing Comparison
 
+The comparison harness of record is `e8/compare/bench_compare.c` (plan.md
+Step 7): interleaved schedule, latency and throughput modes, pinning,
+per-flag-set builds, the HAWK AVX2 context, the environment capture and the
+analysis into the Step 10 tables.  It is documented in
+[`harness.md`](harness.md); this document defines the accounting and the
+per-signature schema it shares with `e8_sign_bench`.
+
 ## Accounting
 
 Both schemes are timed through their own `sign_finish` call, one call per
@@ -68,26 +75,31 @@ byte-identical to upstream's (`test_hawk_variants`).
   takes no sampler timestamps without a trace.  (Before Step 3 the sampler
   profile defaulted to 1; on WSL it added about 18% to serial E8 signing.)
 
-The benchmark (`e8/compare/e8_sign_bench.c`) writes one CSV row per
+The benchmarks (`e8/compare/bench_compare.c` and `e8_sign_bench.c`, both
+on the signing core `e8/compare/bench_sign_core.c`) write one CSV row per
 signature, in the shared schema of `e8/common/cmn_csv.h`:
 
 ```text
 kind,run_id,scheme,variant,threshold_bits,technique,threads,logn,
 key_index,msg_index,attempts,sig_bytes,rng_bytes,
 tsc_cycles,core_cycles,wall_ns,cpu_ns_all_threads,
-accounting,encoding_included,verify_ok
+accounting,encoding_included,verify_ok,
+mode,proc,flags,batch
 ```
+
+The last four columns were added in Step 7 (after the existing ones, whose
+order is unchanged).
 
 | column | definition |
 | --- | --- |
-| `kind` | `sign`, `sign_failed`, or `keygen` / `prepare` for the separately timed setup |
+| `kind` | `sign`, `sign_failed`, `warmup` (a warm-up signature: measured and verified, never in a result), or `keygen` / `prepare` for the separately timed setup |
 | `run_id` | UTC start time and a random 32-bit suffix, also printed in the summary |
 | `scheme` | `hawk` or `e8` |
 | `variant` | sampler variant: `ref`, `hot64`, `hot32` for both schemes, and HAWK's `ref-T` (upstream table and scan on the bound worker streams; HAWK `ref` is upstream `sig_gauss()`, serial) |
 | `threshold_bits` | from the variant registry: 78 (`ref`, `ref-T`), 64 (`hot64`), 32 (`hot32`) |
 | `technique` | from the variant registry: `ct_full_scan` (`ref`, `ref-T`) or `vt_hot_table` (`hot64`, `hot32`) |
 | `threads` | sampler threads `T`, caller included; `T = 1` is the variant's serial form (one stream, no pool). E8 rows always use the bound per-worker streams; the legacy per-block mode never appears in a row |
-| `key_index`, `msg_index` | key and message of the row (`msg_index` empty for setup rows) |
+| `key_index`, `msg_index` | key and message of the row (`msg_index` empty for setup and warm-up rows). `bench_compare` shares each key between a scheme's variants and thread counts, so its `keygen` / `prepare` rows have `variant`, `threshold_bits`, `technique` and `threads` empty |
 | `attempts` | `rng_calls / 2` |
 | `sig_bytes` | `HAWK_SIG_SIZE(logn)` / `E8_SIG_SIZE(logn)` |
 | `rng_bytes` | random bytes consumed by the signature (below) |
@@ -98,6 +110,10 @@ accounting,encoding_included,verify_ok
 | `accounting` | `all_in` or `prepared` (empty for `keygen`) |
 | `encoding_included` | 1: both timed calls include signature encoding |
 | `verify_ok` | 1 if the signature verifies (empty for setup rows) |
+| `mode` | `latency` (one signer, `T` sampler threads) or `throughput` (`P` single-thread signer processes); `e8_sign_bench` writes `latency` |
+| `proc` | signer process index in throughput mode; empty in latency mode and for the parent's `keygen` / `prepare` rows |
+| `flags` | the build's flag set (`O2`, `O3native`; `default` for the default, debug-check build), from `bench_build_info.h` |
+| `batch` | position of the row's batch in the process's interleaved schedule (`bench_compare`); empty for warm-up and setup rows and in `e8_sign_bench` |
 
 Precision columns (Step 7): every timing row is joined with
 `e8/docs/precision_summary.csv` on `(scheme, variant, logn)` (HAWK `ref-T`
@@ -152,22 +168,31 @@ signature, signature bytes, threads, signing and verification failures), the
 setup costs, and the pool activity per block (dispatches, threads started and
 joined, job CPU and idle CPU).
 
+Timed builds come from the per-flag-set object directories (`harness.md`,
+"Builds"): every object of `bin/e8_sign_bench-O2` (and `-O3native`) is
+compiled with that flag set and the E8 debug checks off, without touching
+the default objects:
+
 ```sh
-make -C e8 clean
-make -C e8 bin/e8_sign_bench bin/e8_sign_profile_bench \
-  CFLAGS='-Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always -DHAWK_E8_DEBUG_CHECKS=0'
+make -C e8 bench-builds
 cd e8 && mkdir -p results/bench
-./bin/e8_sign_bench --trials 1000 > results/bench/e8_sign_bench.csv 2> results/bench/e8_sign_bench.txt
-./bin/e8_sign_profile_bench --trials 1000 > /dev/null 2> results/bench/e8_sign_profile.txt
+./bin/e8_sign_bench-O2 --trials 1000 > results/bench/e8_sign_bench.csv 2> results/bench/e8_sign_bench.txt
+./bin/e8_sign_profile_bench-O2 --trials 1000 --stage-csv results/bench/e8_stages.csv > /dev/null 2> results/bench/e8_sign_profile.txt
 ```
 
-Setting `CFLAGS` applies the same flags to the HAWK, shared and E8 objects
-(the E8 objects add `-DHAWK_ENABLE_E8_EXPERIMENTAL=1`); the in-path profiles
-are off unless a `profile-*` build enables them.  The profile bench's timings
-include its per-stage timers and are not headline figures.
+The default `bin/e8_sign_bench` keeps the default flags (E8 debug checks
+on) and is not for timing.  The former recipe (`make -C e8 clean`, then
+`CFLAGS='... -DHAWK_E8_DEBUG_CHECKS=0'` for every object) still works as an
+alternative.  The in-path profiles are off unless a `profile-*` build
+enables them.  The profile bench's timings include its per-stage timers and
+are not headline figures; it records E8's stage trace for every E8 block
+(before Step 7: threaded `hot64` only), and `--stage-csv FILE` writes it as
+CSV (`hawk_sign_profile_bench --stage-csv` writes HAWK's in the same
+columns).
 
 `--sigs-per-key N` (default 1) sets how many signatures share one key; it does
-not change the accounting.  `--logn L` restricts the run to one degree,
+not change the accounting.  `--build-info` prints the flag set, the full
+flags and the compiler.  `--logn L` restricts the run to one degree,
 `--variant NAME` (repeatable) to the named variants and `--threads LIST` to
 the given thread counts; `--list` prints every variant of both schemes.
 

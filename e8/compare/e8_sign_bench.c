@@ -9,13 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../src/hawk_e8_inner.h"
-#include "cmn_csv.h"
-#include "cmn_pool.h"
-#include "cmn_rng.h"
-#include "cmn_timing.h"
-#include "hawk_shim.h"
-#include "hawk_variants.h"
+#include "bench_sign_core.h"
 
 /*
  * Full signature benchmark: ordinary HAWK against HAWK-E8-CM, both timed
@@ -85,23 +79,30 @@
  *
  * stdout: one CSV row per signature, plus one row per key generation and
  * per key preparation (kind = keygen / prepare), in the shared schema
- * (cmn_csv.h). stderr: one summary table per accounting mode, then the
+ * (cmn_csv.h; mode = latency, proc and batch empty, flags = the build's
+ * flag set). stderr: one summary table per accounting mode, then the
  * separately timed setup costs and the pool activity per block.
+ *
+ * Key generation, preparation, signing, verification, seeds and messages
+ * are bench_sign_core.c's, shared with bench_compare (the interleaved
+ * comparison harness, plan.md Step 7). Profile builds
+ * (HAWK_E8_PROFILE_SIGN = 1, bin/e8_sign_profile_bench) record E8's
+ * per-stage trace for every E8 block; --stage-csv FILE writes it as CSV.
  */
 
 #define DEFAULT_SIGN_BENCH_TRIALS    16
 #define DEFAULT_SIGS_PER_KEY         1
 #define MAX_BENCH_TRIALS             1000000
 
-#define SCHEME_HAWK    0
-#define SCHEME_E8      1
+#define SCHEME_HAWK    BSC_SCHEME_HAWK
+#define SCHEME_E8      BSC_SCHEME_E8
 
-#define ACCT_ALL_IN     0
-#define ACCT_PREPARED   1
-#define ACCT_COUNT      2
+#define ACCT_ALL_IN     BSC_ACCT_ALL_IN
+#define ACCT_PREPARED   BSC_ACCT_PREPARED
+#define ACCT_COUNT      BSC_ACCT_COUNT
 
-static const char *const SCHEME_NAME[] = { "hawk", "e8" };
-static const char *const ACCT_NAME[] = { "all_in", "prepared" };
+#define SCHEME_NAME   bsc_scheme_name
+#define ACCT_NAME     bsc_acct_name
 
 #define MAX_THREAD_CASES   8
 #define MAX_VARIANT_NAMES  8
@@ -122,44 +123,8 @@ typedef struct {
 	unsigned thread_case_count;
 	const char *variant_names[MAX_VARIANT_NAMES];
 	unsigned variant_name_count;
+	const char *stage_csv;
 } sign_bench_options;
-
-/*
- * One benchmark block: a scheme's sampler variant at one degree and
- * thread count.
- */
-typedef struct {
-	unsigned scheme;
-	const char *variant;
-	unsigned threshold_bits;
-	const char *technique;
-	const e8_sampler_variant *e8v;
-	const hawk_sampler_variant *hawkv;
-	unsigned logn;
-	unsigned threads;
-	unsigned sig_bytes;
-	uint64_t *cycles[ACCT_COUNT];
-	uint64_t *core_cycles[ACCT_COUNT];
-	uint64_t *wall_ns[ACCT_COUNT];
-	uint64_t *cpu_ns[ACCT_COUNT];
-	uint64_t signatures[ACCT_COUNT];
-	uint64_t attempts[ACCT_COUNT];
-	uint64_t rng_bytes[ACCT_COUNT];
-	uint64_t sign_failures[ACCT_COUNT];
-	uint64_t verify_failures[ACCT_COUNT];
-	uint64_t *keygen_cycles;
-	uint64_t *prepare_cycles;
-	uint64_t keys;
-	cmn_pool_stats pool;
-} bench_block;
-
-#define MAX_BLOCKS   256
-
-static bench_block blocks[MAX_BLOCKS];
-static unsigned block_count;
-
-static char run_id[48];
-static cmn_csv csv;
 
 #if HAWK_E8_PROFILE_SIGN
 typedef struct {
@@ -188,9 +153,42 @@ typedef struct {
 	uint64_t wall_ns_norm_check;
 	uint64_t wall_ns_encode;
 } bench_sign_profile_totals;
-
-static bench_sign_profile_totals sign_profile_totals[ACCT_COUNT][11];
 #endif
+
+/*
+ * One benchmark block: a scheme's sampler variant at one degree and
+ * thread count.
+ */
+typedef struct {
+	bsc_config cfg;
+	uint64_t *cycles[ACCT_COUNT];
+	uint64_t *core_cycles[ACCT_COUNT];
+	uint64_t *wall_ns[ACCT_COUNT];
+	uint64_t *cpu_ns[ACCT_COUNT];
+	uint64_t signatures[ACCT_COUNT];
+	uint64_t attempts[ACCT_COUNT];
+	uint64_t rng_bytes[ACCT_COUNT];
+	uint64_t sign_failures[ACCT_COUNT];
+	uint64_t verify_failures[ACCT_COUNT];
+	uint64_t *keygen_cycles;
+	uint64_t *prepare_cycles;
+	uint64_t keys;
+	cmn_pool_stats pool;
+#if HAWK_E8_PROFILE_SIGN
+	bench_sign_profile_totals profile[ACCT_COUNT];
+#endif
+} bench_block;
+
+#define MAX_BLOCKS   256
+
+static bench_block blocks[MAX_BLOCKS];
+static unsigned block_count;
+
+static char run_id[48];
+static cmn_csv csv;
+
+static bsc_key key;
+static uint8_t sig_buf[BSC_SIG_SIZE];
 
 static unsigned
 bench_selected_e8_threads(unsigned logn)
@@ -202,271 +200,45 @@ bench_selected_e8_threads(unsigned logn)
 	}
 }
 
-/*
- * Signing RNG for one purpose (stream_id), degree and index: the shared
- * module's signing RNG seeded with
- * u32le(stream_id) || u32le(logn) || u32le(index).
- */
-static void
-bench_rng_init(cmn_sign_rng *rng, unsigned stream_id,
-	unsigned logn, unsigned index)
-{
-	uint8_t seed[12];
-	uint32_t v[3];
-
-	v[0] = stream_id;
-	v[1] = logn;
-	v[2] = index;
-	for (unsigned u = 0; u < 3; u ++) {
-		for (unsigned w = 0; w < 4; w ++) {
-			seed[4 * u + w] = (uint8_t)(v[u] >> (w << 3));
-		}
-	}
-	cmn_sign_rng_init(rng, seed, sizeof seed);
-}
-
-/*
- * run_id: UTC start time plus a random 32-bit suffix.
- */
-static void
-make_run_id(void)
-{
-	time_t now = time(NULL);
-	struct tm tm;
-	char stamp[24];
-	uint32_t suffix = 0;
-	FILE *fp = fopen("/dev/urandom", "rb");
-
-	if (fp == NULL || fread(&suffix, sizeof suffix, 1, fp) != 1) {
-		suffix = (uint32_t)(cmn_wall_ns() ^ ((uint64_t)getpid() << 16));
-	}
-	if (fp != NULL) {
-		fclose(fp);
-	}
-	if (gmtime_r(&now, &tm) == NULL
-		|| strftime(stamp, sizeof stamp, "%Y%m%dT%H%M%SZ", &tm) == 0)
-	{
-		snprintf(stamp, sizeof stamp, "%llu",
-			(unsigned long long)now);
-	}
-	snprintf(run_id, sizeof run_id, "%s-%08x", stamp, (unsigned)suffix);
-}
-
-/*
- * The message for a trial; identical for both schemes.
- */
-static void
-bench_make_message(shake_context *sc_data, unsigned logn, unsigned trial)
-{
-	static const char prefix[] = "hawk e8 sign bench message";
-	uint8_t buf[5];
-
-	buf[0] = (uint8_t)logn;
-	buf[1] = (uint8_t)trial;
-	buf[2] = (uint8_t)(trial >> 8);
-	buf[3] = (uint8_t)(trial >> 16);
-	buf[4] = (uint8_t)(trial >> 24);
-	hawk_sign_start(sc_data);
-	shake_inject(sc_data, prefix, sizeof prefix - 1);
-	shake_inject(sc_data, buf, sizeof buf);
-}
-
-/*
- * Key material for one scheme, in both forms.
- */
-static uint8_t key_priv[E8_PRIVKEY_SIZE(10)];
-static uint8_t key_pub[E8_PUBKEY_SIZE(10)];
-static uint8_t key_prepared[E8_PRIVKEY_PREPARED_SIZE(10)];
-static uint8_t tmp_keygen[E8_TMPSIZE_KEYGEN(10)];
-static uint8_t tmp_sign[E8_TMPSIZE_SIGN(10)];
-static uint8_t tmp_verify[E8_TMPSIZE_VERIFY(10) + HAWK_TMPSIZE_VERIFY(10)];
-static uint8_t sig_buf[E8_SIG_SIZE(10)];
-
-typedef char bench_hawk_buffers_check[
-	(sizeof key_priv >= HAWK_PRIVKEY_SIZE(10)
-	&& sizeof key_pub >= HAWK_PUBKEY_SIZE(10)
-	&& sizeof key_prepared >= HAWK_PRIVKEY_DECODED_SIZE(10)
-	&& sizeof tmp_keygen >= HAWK_TMPSIZE_KEYGEN(10)
-	&& sizeof tmp_sign >= HAWK_TMPSIZE_SIGN(10)
-	&& sizeof tmp_verify >= HAWK_TMPSIZE_VERIFY(10)
-	&& sizeof sig_buf >= HAWK_SIG_SIZE(10)) ? 1 : -1];
-
-static int
-bench_keygen(unsigned scheme, unsigned logn, unsigned key_index,
-	cmn_measure *m)
-{
-	cmn_sign_rng rng;
-	cmn_pool_stamp start;
-	int ok;
-
-	bench_rng_init(&rng, 1 + scheme, logn, key_index);
-	cmn_pool_measure_start(&start);
-	if (scheme == SCHEME_HAWK) {
-		ok = hawk_keygen(logn, key_priv, key_pub,
-			cmn_sign_rng_hawk, &rng,
-			tmp_keygen, sizeof tmp_keygen);
-	} else {
-		ok = e8_keygen(logn, key_priv, key_pub,
-			cmn_sign_rng_hawk, &rng,
-			tmp_keygen, sizeof tmp_keygen);
-	}
-	cmn_pool_measure_stop(m, &start);
-	return ok;
-}
-
-static int
-bench_prepare(unsigned scheme, unsigned logn, cmn_measure *m)
-{
-	cmn_pool_stamp start;
-	int ok;
-
-	cmn_pool_measure_start(&start);
-	if (scheme == SCHEME_HAWK) {
-		hawk_decode_private_key(logn, key_prepared, key_priv);
-		ok = 1;
-	} else {
-		ok = e8_prepare_private_key(logn, key_prepared, key_priv);
-	}
-	cmn_pool_measure_stop(m, &start);
-	return ok;
-}
-
 #if HAWK_E8_PROFILE_SIGN
-static void profile_add(unsigned acct, unsigned logn, int accepted,
+static void profile_add(bench_sign_profile_totals *total, int accepted,
 	unsigned attempts, const e8_sign_trace_timing *timing);
 #endif
 
 /*
- * One timed sign_finish call of block b's scheme and variant. Returns 1 on
- * success and sets *attempts from the RNG call count and *rng_bytes as
- * described above.
+ * One timed sign_finish call of block b's scheme and variant
+ * (bsc_sign()); profile builds record E8's per-stage trace into the
+ * block when profile is set.
  */
 static int
-bench_sign(const bench_block *b, unsigned acct,
+bench_sign(bench_block *b, unsigned acct,
 	const shake_context *sc_data, cmn_sign_rng *rng,
 	unsigned *attempts, uint64_t *rng_bytes, cmn_measure *m,
 	int profile)
 {
-	unsigned logn = b->logn;
-	cmn_pool_stamp start;
-	cmn_rng_counters sampler0, sampler1;
-	unsigned *trace_attempts = NULL;
-	e8_sign_trace_timing *trace_timing = NULL;
 	int ok;
 #if HAWK_E8_PROFILE_SIGN
 	e8_sign_trace_timing timing;
-	unsigned trace_attempts_value = 0;
+	unsigned trace_attempts = 0;
 
 	/*
 	 * Profile builds go through the same implementation with the
 	 * per-stage trace enabled.
 	 */
-	trace_attempts = &trace_attempts_value;
-	trace_timing = &timing;
+	ok = bsc_sign(&b->cfg, acct, &key, sc_data, rng, sig_buf,
+		attempts, rng_bytes, m, &trace_attempts, &timing);
+	if (b->cfg.scheme == SCHEME_E8 && profile) {
+		profile_add(&b->profile[acct], ok, *attempts, &timing);
+		if (trace_attempts != *attempts) {
+			b->profile[acct].attempt_mismatches ++;
+		}
+	}
 #else
 	(void)profile;
-#endif
-
-	if (b->scheme == SCHEME_HAWK) {
-		hawkv_rng_counters_get(&sampler0);
-	} else {
-		e8_sampler_rng_counters_get(&sampler0);
-	}
-	cmn_pool_measure_start(&start);
-	if (b->scheme == SCHEME_HAWK && b->hawkv->range == NULL) {
-		if (acct == ACCT_ALL_IN) {
-			ok = hawk_sign_finish(logn, cmn_sign_rng_hawk, rng,
-				sig_buf, sc_data, key_priv,
-				tmp_sign, sizeof tmp_sign);
-		} else {
-			ok = hawk_shim_sign_finish_decoded(logn,
-				cmn_sign_rng_hawk, rng,
-				sig_buf, sc_data, key_prepared,
-				tmp_sign, sizeof tmp_sign);
-		}
-	} else if (b->scheme == SCHEME_HAWK) {
-		if (acct == ACCT_ALL_IN) {
-			ok = hawkv_sign_finish(logn, cmn_sign_rng_hawk, rng,
-				sig_buf, sc_data, key_priv,
-				tmp_sign, sizeof tmp_sign);
-		} else {
-			ok = hawkv_sign_finish_decoded(logn,
-				cmn_sign_rng_hawk, rng,
-				sig_buf, sc_data, key_prepared,
-				tmp_sign, sizeof tmp_sign);
-		}
-	} else {
-		if (acct == ACCT_ALL_IN) {
-			ok = e8_sign_finish_inner(logn, cmn_sign_rng_hawk, rng,
-				sig_buf, sc_data, key_priv,
-				E8_PRIVKEY_SIZE(logn), tmp_sign, sizeof tmp_sign,
-				b->e8v, trace_attempts, trace_timing);
-		} else {
-			ok = e8_sign_finish_inner(logn, cmn_sign_rng_hawk, rng,
-				sig_buf, sc_data, key_prepared,
-				E8_PRIVKEY_PREPARED_SIZE(logn), NULL, 0,
-				b->e8v, trace_attempts, trace_timing);
-		}
-	}
-	cmn_pool_measure_stop(m, &start);
-	*attempts = (unsigned)(rng->calls / 2);
-	if (b->scheme == SCHEME_HAWK && b->hawkv->range == NULL) {
-		*rng_bytes = rng->bytes
-			+ (uint64_t)*attempts * (20u << logn);
-	} else {
-		if (b->scheme == SCHEME_HAWK) {
-			hawkv_rng_counters_get(&sampler1);
-		} else {
-			e8_sampler_rng_counters_get(&sampler1);
-		}
-		*rng_bytes = rng->bytes + (sampler1.bytes_delivered
-			- sampler0.bytes_delivered);
-	}
-#if HAWK_E8_PROFILE_SIGN
-	if (b->scheme == SCHEME_E8 && profile) {
-		profile_add(acct, logn, ok, *attempts, &timing);
-		if (trace_attempts_value != *attempts) {
-			sign_profile_totals[acct][logn].attempt_mismatches ++;
-		}
-	}
+	ok = bsc_sign(&b->cfg, acct, &key, sc_data, rng, sig_buf,
+		attempts, rng_bytes, m, NULL, NULL);
 #endif
 	return ok;
-}
-
-static int
-bench_verify(unsigned scheme, unsigned logn, const shake_context *sc_data)
-{
-	if (scheme == SCHEME_HAWK) {
-		return hawk_verify_finish(logn, sig_buf, HAWK_SIG_SIZE(logn),
-			sc_data, key_pub, HAWK_PUBKEY_SIZE(logn),
-			tmp_verify, sizeof tmp_verify);
-	}
-	return e8_verify_finish(logn, sig_buf, E8_SIG_SIZE(logn),
-		sc_data, key_pub, E8_PUBKEY_SIZE(logn),
-		tmp_verify, sizeof tmp_verify);
-}
-
-/*
- * Fields shared by every row of a block.
- */
-static void
-row_init(cmn_sign_row *row, const bench_block *b, const char *kind,
-	unsigned key_index, const cmn_measure *m)
-{
-	cmn_sign_row_clear(row);
-	row->kind = kind;
-	row->run_id = run_id;
-	row->scheme = SCHEME_NAME[b->scheme];
-	row->variant = b->variant;
-	row->threshold_bits = b->threshold_bits;
-	row->technique = b->technique;
-	row->threads = b->threads;
-	row->logn = b->logn;
-	row->key_index = key_index;
-	row->tsc_cycles = m->tsc_cycles;
-	row->core_cycles = m->core_cycles;
-	row->wall_ns = m->wall_ns;
-	row->cpu_ns_all_threads = m->cpu_ns_all_threads;
 }
 
 static void
@@ -476,14 +248,16 @@ write_sign_row(const bench_block *b, unsigned acct, unsigned trial,
 {
 	cmn_sign_row row;
 
-	row_init(&row, b, sign_ok ? "sign" : "sign_failed", key_index, m);
+	bsc_row_init(&row, run_id, sign_ok ? "sign" : "sign_failed",
+		&b->cfg, 0, 0, key_index, m);
 	row.msg_index = trial;
 	row.attempts = attempts;
-	row.sig_bytes = b->sig_bytes;
+	row.sig_bytes = b->cfg.sig_bytes;
 	row.rng_bytes = rng_bytes;
 	row.accounting = ACCT_NAME[acct];
 	row.encoding_included = 1;
 	row.verify_ok = (uint64_t)verify_ok;
+	row.mode = "latency";
 	cmn_csv_sign_row(&csv, &row);
 }
 
@@ -493,8 +267,9 @@ write_setup_row(const bench_block *b, const char *kind,
 {
 	cmn_sign_row row;
 
-	row_init(&row, b, kind, key_index, m);
+	bsc_row_init(&row, run_id, kind, &b->cfg, 0, 0, key_index, m);
 	row.accounting = acct;
+	row.mode = "latency";
 	cmn_csv_sign_row(&csv, &row);
 }
 
@@ -524,23 +299,23 @@ block_alloc(bench_block *b, unsigned trials)
  * that every block starts from the same warm state for both schemes.
  */
 static int
-bench_warmup(const bench_block *b)
+bench_warmup(bench_block *b)
 {
 	cmn_measure m;
 	shake_context sc_data;
 
-	if (!bench_keygen(b->scheme, b->logn, 0xFFFFFFu, &m)
-		|| !bench_prepare(b->scheme, b->logn, &m))
+	if (!bsc_keygen(b->cfg.scheme, b->cfg.logn, 0xFFFFFFu, &key, &m)
+		|| !bsc_prepare(b->cfg.scheme, b->cfg.logn, &key, &m))
 	{
 		return 0;
 	}
-	bench_make_message(&sc_data, b->logn, 0xFFFFFFu);
+	bsc_make_message(&sc_data, b->cfg.logn, 0xFFFFFFu);
 	for (unsigned acct = 0; acct < ACCT_COUNT; acct ++) {
 		cmn_sign_rng rng;
 		unsigned attempts;
 		uint64_t rng_bytes;
 
-		bench_rng_init(&rng, 9, b->logn, acct);
+		bsc_rng_init(&rng, BSC_STREAM_WARMUP, b->cfg.logn, acct);
 		if (!bench_sign(b, acct, &sc_data, &rng,
 			&attempts, &rng_bytes, &m, 0))
 		{
@@ -585,24 +360,10 @@ block_setup(bench_block *b, const sign_bench_options *opts,
 		}
 	}
 	memset(b, 0, sizeof *b);
-	b->scheme = scheme;
-	b->logn = logn;
-	b->threads = threads;
-	if (scheme == SCHEME_HAWK) {
-		b->hawkv = &hawk_sampler_variants[vi];
-		b->variant = b->hawkv->name;
-		b->threshold_bits = b->hawkv->threshold_bits;
-		b->technique = b->hawkv->technique;
-		if (b->hawkv->range == NULL && threads != 1) {
-			return 0;
-		}
-	} else {
-		b->e8v = &e8_sampler_variants[vi];
-		b->variant = b->e8v->name;
-		b->threshold_bits = b->e8v->threshold_bits;
-		b->technique = b->e8v->technique;
+	if (!bsc_config_init(&b->cfg, scheme, vi, logn, threads)) {
+		return 0;
 	}
-	return variant_selected(opts, b->variant);
+	return variant_selected(opts, b->cfg.variant);
 }
 
 static int
@@ -614,18 +375,11 @@ run_block(bench_block *b, const sign_bench_options *opts, int profile)
 		fprintf(stderr, "ERR: out of memory\n");
 		return 0;
 	}
-	if (b->scheme == SCHEME_E8) {
-		e8_sampler_set_thread_count(b->threads);
-		e8_sampler_set_rng_mode(E8_SAMPLER_RNG_PER_WORKER);
-		b->threads = e8_sampler_get_thread_count(b->logn);
-		b->sig_bytes = E8_SIG_SIZE(b->logn);
-	} else {
-		if (!hawkv_select(b->hawkv, b->threads)) {
-			fprintf(stderr, "ERR: cannot select HAWK variant %s"
-				" with %u threads\n", b->variant, b->threads);
-			return 0;
-		}
-		b->sig_bytes = HAWK_SIG_SIZE(b->logn);
+	if (!bsc_select(&b->cfg)) {
+		fprintf(stderr, "ERR: cannot select %s variant %s"
+			" with %u threads\n", SCHEME_NAME[b->cfg.scheme],
+			b->cfg.variant, b->cfg.threads);
+		return 0;
 	}
 
 	/*
@@ -633,15 +387,15 @@ run_block(bench_block *b, const sign_bench_options *opts, int profile)
 	 * dispatches only grow the pool, so no timed call then starts or
 	 * joins a thread.
 	 */
-	if (b->threads > 1 && !cmn_pool_ensure(b->threads - 1)) {
+	if (b->cfg.threads > 1 && !cmn_pool_ensure(b->cfg.threads - 1)) {
 		fprintf(stderr, "ERR: cannot start %u pool threads\n",
-			b->threads - 1);
+			b->cfg.threads - 1);
 		return 0;
 	}
 	if (!bench_warmup(b)) {
 		fprintf(stderr, "ERR: warm-up failed scheme=%s variant=%s"
-			" threads=%u logn=%u\n", SCHEME_NAME[b->scheme],
-			b->variant, b->threads, b->logn);
+			" threads=%u logn=%u\n", SCHEME_NAME[b->cfg.scheme],
+			b->cfg.variant, b->cfg.threads, b->cfg.logn);
 		return 0;
 	}
 	cmn_pool_stats_reset();
@@ -652,20 +406,21 @@ run_block(bench_block *b, const sign_bench_options *opts, int profile)
 
 		if (trial % opts->sigs_per_key == 0) {
 			key_index = trial / opts->sigs_per_key;
-			if (!bench_keygen(b->scheme, b->logn, key_index, &m))
+			if (!bsc_keygen(b->cfg.scheme, b->cfg.logn, key_index,
+				&key, &m))
 			{
 				fprintf(stderr, "ERR: keygen failed scheme=%s"
 					" logn=%u key=%u\n",
-					SCHEME_NAME[b->scheme], b->logn,
+					SCHEME_NAME[b->cfg.scheme], b->cfg.logn,
 					key_index);
 				return 0;
 			}
 			write_setup_row(b, "keygen", NULL, key_index, &m);
 			b->keygen_cycles[b->keys] = m.tsc_cycles;
-			if (!bench_prepare(b->scheme, b->logn, &m)) {
+			if (!bsc_prepare(b->cfg.scheme, b->cfg.logn, &key, &m)) {
 				fprintf(stderr, "ERR: key preparation failed"
 					" scheme=%s logn=%u key=%u\n",
-					SCHEME_NAME[b->scheme], b->logn,
+					SCHEME_NAME[b->cfg.scheme], b->cfg.logn,
 					key_index);
 				return 0;
 			}
@@ -675,21 +430,22 @@ run_block(bench_block *b, const sign_bench_options *opts, int profile)
 			b->keys ++;
 		}
 
-		bench_make_message(&sc_data, b->logn, trial);
+		bsc_make_message(&sc_data, b->cfg.logn, trial);
 		for (unsigned acct = 0; acct < ACCT_COUNT; acct ++) {
 			cmn_sign_rng rng;
 			unsigned attempts;
 			uint64_t rng_bytes;
 			int sign_ok, verify_ok = 0;
 
-			bench_rng_init(&rng, 16 + acct, b->logn, trial);
+			bsc_rng_init(&rng, BSC_STREAM_SIGN + acct, b->cfg.logn,
+				trial);
 			sign_ok = bench_sign(b, acct, &sc_data, &rng,
 				&attempts, &rng_bytes, &m, profile);
 			if (sign_ok) {
 				uint64_t k = b->signatures[acct];
 
-				verify_ok = bench_verify(b->scheme, b->logn,
-					&sc_data);
+				verify_ok = bsc_verify(b->cfg.scheme,
+					b->cfg.logn, &key, sig_buf, &sc_data);
 				b->cycles[acct][k] = m.tsc_cycles;
 				b->core_cycles[acct][k] = m.core_cycles;
 				b->wall_ns[acct][k] = m.wall_ns;
@@ -708,8 +464,7 @@ run_block(bench_block *b, const sign_bench_options *opts, int profile)
 		}
 	}
 	cmn_pool_stats_get(&b->pool);
-	e8_sampler_set_thread_count(1);
-	(void)hawkv_select(&hawk_sampler_variants[0], 1);
+	bsc_deselect();
 
 	/*
 	 * Join the pool threads outside any timed region, so that the next
@@ -780,9 +535,9 @@ print_summary(const sign_bench_options *opts)
 {
 	fprintf(stderr,
 		"\nHAWK_E8_SIGN_BENCH run_id=%s core_cycles=%s"
-		" pool_accounting=%s\n",
+		" pool_accounting=%s flags=%s\n",
 		run_id, cmn_core_cycles_status(),
-		opts->pool_accounting ? "on" : "off");
+		opts->pool_accounting ? "on" : "off", bsc_build_flagset);
 	for (unsigned acct = 0; acct < ACCT_COUNT; acct ++) {
 		fprintf(stderr,
 			"\nHAWK_E8_SIGN_BENCH accounting=%s trials=%u"
@@ -802,8 +557,8 @@ print_summary(const sign_bench_options *opts)
 
 			fprintf(stderr, "%s,%s,%u,%u,%llu,%s,%.0f,%s,%s,%s,"
 				"%.4f,%.1f,%.1f,%u,%llu,%llu\n",
-				SCHEME_NAME[b->scheme], b->variant,
-				b->logn, b->threads,
+				SCHEME_NAME[b->cfg.scheme], b->cfg.variant,
+				b->cfg.logn, b->cfg.threads,
 				(unsigned long long)count,
 				fmt_u64(f0, sizeof f0,
 					median_u64(b->cycles[acct], count)),
@@ -821,7 +576,7 @@ print_summary(const sign_bench_options *opts)
 				b->attempts[acct] == 0 ? 0.0
 					: (double)b->rng_bytes[acct]
 					/ (double)b->attempts[acct],
-				b->sig_bytes,
+				b->cfg.sig_bytes,
 				(unsigned long long)b->sign_failures[acct],
 				(unsigned long long)b->verify_failures[acct]);
 		}
@@ -836,8 +591,8 @@ print_summary(const sign_bench_options *opts)
 		char f0[24], f1[24];
 
 		fprintf(stderr, "%s,%s,%u,%u,%llu,%s,%s\n",
-			SCHEME_NAME[b->scheme], b->variant,
-			b->logn, b->threads,
+			SCHEME_NAME[b->cfg.scheme], b->cfg.variant,
+			b->cfg.logn, b->cfg.threads,
 			(unsigned long long)b->keys,
 			fmt_u64(f0, sizeof f0,
 				median_u64(b->keygen_cycles, b->keys)),
@@ -857,8 +612,8 @@ print_summary(const sign_bench_options *opts)
 			+ b->signatures[ACCT_PREPARED];
 
 		fprintf(stderr, "%s,%s,%u,%u,%llu,%llu,%llu,%llu,%llu,%.0f\n",
-			SCHEME_NAME[b->scheme], b->variant,
-			b->logn, b->threads,
+			SCHEME_NAME[b->cfg.scheme], b->cfg.variant,
+			b->cfg.logn, b->cfg.threads,
 			(unsigned long long)b->pool.dispatches,
 			(unsigned long long)b->pool.threads_started,
 			(unsigned long long)b->pool.threads_joined,
@@ -889,15 +644,9 @@ profile_percent(uint64_t part, uint64_t total)
 }
 
 static void
-profile_add(unsigned acct, unsigned logn, int accepted, unsigned attempts,
-	const e8_sign_trace_timing *timing)
+profile_add(bench_sign_profile_totals *total, int accepted,
+	unsigned attempts, const e8_sign_trace_timing *timing)
 {
-	bench_sign_profile_totals *total;
-
-	if (acct >= ACCT_COUNT || logn > 10 || timing == NULL) {
-		return;
-	}
-	total = &sign_profile_totals[acct][logn];
 	total->trials ++;
 	if (accepted) {
 		total->accepted ++;
@@ -927,65 +676,82 @@ profile_add(unsigned acct, unsigned logn, int accepted, unsigned attempts,
 	total->wall_ns_encode += timing->wall_ns_encode_total;
 }
 
+/*
+ * The stages of one block and accounting mode, with the remainder
+ * ("other") and the total last.
+ */
+#define PROFILE_STAGES   10
+
 static void
-profile_print_stage(const char *name, uint64_t cycles, uint64_t cycles_total,
-	uint64_t wall_ns, uint64_t wall_ns_total)
+profile_stages(const bench_sign_profile_totals *total,
+	const char **name, uint64_t *cycles, uint64_t *wall_ns)
 {
-	fprintf(stderr,
-		"  %-18s cycles=%12llu %6.2f%%  wall_ns=%12llu %6.2f%%\n",
-		name,
-		(unsigned long long)cycles,
-		profile_percent(cycles, cycles_total),
-		(unsigned long long)wall_ns,
-		profile_percent(wall_ns, wall_ns_total));
+	static const char *const names[PROFILE_STAGES] = {
+		"key_prepare", "salt", "hash_challenge", "target_coset",
+		"e8_sampler", "reconstruct_s", "norm_rejection", "encode_sig",
+		"other", "total"
+	};
+	uint64_t sc = 0, sw = 0;
+
+	cycles[0] = total->cycles_prepare;
+	cycles[1] = total->cycles_salt;
+	cycles[2] = total->cycles_hash;
+	cycles[3] = total->cycles_target;
+	cycles[4] = total->cycles_sample;
+	cycles[5] = total->cycles_reconstruct;
+	cycles[6] = total->cycles_norm_check;
+	cycles[7] = total->cycles_encode;
+	wall_ns[0] = total->wall_ns_prepare;
+	wall_ns[1] = total->wall_ns_salt;
+	wall_ns[2] = total->wall_ns_hash;
+	wall_ns[3] = total->wall_ns_target;
+	wall_ns[4] = total->wall_ns_sample;
+	wall_ns[5] = total->wall_ns_reconstruct;
+	wall_ns[6] = total->wall_ns_norm_check;
+	wall_ns[7] = total->wall_ns_encode;
+	for (unsigned u = 0; u < 8; u ++) {
+		sc += cycles[u];
+		sw += wall_ns[u];
+	}
+	cycles[8] = total->cycles_total > sc ? total->cycles_total - sc : 0;
+	wall_ns[8] = total->wall_ns_total > sw
+		? total->wall_ns_total - sw : 0;
+	cycles[9] = total->cycles_total;
+	wall_ns[9] = total->wall_ns_total;
+	for (unsigned u = 0; u < PROFILE_STAGES; u ++) {
+		name[u] = names[u];
+	}
 }
 
 static void
 profile_print_summary(void)
 {
-	for (unsigned acct = 0; acct < ACCT_COUNT; acct ++) {
-		fprintf(stderr,
-			"\nHAWK_E8_PROFILE_SIGN summary "
-			"(threaded E8, accounting=%s)\n", ACCT_NAME[acct]);
-		for (unsigned logn = 8; logn <= 10; logn ++) {
+	for (unsigned u = 0; u < block_count; u ++) {
+		const bench_block *b = &blocks[u];
+
+		if (b->cfg.scheme != SCHEME_E8) {
+			continue;
+		}
+		for (unsigned acct = 0; acct < ACCT_COUNT; acct ++) {
 			const bench_sign_profile_totals *total =
-				&sign_profile_totals[acct][logn];
-			uint64_t stage_cycles, stage_wall_ns;
-			uint64_t other_cycles = 0, other_wall_ns = 0;
+				&b->profile[acct];
+			const char *name[PROFILE_STAGES];
+			uint64_t cycles[PROFILE_STAGES];
+			uint64_t wall_ns[PROFILE_STAGES];
 
 			if (total->trials == 0) {
 				continue;
 			}
-			stage_cycles = total->cycles_prepare
-				+ total->cycles_salt
-				+ total->cycles_hash
-				+ total->cycles_target
-				+ total->cycles_sample
-				+ total->cycles_reconstruct
-				+ total->cycles_norm_check
-				+ total->cycles_encode;
-			stage_wall_ns = total->wall_ns_prepare
-				+ total->wall_ns_salt
-				+ total->wall_ns_hash
-				+ total->wall_ns_target
-				+ total->wall_ns_sample
-				+ total->wall_ns_reconstruct
-				+ total->wall_ns_norm_check
-				+ total->wall_ns_encode;
-			if (total->cycles_total > stage_cycles) {
-				other_cycles = total->cycles_total
-					- stage_cycles;
-			}
-			if (total->wall_ns_total > stage_wall_ns) {
-				other_wall_ns = total->wall_ns_total
-					- stage_wall_ns;
-			}
-
+			profile_stages(total, name, cycles, wall_ns);
+			fprintf(stderr,
+				"\nHAWK_E8_PROFILE_SIGN summary (E8 variant=%s"
+				" threads=%u, accounting=%s)\n",
+				b->cfg.variant, b->cfg.threads, ACCT_NAME[acct]);
 			fprintf(stderr,
 				"logn=%u n=%u trials=%llu accepted=%llu"
 				" failed=%llu attempts=%llu rejections=%llu"
 				" attempt_counter_mismatches=%llu\n",
-				logn, 1u << logn,
+				b->cfg.logn, 1u << b->cfg.logn,
 				(unsigned long long)total->trials,
 				(unsigned long long)total->accepted,
 				(unsigned long long)total->failed,
@@ -1001,37 +767,65 @@ profile_print_summary(void)
 					total->cycles_total, total->trials),
 				(unsigned long long)profile_avg(
 					total->wall_ns_total, total->trials));
-			profile_print_stage("key_prepare",
-				total->cycles_prepare, total->cycles_total,
-				total->wall_ns_prepare, total->wall_ns_total);
-			profile_print_stage("salt",
-				total->cycles_salt, total->cycles_total,
-				total->wall_ns_salt, total->wall_ns_total);
-			profile_print_stage("hash_challenge",
-				total->cycles_hash, total->cycles_total,
-				total->wall_ns_hash, total->wall_ns_total);
-			profile_print_stage("target_coset",
-				total->cycles_target, total->cycles_total,
-				total->wall_ns_target, total->wall_ns_total);
-			profile_print_stage("e8_sampler",
-				total->cycles_sample, total->cycles_total,
-				total->wall_ns_sample, total->wall_ns_total);
-			profile_print_stage("reconstruct_s",
-				total->cycles_reconstruct, total->cycles_total,
-				total->wall_ns_reconstruct,
-				total->wall_ns_total);
-			profile_print_stage("norm_rejection",
-				total->cycles_norm_check, total->cycles_total,
-				total->wall_ns_norm_check,
-				total->wall_ns_total);
-			profile_print_stage("encode_sig",
-				total->cycles_encode, total->cycles_total,
-				total->wall_ns_encode, total->wall_ns_total);
-			profile_print_stage("other",
-				other_cycles, total->cycles_total,
-				other_wall_ns, total->wall_ns_total);
+			for (unsigned s = 0; s + 1 < PROFILE_STAGES; s ++) {
+				fprintf(stderr, "  %-18s cycles=%12llu %6.2f%%"
+					"  wall_ns=%12llu %6.2f%%\n", name[s],
+					(unsigned long long)cycles[s],
+					profile_percent(cycles[s],
+						total->cycles_total),
+					(unsigned long long)wall_ns[s],
+					profile_percent(wall_ns[s],
+						total->wall_ns_total));
+			}
 		}
 	}
+}
+
+/*
+ * The per-stage totals as CSV (the stage table of the comparison
+ * analysis): one row per E8 block, accounting mode and stage.
+ */
+static int
+profile_write_csv(const char *path)
+{
+	FILE *fp = fopen(path, "w");
+
+	if (fp == NULL) {
+		return 0;
+	}
+	fprintf(fp, "scheme,variant,threads,logn,accounting,flags,"
+		"signatures,attempts,stage,cycles_total,wall_ns_total\n");
+	for (unsigned u = 0; u < block_count; u ++) {
+		const bench_block *b = &blocks[u];
+
+		if (b->cfg.scheme != SCHEME_E8) {
+			continue;
+		}
+		for (unsigned acct = 0; acct < ACCT_COUNT; acct ++) {
+			const bench_sign_profile_totals *total =
+				&b->profile[acct];
+			const char *name[PROFILE_STAGES];
+			uint64_t cycles[PROFILE_STAGES];
+			uint64_t wall_ns[PROFILE_STAGES];
+
+			if (total->trials == 0) {
+				continue;
+			}
+			profile_stages(total, name, cycles, wall_ns);
+			for (unsigned s = 0; s < PROFILE_STAGES; s ++) {
+				fprintf(fp, "e8,%s,%u,%u,%s,%s,%llu,%llu,%s,"
+					"%llu,%llu\n", b->cfg.variant,
+					b->cfg.threads, b->cfg.logn,
+					ACCT_NAME[acct], bsc_build_flagset,
+					(unsigned long long)total->accepted,
+					(unsigned long long)total->attempts,
+					name[s],
+					(unsigned long long)cycles[s],
+					(unsigned long long)wall_ns[s]);
+			}
+		}
+	}
+	return fclose(fp) == 0;
 }
 #endif
 
@@ -1105,13 +899,23 @@ list_variants(void)
 	}
 }
 
+#if HAWK_E8_PROFILE_SIGN
+#define STAGE_CSV_SYNOPSIS   " [--stage-csv FILE]"
+#define STAGE_CSV_HELP \
+	"  --stage-csv FILE  write E8's per-stage totals per block to FILE\n"
+#else
+#define STAGE_CSV_SYNOPSIS   ""
+#define STAGE_CSV_HELP       ""
+#endif
+
 static void
 usage(const char *prog)
 {
 	fprintf(stderr,
 		"usage: %s [--trials N] [--sigs-per-key N] [--logn 8|9|10]"
 		" [--variant NAME]... [--threads LIST]\n"
-		"       [--no-header] [--no-pool-accounting] [--list]\n"
+		"       [--no-header] [--no-pool-accounting] [--list]"
+		" [--build-info]" STAGE_CSV_SYNOPSIS "\n"
 		"  --trials N        signatures per scheme, accounting mode,"
 		" degree and\n"
 		"                    thread count (default %u, or"
@@ -1133,7 +937,10 @@ usage(const char *prog)
 		"                    do not time pool jobs per worker; threaded"
 		" rows then\n"
 		"                    have empty cpu_ns_all_threads and"
-		" core_cycles\n",
+		" core_cycles\n"
+		"  --build-info      print the build's flag set, flags and"
+		" compiler and exit\n"
+		STAGE_CSV_HELP,
 		prog, DEFAULT_SIGN_BENCH_TRIALS, DEFAULT_SIGS_PER_KEY);
 }
 
@@ -1172,6 +979,19 @@ parse_options(int argc, char **argv, sign_bench_options *opts)
 		} else if (strcmp(arg, "--list") == 0) {
 			list_variants();
 			exit(0);
+		} else if (strcmp(arg, "--build-info") == 0) {
+			printf("flags: %s\ncflags: %s\ncompiler: %s\n",
+				bsc_build_flagset, bsc_build_cflags,
+				bsc_build_compiler);
+			exit(0);
+#if HAWK_E8_PROFILE_SIGN
+		} else if (strcmp(arg, "--stage-csv") == 0) {
+			if (++ i >= argc) {
+				fprintf(stderr, "ERR: invalid --stage-csv\n");
+				return 0;
+			}
+			opts->stage_csv = argv[i];
+#endif
 		} else if (strcmp(arg, "--variant") == 0) {
 			if (++ i >= argc || opts->variant_name_count
 				== MAX_VARIANT_NAMES
@@ -1228,7 +1048,7 @@ main(int argc, char **argv)
 		usage(argv[0]);
 		return 1;
 	}
-	make_run_id();
+	bsc_make_run_id(run_id, sizeof run_id);
 	cmn_csv_sign_init(&csv, stdout);
 	if (opts.no_header) {
 		cmn_csv_skip_header(&csv);
@@ -1242,9 +1062,7 @@ main(int argc, char **argv)
 	}
 	for (unsigned logn = opts.logn_min; logn <= opts.logn_max; logn ++) {
 		for (unsigned scheme = 0; scheme < 2; scheme ++) {
-			size_t vcount = scheme == SCHEME_HAWK
-				? hawk_sampler_variant_count
-				: e8_sampler_variant_count;
+			size_t vcount = bsc_variant_count(scheme);
 
 			for (size_t vi = 0; vi < vcount; vi ++) {
 				for (unsigned c = 0; c < opts.thread_case_count;
@@ -1265,9 +1083,7 @@ main(int argc, char **argv)
 					}
 					block_count ++;
 					if (!run_block(b, &opts,
-						scheme == SCHEME_E8
-						&& b->e8v == e8_sampler_variant_default()
-						&& b->threads > 1))
+						scheme == SCHEME_E8))
 					{
 						return 1;
 					}
@@ -1284,6 +1100,10 @@ main(int argc, char **argv)
 	fflush(stdout);
 #if HAWK_E8_PROFILE_SIGN
 	profile_print_summary();
+	if (opts.stage_csv != NULL && !profile_write_csv(opts.stage_csv)) {
+		fprintf(stderr, "ERR: cannot write %s\n", opts.stage_csv);
+		return 1;
+	}
 #endif
 	print_summary(&opts);
 	if (failures != 0) {

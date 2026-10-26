@@ -29,6 +29,7 @@ e8/
                             signing RNG
                 cmn_pool    spin/yield worker pool (dispatch only grows it)
                             with per-worker CPU and core-cycle accounting
+                            and optional CPU affinity
                 cmn_timing  fenced TSC, CLOCK_MONOTONIC_RAW,
                             CLOCK_THREAD_CPUTIME_ID, perf core cycles
                 cmn_csv     CSV writer and the per-signature schema
@@ -42,8 +43,20 @@ e8/
               distribution_tests.py (goodness of fit against the exact
               implemented distributions) and validate.py (the driver)
   compare/    HAWK vs E8 benchmarks
+    bench_compare.c          the comparison harness (Step 7, docs/harness.md):
+                             every configuration interleaved, latency and
+                             throughput modes, pinning
+    bench_sign_core.c/.h     signing core shared by bench_compare and
+                             e8_sign_bench (keys, timed sign_finish, verify)
+    run_compare.sh           run driver: one results/compare/<flag set>/
+                             <run_id>/ per run, then the analysis
+    env_capture.sh           environment record (env.txt) of a run
+    analysis/                analyze.py (+ compare_data.py,
+                             compare_tables.py): statistics, bootstrap
+                             ratios, acceptance checks, Step 10 tables
     e8_sign_bench.c          HAWK vs E8 signing, every sampler variant,
-                             all_in and prepared accounting
+                             all_in and prepared accounting, one block at a
+                             time
     e8_sampler_bench.c       sampler timing (--variant-matrix: every variant)
     hawk_shim.c/.h           the only bridge to static HAWK internals
     hawk_sign_profile.patch  stage profiling applied to a copy of hawk_sign.c
@@ -55,9 +68,10 @@ e8/
       hawk_sampler_hot.c        hot64/hot32 (built once per width)
       hawk_sampler_ref.c        ref-T (upstream table and scan)
   results/    generated outputs (gitignored), see "Usage"
-  docs/       design notes, recorded performance results, the precision
-              audit (precision_audit.md, precision_summary.csv), the
-              validation (validation.md, validation_summary.csv)
+  docs/       design notes, recorded performance results and accounting
+              (perf_comparison_final.md), the harness (harness.md), the
+              precision audit (precision_audit.md, precision_summary.csv),
+              the validation (validation.md, validation_summary.csv)
 ```
 
 Dependencies run one way: `src/` may use `common/` and `tables/`;
@@ -81,6 +95,11 @@ make validate-quick      # Step 6 validation at small counts (about 1-2 minutes)
 make validate            # the full validation (docs/validation.md; about half an
                          # hour on 32 CPUs); fail if docs/validation_summary.csv
                          # differs
+make bench-builds        # the timed binaries of every flag set (part of make)
+make bench-compare-smoke # Step 8: the harness on every configuration of both
+                         # flag sets at small counts, plus the analysis
+make bench-compare       # one harness run at Step 9's volume (flag set O2;
+                         # COMPARE_FLAGSETS, COMPARE_RUNS, COMPARE_ARGS)
 ```
 
 The validation builds `bin/e8_correctness_nodebug` from its own E8 objects
@@ -107,15 +126,24 @@ results/
   validation/         validate (Step 6)
   validation-quick/   validate-quick
   distribution-tests/ tools/distribution_tests.py run on its own
-  compare/            reserved for the comparison harness (Step 7):
-                      compare/<flag set>/<run_id>/
+  compare/            the comparison harness (docs/harness.md):
+                      compare/<flag set>/<run_id>/ (one run: env.txt,
+                      latency, throughput, AVX2, sampler and stage CSVs),
+                      compare/analysis/<name>/ (tables and statistics)
 ```
 
 The committed reference copies (`precision_summary.csv`,
 `validation_summary.csv`) live in `docs/`; the targets compare the fresh
 results with them.
 
-For timing, disable the prototype debug checks, for every object alike:
+For timing, use the per-flag-set builds (`make bench-builds`): every object
+of `bin/bench_compare-FS`, `bin/bench_compare_avx2-FS` (HAWK AVX2 context),
+`bin/e8_sign_bench-FS`, `bin/e8_sampler_bench-FS` and the profile benches
+`-FS` is compiled into `build/bench-FS/` with one flag set (`O2`: upstream's
+`-O2` flags; `O3native`: `-O3 -march=native -fno-strict-aliasing`) and the
+E8 debug checks off; the default objects keep the default flags (debug
+checks on) and are not for timing. `--build-info` prints a binary's flags.
+The former alternative still works:
 
 ```sh
 make -C e8 clean

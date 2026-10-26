@@ -2,6 +2,8 @@
 #define _GNU_SOURCE
 #endif
 
+#include <pthread.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +21,8 @@
  * Tests of the shared measurement modules in e8/common/: RNG streams
  * (known answer, buffering invariance, prefixed streams, exact
  * counters), worker pool (dispatch coverage, reductions, repeated
- * dispatches, grow-only dispatch, explicit resizing, accounting), timing
+ * dispatches, grow-only dispatch, explicit resizing, accounting,
+ * affinity), timing
  * (monotonic clocks, perf unavailability reported rather than fatal) and
  * the CSV writer.
  */
@@ -374,6 +377,120 @@ pool_run(pool_test_ctx *t, unsigned threads)
 	return sum;
 }
 
+/*
+ * Affinity: each worker records the CPU it runs on and the single CPU
+ * of its affinity mask (-1 if the mask is not a single CPU).
+ */
+typedef struct {
+	int cpu[CMN_POOL_MAX_THREADS + 1];
+	int mask_cpu[CMN_POOL_MAX_THREADS + 1];
+	int mask_count[CMN_POOL_MAX_THREADS + 1];
+} affinity_ctx;
+
+static void
+affinity_job(void *ctx, unsigned worker)
+{
+	affinity_ctx *a = ctx;
+	cpu_set_t set;
+
+	a->cpu[worker] = sched_getcpu();
+	a->mask_cpu[worker] = -1;
+	a->mask_count[worker] = 0;
+	if (pthread_getaffinity_np(pthread_self(), sizeof set, &set) != 0) {
+		return;
+	}
+	a->mask_count[worker] = CPU_COUNT(&set);
+	for (int c = 0; c < CPU_SETSIZE && a->mask_count[worker] == 1; c ++) {
+		if (CPU_ISSET(c, &set)) {
+			a->mask_cpu[worker] = c;
+		}
+	}
+}
+
+static void
+affinity_run(affinity_ctx *a, unsigned threads)
+{
+	memset(a, 0, sizeof *a);
+	check(cmn_pool_dispatch(affinity_job, a, threads - 1),
+		"pool affinity dispatch");
+	affinity_job(a, 0);
+	check(cmn_pool_wait(), "pool affinity wait");
+}
+
+/*
+ * Worker w must run on, and be pinned to, list[w % count].
+ */
+static void
+affinity_check(const affinity_ctx *a, unsigned threads,
+	const unsigned *list, unsigned count, const char *what)
+{
+	for (unsigned w = 0; w < threads; w ++) {
+		int want = (int)list[w % count];
+
+		check(a->mask_cpu[w] == want && a->cpu[w] == want, what);
+	}
+}
+
+static void
+test_pool_affinity(void)
+{
+	static affinity_ctx a;
+	cpu_set_t orig;
+	unsigned list[4], rev[4], got[4], bad[1], count = 0;
+
+	check(pthread_getaffinity_np(pthread_self(), sizeof orig, &orig) == 0,
+		"pool affinity: caller mask");
+	for (int c = 0; c < CPU_SETSIZE && count < 4; c ++) {
+		if (CPU_ISSET(c, &orig)) {
+			list[count ++] = (unsigned)c;
+		}
+	}
+	check(count > 0, "pool affinity: allowed cpus");
+	for (unsigned u = 0; u < count; u ++) {
+		rev[u] = list[count - 1 - u];
+	}
+	cmn_pool_shrink(0);
+	check(cmn_pool_get_affinity(got, 4) == 0, "pool affinity off by default");
+
+	/* Threads created after the list is set are pinned at creation. */
+	check(cmn_pool_set_affinity(list, count), "pool affinity set");
+	check(cmn_pool_get_affinity(got, 4) == count
+		&& memcmp(got, list, count * sizeof *list) == 0,
+		"pool affinity get");
+	check(cmn_pool_ensure(3), "pool affinity ensure");
+	check(cmn_pin_current_thread(list[0]), "pin caller");
+	affinity_run(&a, 4);
+	affinity_check(&a, 4, list, count, "pool affinity at creation");
+
+	/* Setting a list re-pins the live threads. */
+	check(cmn_pool_set_affinity(rev, count), "pool affinity reset");
+	check(cmn_pin_current_thread(rev[0]), "re-pin caller");
+	affinity_run(&a, 4);
+	affinity_check(&a, 4, rev, count, "pool affinity of live threads");
+
+	/* Invalid lists are rejected and change nothing. */
+	bad[0] = CPU_SETSIZE;
+	check(!cmn_pool_set_affinity(bad, 1)
+		&& cmn_pool_get_affinity(got, 4) == count
+		&& memcmp(got, rev, count * sizeof *rev) == 0,
+		"pool affinity rejects bad cpu");
+	check(!cmn_pin_current_thread(CPU_SETSIZE), "pin rejects bad cpu");
+
+	/* Cleared: new threads inherit the (restored) caller mask. */
+	check(cmn_pool_set_affinity(NULL, 0)
+		&& cmn_pool_get_affinity(got, 4) == 0, "pool affinity clear");
+	cmn_pool_shrink(0);
+	check(pthread_setaffinity_np(pthread_self(), sizeof orig, &orig) == 0,
+		"restore caller mask");
+	check(cmn_pool_ensure(2), "pool ensure after clear");
+	affinity_run(&a, 3);
+	for (unsigned w = 0; w < 3; w ++) {
+		check(a.mask_count[w] == CPU_COUNT(&orig),
+			"pool threads unpinned after clear");
+	}
+	cmn_pool_shrink(0);
+}
+
 static void
 test_pool(void)
 {
@@ -528,6 +645,7 @@ test_pool(void)
 		&& st.idle_cpu_ns == st.thread_cpu_ns - st.job_cpu_ns,
 		"pool idle cpu after join");
 	check(cmn_pool_set_accounting(0), "pool accounting off");
+	test_pool_affinity();
 	printf("done.\n");
 }
 
@@ -661,13 +779,18 @@ test_csv(void)
 	cmn_sign_row_clear(&row);
 	row.kind = "sign";
 	row.logn = 8;
+	row.mode = "latency";
+	row.flags = "O2";
+	row.batch = 3;
 	cmn_csv_sign_row(&csv, &row);
 	fflush(fp);
 	check(strcmp(buf, "kind,run_id,scheme,variant,threshold_bits,"
 		"technique,threads,logn,key_index,msg_index,attempts,"
 		"sig_bytes,rng_bytes,tsc_cycles,core_cycles,wall_ns,"
-		"cpu_ns_all_threads,accounting,encoding_included,verify_ok\n"
-		"sign,,,,,,,8,,,,,,,,,,,,\n") == 0, "csv sign schema");
+		"cpu_ns_all_threads,accounting,encoding_included,verify_ok,"
+		"mode,proc,flags,batch\n"
+		"sign,,,,,,,8,,,,,,,,,,,,,latency,,O2,3\n") == 0,
+		"csv sign schema");
 	fclose(fp);
 	free(buf);
 	printf("done.\n");

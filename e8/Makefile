@@ -31,6 +31,9 @@ E8_PROFILE_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_codec.o b
 E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler bin/test_e8_api bin/test_e8_tables bin/test_e8_variants bin/test_e8_ref_ct bin/test_hawk_variants bin/test_cmn_common
 E8_TOOL_PROGS = bin/e8_histograms bin/e8_rejection_summary bin/e8_validation_summary bin/e8_correctness bin/e8_correctness_nodebug bin/e8_distribution_sample
 E8_BENCH_PROGS = bin/e8_sampler_bench bin/e8_sampler_profile_bench bin/e8_sign_bench bin/e8_sign_profile_bench bin/hawk_sign_profile_bench
+# The signing core shared by e8_sign_bench and bench_compare.
+BSC_HEAD = compare/bench_sign_core.h compare/hawk_shim.h
+BSC_OBJ = build/bench_sign_core.o
 HAWK_PROFILE_SIGN_SOURCE = build/hawk_sign_profile.c
 # Benchmark-only HAWK variants (compare/hawk_variants/): the variant signer
 # (a patched copy of upstream hawk_sign.c) and its samplers.
@@ -61,7 +64,7 @@ E8_THREAD_LIBS ?= -pthread
 E8_NODEBUG_CFLAGS = $(E8_CFLAGS) -DHAWK_E8_DEBUG_CHECKS=0
 E8_NODEBUG_OBJ = build/nodebug/e8_math.o build/nodebug/e8_f2.o build/nodebug/e8_ntt.o build/nodebug/e8_codec.o build/nodebug/e8_vrfy.o build/nodebug/e8_sign.o build/nodebug/e8_sign_legacy.o build/nodebug/e8_api.o build/nodebug/e8_sampler.o build/nodebug/e8_sampler_ref.o build/nodebug/e8_sampler_hot64.o build/nodebug/e8_sampler_hot32.o build/nodebug/e8_sampler_variants.o build/nodebug/e8_sampler_runtime.o
 
-all: build bin $(E8_TEST_PROGS) $(E8_TOOL_PROGS) $(E8_BENCH_PROGS)
+all: build bin $(E8_TEST_PROGS) $(E8_TOOL_PROGS) $(E8_BENCH_PROGS) bench-builds
 test-e8: build bin $(E8_TEST_PROGS)
 	./bin/test_e8_math
 	./bin/test_e8_arith
@@ -79,8 +82,8 @@ test-e8: build bin $(E8_TEST_PROGS)
 # Generated outputs live under results/ (gitignored), one directory per
 # kind: results/bench/ (benchmarks), results/diagnostics/ (diagnostic
 # tools), results/precision/ (precision audit), results/validation/ and
-# results/validation-quick/ (Step 6); results/compare/ is reserved for the
-# comparison harness. Committed reference copies live in docs/.
+# results/validation-quick/ (Step 6), results/compare/ (the comparison
+# harness, below). Committed reference copies live in docs/.
 BENCH_OUT = results/bench
 DIAG_OUT = results/diagnostics
 e8-histograms: build bin bin/e8_histograms
@@ -134,6 +137,25 @@ validate-quick: build bin $(VALIDATE_BINS)
 	python3 -I tools/validate.py --quick --out-dir results/validation-quick
 validate: build bin $(VALIDATE_BINS)
 	python3 -I tools/validate.py --out-dir results/validation --check docs/validation_summary.csv
+
+# Comparison harness (plan.md Steps 7-9; compare/run_compare.sh, docs/
+# harness.md): bench_compare in latency and throughput mode, the HAWK AVX2
+# context, the sampler-only and stage benches, each run in its own
+# results/compare/<flag set>/<run_id>/ with env.txt, then the analysis
+# (compare/analysis/analyze.py) into results/compare/analysis/<name>/.
+# bench-compare: Step 9's volume per run (10 keys x 1,000 signatures);
+# COMPARE_FLAGSETS, COMPARE_RUNS and COMPARE_ARGS (for example
+# COMPARE_ARGS='--cpus 0,2,4,6,8,10,12,14,16 --procs 8') select more.
+# bench-compare-smoke (Step 8): every configuration of both flag sets at
+# small counts, the analysis self-test and the analysis.
+COMPARE_FLAGSETS = O2
+COMPARE_RUNS = 1
+COMPARE_ARGS =
+bench-compare: build bin bench-builds
+	sh compare/run_compare.sh --flagsets "$(COMPARE_FLAGSETS)" --runs $(COMPARE_RUNS) $(COMPARE_ARGS)
+bench-compare-smoke: build bin bench-builds
+	python3 -I compare/analysis/analyze.py --self-test
+	sh compare/run_compare.sh --smoke --flagsets "$(BENCH_FLAGSETS)" $(COMPARE_ARGS)
 
 # Regenerate the sampler tables into build/tables and fail if any differs
 # from the committed tables/ (to update them, run the generator command in
@@ -196,6 +218,8 @@ check-integer-only: build $(INT_ONLY_OBJ) $(HAWKV_SIGN_SOURCE)
 		fi; \
 	done
 	@echo "check-integer-only: signing path is integer-only"
+
+FORCE:
 
 build:
 	-mkdir -p build/hawk build/profile build/common build/hawkv
@@ -270,12 +294,154 @@ bin/e8_sampler_bench: compare/e8_sampler_bench.c $(HAWKV_HEAD) $(E8_HEAD) $(HAWK
 	$(CC) $(E8_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_sampler_bench compare/e8_sampler_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/e8_sampler_profile_bench: compare/e8_sampler_bench.c $(HAWKV_HEAD) $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) build/e8_math.o $(E8_SAMPLER_PROFILE_OBJ)
 	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_sampler_profile_bench compare/e8_sampler_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) build/e8_math.o $(E8_SAMPLER_PROFILE_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
-bin/e8_sign_bench: compare/e8_sign_bench.c $(HAWKV_HEAD) $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
-	$(CC) $(E8_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_sign_bench compare/e8_sign_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
-bin/e8_sign_profile_bench: compare/e8_sign_bench.c $(HAWKV_HEAD) $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ)
-	$(CC) $(E8_PROFILE_SIGN_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_sign_profile_bench compare/e8_sign_bench.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
-bin/hawk_sign_profile_bench: compare/hawk_sign_profile_bench.c $(HAWK_PROFILE_SIGN_SOURCE) $(HAWK_OBJ_NOSIGN)
-	$(CC) $(HAWK_PROFILE_SIGN_CFLAGS) -I$(HAWK_DIR) -o bin/hawk_sign_profile_bench compare/hawk_sign_profile_bench.c $(HAWK_OBJ_NOSIGN) $(LIBS)
+bin/e8_sign_bench: compare/e8_sign_bench.c $(BSC_HEAD) $(HAWKV_HEAD) $(E8_HEAD) $(BSC_OBJ) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_sign_bench compare/e8_sign_bench.c $(BSC_OBJ) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_sign_profile_bench: compare/e8_sign_bench.c $(BSC_HEAD) $(HAWKV_HEAD) $(E8_HEAD) $(BSC_OBJ) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_PROFILE_SIGN_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_sign_profile_bench compare/e8_sign_bench.c $(BSC_OBJ) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_PROFILE_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/hawk_sign_profile_bench: compare/hawk_sign_profile_bench.c $(HAWK_PROFILE_SIGN_SOURCE) build/bench_build_info.h $(HAWK_OBJ_NOSIGN)
+	$(CC) $(HAWK_PROFILE_SIGN_CFLAGS) -I$(HAWK_DIR) -Ibuild -o bin/hawk_sign_profile_bench compare/hawk_sign_profile_bench.c $(HAWK_OBJ_NOSIGN) $(LIBS)
+
+# The signing core shared by e8_sign_bench and bench_compare, in the
+# default build (flag set "default": the default flags, E8 debug checks
+# on; not for timing).
+$(BSC_OBJ): compare/bench_sign_core.c $(BSC_HEAD) $(HAWKV_HEAD) $(E8_HEAD) build/bench_build_info.h
+	$(CC) $(E8_CFLAGS) $(E8_INC) $(HAWKV_INC) -Ibuild -c -o $(BSC_OBJ) compare/bench_sign_core.c
+build/bench_build_info.h: FORCE
+	@mkdir -p build
+	@printf '#define BENCH_FLAGSET "%s"\n#define BENCH_CFLAGS "%s"\n' 'default' '$(CFLAGS) | e8: -DHAWK_ENABLE_E8_EXPERIMENTAL=1' > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+
+# ---------------------------------------------------------------------
+# Timed builds (plan.md Steps 7 and 9; fairness item 6: one compiler, one
+# flag set for every object). Each flag set FS in BENCH_FLAGSETS has its
+# own object directory build/bench-FS/ holding every object of the timed
+# binaries: upstream HAWK, the HAWK variants, the shim, the shared
+# modules, E8 without the debug checks (HAWK_E8_DEBUG_CHECKS=0) and the
+# signing core, all compiled with BENCH_CFLAGS_FS -pthread (E8 objects
+# add BENCH_E8_DEFS). The default objects and CFLAGS are unchanged.
+# Binaries are named after the flag set:
+#   bin/bench_compare-FS          the harness (compare/bench_compare.c)
+#   bin/bench_compare_avx2-FS     HAWK AVX2 context (upstream
+#                                 Optimized_Implementation/avx2 compiled
+#                                 into build/bench-FS/avx2/; HAWK only,
+#                                 variant ref-avx2)
+#   bin/e8_sign_bench-FS          e8_sign_bench
+#   bin/e8_sampler_bench-FS       sampler-only timing (--variant-matrix)
+#   bin/e8_sign_profile_bench-FS  E8 stage breakdown (profile timers on)
+#   bin/hawk_sign_profile_bench-FS  HAWK stage breakdown (profile timers on)
+# build/bench-FS/bench_build_info.h records the flag-set name and flags
+# (printed by --build-info and written to every CSV row's flags column).
+BENCH_FLAGSETS = O2 O3native
+BENCH_CFLAGS_O2 = -Wall -Wextra -Wshadow -Wundef -O2 -fdiagnostics-color=always
+# -fno-strict-aliasing: upstream hawk_sign.c reads bytes stored as uint64_t
+# through uint32_t pointers (bp_muladd_128/bp_muladd_64, HAWK_UNALIGNED),
+# undefined behaviour that -O3 -march=native (GCC 15.2, znver5) turns into
+# signatures failing verification (upstream test_self fails too). The flag
+# applies to every object of the flag set, both schemes alike
+# (docs/harness.md, "Builds").
+BENCH_CFLAGS_O3native = -Wall -Wextra -Wshadow -Wundef -O3 -march=native -fno-strict-aliasing -fdiagnostics-color=always
+BENCH_THREAD_CFLAGS = -pthread
+BENCH_E8_DEFS = -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0
+AVX2_DIR = ../Optimized_Implementation/avx2
+AVX2_STAMP = build/avx2_sources.stamp
+BENCH_HAWK_NAMES = hawk_kgen hawk_vrfy ng_fxp ng_hawk ng_mp31 ng_ntru ng_poly ng_zint31 sha3
+BENCH_E8_NAMES = e8_math e8_f2 e8_ntt e8_codec e8_vrfy e8_sign e8_sign_legacy e8_api e8_sampler e8_sampler_ref e8_sampler_hot64 e8_sampler_hot32 e8_sampler_variants e8_sampler_runtime
+BENCH_E8_PROFILE_NAMES = $(filter-out e8_sign e8_api,$(BENCH_E8_NAMES))
+BENCH_CMN_NAMES = cmn_timing cmn_rng cmn_pool cmn_csv
+BENCH_HAWKV_NAMES = hawk_sign_variant hawk_variants hawk_sampler_ref hawk_sampler_hot64 hawk_sampler_hot32
+BENCH_BINS = $(foreach fs,$(BENCH_FLAGSETS),bin/bench_compare-$(fs) bin/bench_compare_avx2-$(fs) bin/e8_sign_bench-$(fs) bin/e8_sampler_bench-$(fs) bin/e8_sign_profile_bench-$(fs) bin/hawk_sign_profile_bench-$(fs))
+
+bench-builds: build bin $(BENCH_BINS)
+
+$(AVX2_STAMP): ../build.py ../src/*.c ../src/*.h
+	-mkdir -p build
+	cd .. && ./build.py avx2 > /dev/null
+	touch $(AVX2_STAMP)
+
+# BENCH_FLAGSET_RULES(FS): objects and binaries of flag set FS. Every
+# object depends on build/bench-FS/bench_build_info.h, which changes
+# exactly when the flags do, so a flag change rebuilds the flag set.
+define BENCH_FLAGSET_RULES
+BD_$(1) = build/bench-$(1)
+BCF_$(1) = $$(BENCH_CFLAGS_$(1)) $$(BENCH_THREAD_CFLAGS)
+BHAWK_$(1) = $$(BENCH_HAWK_NAMES:%=build/bench-$(1)/hawk/%.o)
+BCMN_$(1) = $$(BENCH_CMN_NAMES:%=build/bench-$(1)/common/%.o)
+BHAWKV_$(1) = $$(BENCH_HAWKV_NAMES:%=build/bench-$(1)/hawkv/%.o)
+BE8_$(1) = $$(BENCH_E8_NAMES:%=build/bench-$(1)/e8/%.o)
+BE8P_$(1) = $$(BENCH_E8_PROFILE_NAMES:%=build/bench-$(1)/e8/%.o) build/bench-$(1)/profile/e8_sign.o build/bench-$(1)/profile/e8_api.o
+BSAMP_$(1) = $$(filter build/bench-$(1)/e8/e8_math.o build/bench-$(1)/e8/e8_sampler%,$$(BE8_$(1)))
+BAVX2_$(1) = $$(BENCH_HAWK_NAMES:%=build/bench-$(1)/avx2/hawk/%.o) build/bench-$(1)/avx2/hawk_shim.o $$(BENCH_CMN_NAMES:%=build/bench-$(1)/avx2/common/%.o) build/bench-$(1)/avx2/bench_sign_core.o
+BLINK_$(1) = $$(BHAWK_$(1)) build/bench-$(1)/hawk_shim.o $$(BHAWKV_$(1)) $$(BCMN_$(1))
+BINC_$(1) = $$(E8_INC) $$(HAWKV_INC) -Ibuild/bench-$(1)
+
+build/bench-$(1)/bench_build_info.h: FORCE
+	@mkdir -p build/bench-$(1)
+	@printf '#define BENCH_FLAGSET "%s"\n#define BENCH_CFLAGS "%s"\n' '$(1)' '$$(BCF_$(1)) | e8: $$(BENCH_E8_DEFS)' > $$@.tmp
+	@if cmp -s $$@.tmp $$@; then rm -f $$@.tmp; else mv $$@.tmp $$@; fi
+
+build/bench-$(1)/hawk/%.o: $$(HAWK_HEAD) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/hawk
+	$$(CC) $$(BCF_$(1)) -c -o $$@ $$(HAWK_DIR)/$$*.c
+build/bench-$(1)/hawk_shim.o: compare/hawk_shim.c compare/hawk_shim.h $$(HAWK_HEAD) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)
+	$$(CC) $$(BCF_$(1)) -I$$(HAWK_DIR) -c -o $$@ compare/hawk_shim.c
+build/bench-$(1)/common/%.o: common/%.c $$(CMN_HEAD) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/common
+	$$(CC) $$(BCF_$(1)) -I$$(HAWK_DIR) -c -o $$@ $$<
+build/bench-$(1)/hawkv/hawk_sign_variant.o: $$(HAWKV_SIGN_SOURCE) $$(HAWKV_HEAD) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/hawkv
+	$$(CC) $$(BCF_$(1)) -DHAWK_AVX2=0 $$(HAWKV_INC) -c -o $$@ $$(HAWKV_SIGN_SOURCE)
+build/bench-$(1)/hawkv/hawk_sampler_hot64.o: $$(HAWKV_DIR)/hawk_sampler_hot.c $$(HAWKV_HEAD) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/hawkv
+	$$(CC) $$(BCF_$(1)) $$(HAWKV_INC) -DHAWK_HOT_BITS=64 -c -o $$@ $$<
+build/bench-$(1)/hawkv/hawk_sampler_hot32.o: $$(HAWKV_DIR)/hawk_sampler_hot.c $$(HAWKV_HEAD) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/hawkv
+	$$(CC) $$(BCF_$(1)) $$(HAWKV_INC) -DHAWK_HOT_BITS=32 -c -o $$@ $$<
+build/bench-$(1)/hawkv/%.o: $$(HAWKV_DIR)/%.c $$(HAWKV_HEAD) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/hawkv
+	$$(CC) $$(BCF_$(1)) $$(HAWKV_INC) -c -o $$@ $$<
+build/bench-$(1)/e8/e8_sampler_hot64.o: src/e8_sampler_hot.c $$(E8_HEAD) $$(E8_TABLES) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/e8
+	$$(CC) $$(BCF_$(1)) $$(BENCH_E8_DEFS) $$(E8_INC) -DE8_HOT_BITS=64 -c -o $$@ $$<
+build/bench-$(1)/e8/e8_sampler_hot32.o: src/e8_sampler_hot.c $$(E8_HEAD) $$(E8_TABLES) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/e8
+	$$(CC) $$(BCF_$(1)) $$(BENCH_E8_DEFS) $$(E8_INC) -DE8_HOT_BITS=32 -c -o $$@ $$<
+build/bench-$(1)/e8/%.o: src/%.c $$(E8_HEAD) $$(E8_TABLES) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/e8
+	$$(CC) $$(BCF_$(1)) $$(BENCH_E8_DEFS) $$(E8_INC) -c -o $$@ $$<
+build/bench-$(1)/profile/%.o: src/%.c $$(E8_HEAD) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/profile
+	$$(CC) $$(BCF_$(1)) $$(BENCH_E8_DEFS) -DHAWK_E8_PROFILE_SIGN=1 -DHAWK_E8_PROFILE_SAMPLER=0 $$(E8_INC) -c -o $$@ $$<
+build/bench-$(1)/bench_sign_core.o: compare/bench_sign_core.c $$(BSC_HEAD) $$(HAWKV_HEAD) $$(E8_HEAD) build/bench-$(1)/bench_build_info.h
+	$$(CC) $$(BCF_$(1)) $$(BENCH_E8_DEFS) $$(BINC_$(1)) -c -o $$@ compare/bench_sign_core.c
+
+build/bench-$(1)/avx2/hawk/%.o: $$(AVX2_STAMP) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/avx2/hawk
+	$$(CC) $$(BCF_$(1)) -c -o $$@ $$(AVX2_DIR)/$$*.c
+build/bench-$(1)/avx2/hawk_shim.o: compare/hawk_shim.c compare/hawk_shim.h $$(AVX2_STAMP) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/avx2
+	$$(CC) $$(BCF_$(1)) -I$$(AVX2_DIR) -c -o $$@ compare/hawk_shim.c
+build/bench-$(1)/avx2/common/%.o: common/%.c $$(CMN_HEAD) $$(AVX2_STAMP) build/bench-$(1)/bench_build_info.h
+	@mkdir -p build/bench-$(1)/avx2/common
+	$$(CC) $$(BCF_$(1)) -I$$(AVX2_DIR) -c -o $$@ $$<
+build/bench-$(1)/avx2/bench_sign_core.o: compare/bench_sign_core.c $$(BSC_HEAD) build/bench-$(1)/bench_build_info.h $$(AVX2_STAMP)
+	@mkdir -p build/bench-$(1)/avx2
+	$$(CC) $$(BCF_$(1)) -DBSC_HAWK_ONLY=1 -I$$(AVX2_DIR) -Icommon -Icompare -Ibuild/bench-$(1) -c -o $$@ compare/bench_sign_core.c
+
+bin/bench_compare-$(1): compare/bench_compare.c $$(BSC_HEAD) $$(HAWKV_HEAD) $$(E8_HEAD) build/bench-$(1)/bench_sign_core.o $$(BLINK_$(1)) $$(BE8_$(1)) | bin
+	$$(CC) $$(BCF_$(1)) $$(BENCH_E8_DEFS) $$(BINC_$(1)) -o $$@ compare/bench_compare.c build/bench-$(1)/bench_sign_core.o $$(BLINK_$(1)) $$(BE8_$(1)) $$(LIBS) $$(E8_THREAD_LIBS) -lm
+bin/bench_compare_avx2-$(1): compare/bench_compare.c $$(BSC_HEAD) $$(BAVX2_$(1)) | bin
+	$$(CC) $$(BCF_$(1)) -DBSC_HAWK_ONLY=1 -I$$(AVX2_DIR) -Icommon -Icompare -Ibuild/bench-$(1) -o $$@ compare/bench_compare.c $$(BAVX2_$(1)) $$(LIBS) $$(E8_THREAD_LIBS)
+bin/e8_sign_bench-$(1): compare/e8_sign_bench.c $$(BSC_HEAD) $$(HAWKV_HEAD) $$(E8_HEAD) build/bench-$(1)/bench_sign_core.o $$(BLINK_$(1)) $$(BE8_$(1)) | bin
+	$$(CC) $$(BCF_$(1)) $$(BENCH_E8_DEFS) $$(BINC_$(1)) -o $$@ compare/e8_sign_bench.c build/bench-$(1)/bench_sign_core.o $$(BLINK_$(1)) $$(BE8_$(1)) $$(LIBS) $$(E8_THREAD_LIBS) -lm
+bin/e8_sign_profile_bench-$(1): compare/e8_sign_bench.c $$(BSC_HEAD) $$(HAWKV_HEAD) $$(E8_HEAD) build/bench-$(1)/bench_sign_core.o $$(BLINK_$(1)) $$(BE8P_$(1)) | bin
+	$$(CC) $$(BCF_$(1)) $$(BENCH_E8_DEFS) -DHAWK_E8_PROFILE_SIGN=1 -DHAWK_E8_PROFILE_SAMPLER=0 $$(BINC_$(1)) -o $$@ compare/e8_sign_bench.c build/bench-$(1)/bench_sign_core.o $$(BLINK_$(1)) $$(BE8P_$(1)) $$(LIBS) $$(E8_THREAD_LIBS) -lm
+bin/e8_sampler_bench-$(1): compare/e8_sampler_bench.c $$(HAWKV_HEAD) $$(E8_HEAD) $$(BLINK_$(1)) $$(BSAMP_$(1)) | bin
+	$$(CC) $$(BCF_$(1)) $$(BENCH_E8_DEFS) $$(BINC_$(1)) -o $$@ compare/e8_sampler_bench.c $$(BLINK_$(1)) $$(BSAMP_$(1)) $$(LIBS) $$(E8_THREAD_LIBS) -lm
+bin/hawk_sign_profile_bench-$(1): compare/hawk_sign_profile_bench.c $$(HAWK_PROFILE_SIGN_SOURCE) build/bench-$(1)/bench_build_info.h $$(BHAWK_$(1)) | bin
+	$$(CC) $$(BCF_$(1)) -DHAWK_AVX2=0 -DHAWK_PROFILE_SIGN=1 -I$$(HAWK_DIR) -Ibuild/bench-$(1) -o $$@ compare/hawk_sign_profile_bench.c $$(BHAWK_$(1)) $$(LIBS)
+endef
+$(foreach fs,$(BENCH_FLAGSETS),$(eval $(call BENCH_FLAGSET_RULES,$(fs))))
 
 # Object files:
 

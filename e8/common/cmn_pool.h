@@ -43,6 +43,14 @@
  * dispatch; it is applied identically to every scheme. Without
  * accounting, a measurement spanning a dispatch reports the workers'
  * share as unavailable.
+ *
+ * Affinity (off by default, cmn_pool_set_affinity()): with a CPU list
+ * c[0..count-1], pool thread u (worker u + 1) is pinned to
+ * c[(u + 1) % count], so that a caller pinned to c[0] with
+ * cmn_pin_current_thread() and T <= count workers run on T distinct
+ * CPUs. Pinning happens outside dispatches (when the list is set, and
+ * when a thread is created) and costs nothing per dispatch; it applies
+ * to every scheme alike.
  */
 
 #define CMN_POOL_MAX_THREADS   24
@@ -96,6 +104,31 @@ int cmn_pool_wait(void);
 int cmn_pool_set_accounting(int enable);
 
 int cmn_pool_get_accounting(void);
+
+/*
+ * Pin pool threads to the CPU list cpus[0..count-1] as described above:
+ * the live threads at once, later threads at their creation. count = 0
+ * clears the list (threads created afterwards are not pinned; live
+ * threads keep their affinity). Returns 0, and changes nothing, if count
+ * exceeds CMN_POOL_MAX_THREADS + 1, a CPU number is not below the number
+ * of configured CPUs, or a dispatch is outstanding; returns 0 if a live
+ * thread cannot be pinned (the list is then set and the other live
+ * threads pinned). A CPU outside the process's allowed set makes pinning,
+ * and so cmn_pool_ensure() or a growing dispatch, fail.
+ */
+int cmn_pool_set_affinity(const unsigned *cpus, unsigned count);
+
+/*
+ * The current CPU list: writes up to max entries to cpus and returns the
+ * list length (0 if none is set).
+ */
+unsigned cmn_pool_get_affinity(unsigned *cpus, unsigned max);
+
+/*
+ * Pin the calling thread to one CPU; returns 0 on failure (the affinity
+ * is then unchanged).
+ */
+int cmn_pin_current_thread(unsigned cpu);
 
 /*
  * Pool threads' share of the last completed dispatch: worker count, CPU

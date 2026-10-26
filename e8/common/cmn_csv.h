@@ -45,7 +45,8 @@ void cmn_csv_end_row(cmn_csv *csv);
  * The per-signature schema (plan.md, Step 7), one row per signature or
  * setup operation:
  *
- *   kind               sign, sign_failed, keygen or prepare
+ *   kind               sign, sign_failed, keygen, prepare, or warmup (an
+ *                      untimed-for-the-results warm-up signature)
  *   run_id             identifier of the benchmark run
  *   scheme             hawk or e8
  *   variant            sampler variant (ref, hot64, ...)
@@ -67,11 +68,18 @@ void cmn_csv_end_row(cmn_csv *csv);
  *   accounting         all_in or prepared (empty for keygen)
  *   encoding_included  1 if the timed call includes signature encoding
  *   verify_ok          1 if the signature verifies (empty for setup rows)
+ *   mode               latency (one signer, T sampler threads) or
+ *                      throughput (P single-thread signer processes)
+ *   proc               signer process index in throughput mode (empty in
+ *                      latency mode)
+ *   flags              name of the build's flag set (O2, O3native, ...)
+ *   batch              position of the row's batch in the run's
+ *                      interleaved schedule (empty if not interleaved)
  *
  * Numeric fields set to CMN_UNAVAILABLE and string fields set to NULL are
  * written empty.
  */
-#define CMN_CSV_SIGN_COLUMN_COUNT   20
+#define CMN_CSV_SIGN_COLUMN_COUNT   24
 
 extern const char *const cmn_csv_sign_columns[CMN_CSV_SIGN_COLUMN_COUNT];
 
@@ -96,6 +104,10 @@ typedef struct {
 	const char *accounting;
 	uint64_t encoding_included;
 	uint64_t verify_ok;
+	const char *mode;
+	uint64_t proc;
+	const char *flags;
+	uint64_t batch;
 } cmn_sign_row;
 
 /*
