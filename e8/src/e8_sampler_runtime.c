@@ -17,15 +17,18 @@
  * The builder is the former runtime cache: Gaussian weights and
  * normalisers in double, hot and component thresholds
  * floor(prefix / total * 2^64) computed in long double from double
- * prefixes (e8_cdf_threshold_u64()), with the same K = 6, ordering and
- * clamping rules as the generator (e8/tables/gen_tables.py). The tail is
- * now integer, as in the generator: thresholds of the tail's cumulative
- * mass relative to the tail mass, the last one forced to the maximum and
- * the list truncated after the first maximum (or at the generated table
- * capacity, E8_HOT64_TAIL_LEN_MAX, which then ends with the maximum).
- * Because the weights and prefixes are doubles, the low bits of these
- * thresholds differ from the exact generated ones; test_e8_sampler
- * reports the differences for the three fixed sigma_sign values.
+ * prefixes (e8_cdf_threshold_u64()), with the same K = 6 and ordering as
+ * the generator (e8/tables/gen_tables.py). The tail is integer:
+ * thresholds of the tail's cumulative mass relative to the tail mass, the
+ * last one forced to the maximum and the list truncated after the first
+ * maximum (or at the generated table capacity, E8_HOT64_TAIL_LEN_MAX,
+ * which then ends with the maximum). These are the generator's rounding
+ * rules up to commit dd2c419; the generator now floors the mass at or
+ * beyond each value (HAWK's rule), which moves most thresholds by a unit
+ * or a few. Because the weights and prefixes are doubles, the low bits
+ * of these thresholds differ from the exact generated ones in any case;
+ * test_e8_tables reports the differences for the three fixed sigma_sign
+ * values.
  *
  * The output uses the generated table format (e8_hot64_tables) and the
  * generated, sigma-independent geometry (e8_tables_geom.h), which the

@@ -4,7 +4,9 @@ Step 5 of the fair-comparison plan: one tool and one set of measures give
 the distance of every sampler variant of both schemes from its ideal
 discrete Gaussian, per draw, per unit (HAWK coordinate, E8 block) and per
 signature.  The audit reads the committed tables; it changes no table,
-generator rule or sampler.
+generator rule or sampler.  The values below are for the tables generated
+with HAWK's rounding rule (see "Rounding rule"); the former rule's values
+are kept for comparison.
 
 ```sh
 make precision-audit          # from the repository root or e8/ (about 2 minutes)
@@ -169,128 +171,158 @@ that factor.  HAWK `ref-T` equals `ref`.  The full column set is in
 | scheme | variant | B | n | draw SD | draw R−1 | draw R∞−1 | sig SD | sig R−1 | sig R−1 unif. | sig R∞−1 | (6) | a_opt | loss |
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|:-:|--:|--:|
 | hawk | ref | 78 | 256 | -76.6 | -78.3 | -15.5 | -67.6 | -69.3 | -70.0 | -6.5 | yes | 794959 | 1.0001 |
-| hawk | hot64 | 64 | 256 | -63.6 | -2.1 | -1.5 | -54.6 | 154.0 | 77.0 | 225.7 | no | 73 | 1.9085 |
-| hawk | hot32 | 32 | 256 | -31.8 | -4.5 | -3.3 | -22.8 | 31.9 | 16.0 | 72.9 | no | 32 | 18.8413 |
-| e8 | ref | 78 | 256 | -76.4 | -3.7 | -2.4 | -67.3 | 55.0 | 23.9 | 131.5 | yes | 145 | 1.3795 |
-| e8 | hot64 | 64 | 256 | -61.8 | -84.4 | -13.1 | -54.1 | -75.4 | -76.2 | -4.0 | yes | 218091 | 1.0002 |
-| e8 | hot32 | 32 | 256 | -29.7 | -36.6 | -20.8 | -21.8 | -27.6 | -28.5 | -11.8 | no | 33 | 16.8477 |
+| hawk | hot64 | 64 | 256 | -63.6 | -71.0 | -14.4 | -54.6 | -62.0 | -63.0 | -5.4 | yes | 281967 | 1.0002 |
+| hawk | hot32 | 32 | 256 | -31.8 | -40.0 | -10.9 | -22.8 | -31.0 | -31.1 | -1.7 | no | 390 | 7.8980 |
+| e8 | ref | 78 | 256 | -76.1 | -78.5 | -33.2 | -67.1 | -70.4 | -71.0 | -24.2 | yes | 1048576 | 1.0000 |
+| e8 | hot64 | 64 | 256 | -61.9 | -84.4 | -34.2 | -54.1 | -75.4 | -76.0 | -25.2 | yes | 1048576 | 1.0000 |
+| e8 | hot32 | 32 | 256 | -30.1 | -36.6 | -20.8 | -21.9 | -27.6 | -28.5 | -11.8 | no | 33 | 16.8477 |
 | hawk | ref | 78 | 512 | -76.8 | -79.2 | -19.1 | -66.8 | -69.2 | -69.2 | -9.1 | yes | 37286 | 1.0602 |
-| hawk | hot64 | 64 | 512 | -63.4 | -1.0 | -0.6 | -53.4 | 600.7 | 300.4 | 740.7 | no | 5 | 3.847e+22 |
-| hawk | hot32 | 32 | 512 | -31.4 | -4.9 | -3.5 | -21.4 | 49.4 | 24.7 | 124.1 | no | 2 | 2.594e+44329723437 |
-| e8 | ref | 78 | 512 | -76.2 | -23.7 | -3.6 | -66.2 | -14.7 | -15.7 | 119.7 | no | 55 | 8.3128 |
-| e8 | hot64 | 64 | 512 | -62.0 | -84.2 | -11.5 | -53.0 | -74.2 | -74.9 | -1.3 | yes | 13036 | 1.0091 |
-| e8 | hot32 | 32 | 512 | -29.7 | -1.6 | -1.2 | -20.7 | 419.2 | 182.1 | 526.5 | no | 2 | 5.411e+485083819 |
+| hawk | hot64 | 64 | 512 | -63.4 | -69.1 | -13.8 | -53.4 | -59.1 | -59.4 | -3.8 | no | 62 | 1.828e+9 |
+| hawk | hot32 | 32 | 512 | -31.4 | -35.2 | -8.1 | -21.4 | -25.2 | -25.9 | 5.4 | no | 2 | 9.563e+87647848966 |
+| e8 | ref | 78 | 512 | -76.2 | -80.0 | -34.6 | -66.2 | -70.3 | -70.6 | -24.6 | yes | 11216 | 1.0290 |
+| e8 | hot64 | 64 | 512 | -62.0 | -84.2 | -44.2 | -53.0 | -74.2 | -74.9 | -34.2 | yes | 59802 | 1.0036 |
+| e8 | hot32 | 32 | 512 | -30.1 | -35.1 | -19.8 | -20.7 | -26.1 | -26.9 | -9.8 | no | 2 | 2.491e+485789618 |
 | hawk | ref | 78 | 1024 | -76.2 | -78.6 | -12.0 | -65.2 | -67.6 | -68.4 | -0.7 | yes | 4181 | 1.1674 |
-| hawk | hot64 | 64 | 1024 | -63.9 | -67.3 | -7.2 | -52.9 | -56.3 | -57.1 | 19.7 | no | 99 | 2.237e+15 |
-| hawk | hot32 | 32 | 1024 | -31.2 | -4.7 | -3.5 | -20.2 | 108.1 | 54.1 | 253.0 | no | 2 | 9.515e+42284837185 |
-| e8 | ref | 78 | 1024 | -76.2 | -77.8 | -7.8 | -65.4 | -67.7 | -67.7 | 12.9 | yes | 826 | 1.4047 |
-| e8 | hot64 | 64 | 1024 | -61.7 | -83.6 | -16.5 | -51.7 | -72.6 | -73.1 | -5.4 | yes | 93177 | 1.0059 |
-| e8 | hot32 | 32 | 1024 | -29.8 | -37.8 | -6.1 | -19.9 | -26.8 | -27.6 | 44.1 | no | 2 | 1.350e+272507406 |
+| hawk | hot64 | 64 | 1024 | -63.9 | -69.2 | -21.4 | -52.9 | -58.2 | -58.5 | -10.4 | no | 131 | 1.921e+15 |
+| hawk | hot32 | 32 | 1024 | -31.2 | -36.4 | -10.8 | -20.2 | -25.4 | -26.1 | 1.2 | no | 2 | 8.737e+80146477614 |
+| e8 | ref | 78 | 1024 | -76.0 | -77.3 | -26.2 | -65.3 | -67.3 | -67.5 | -15.2 | yes | 84538 | 1.1251 |
+| e8 | hot64 | 64 | 1024 | -62.4 | -83.6 | -30.0 | -51.7 | -72.6 | -73.1 | -19.0 | yes | 81499 | 1.0061 |
+| e8 | hot32 | 32 | 1024 | -30.0 | -37.8 | -17.9 | -20.0 | -26.8 | -27.6 | -6.9 | no | 2 | 2.454e+272503848 |
 
 A positive `log2(R - 1)` means `R` itself is about that power of two.  A
 loss factor above about 2 means the Renyi argument of eq. (57) gives no
 useful bound over `q_s` signatures.
 
+### Rounding rule
+
+Every generated table rounds by upstream HAWK's rule (the generator's
+docstring has the formulas).  HAWK's `sig_gauss()` tables store
+`floor(P(|X| >= v) 2^78)`, so each value carries the floored mass at or
+beyond it minus the floored mass beyond it: the outermost value carries the
+floored mass at or beyond it and is never rounded up, and the most probable
+value takes the remainder.  The generator applies this on each side of the
+mode, in value order for a distribution on Z (the E8 `ref` survival tables,
+the values of a hot tail) and in weight order for the unordered outcomes
+(the hot values followed by the tail, the component CDFs, the `ref` slots).
+HAWK `ref` is upstream's table, unchanged.
+
+Up to commit `dd2c419` the generator floored cumulative masses from the
+other end: hot thresholds `floor(prefix / total 2^B)` with the last tail
+threshold forced to `2^B - 1`, component CDFs likewise, and E8 `ref`
+`T[k] = floor(P(X > lo + k) 2^78)` on both sides of the mode.  The
+outermost value of each hot tail, and E8 `ref`'s `lo`, then took the rest of
+the unit interval: its own mass plus the mass beyond, rounded *up* to the
+grid.  When that mass is about one grid unit its probability is inflated by
+a factor of order 1, and `P_impl^a / P_ideal^(a-1)` amplifies a relative
+error at an entry of probability `p` by `(P/Q)^512`, so one such entry
+decided the order-513 divergence:
+
+| table (former rule) | value | `P_impl` | `P_ideal` | `P/Q` | `log2 P (P/Q)^512` |
+|---|--:|--:|--:|--:|--:|
+| HAWK hot64 n=256, parity 0 | -20 | 2^-71.61 | 2^-72.05 | 1.357 | 154.0 |
+| HAWK hot64 n=512, parity 1 | -25 | 2^-69.96 | 2^-70.69 | 1.651 | 300.4 |
+| HAWK hot32 n=256, parity 1 | -15 | 2^-40.97 | 2^-41.12 | 1.104 | 31.9 |
+| E8 hot32 n=512, class 1 (centre 1/2) | -5 | 2^-53.13 | 2^-53.65 | 1.428 | 210.1 |
+| E8 ref n=256, classes 1, 3, 4 (centre 1/2) | -6 | 2^-76.00 | 2^-76.26 | 1.195 | 55.6 |
+
+The rule changes no hot value, E8 `ref` `lo` or table capacity, so no
+constant-time loop count or byte count; it moves thresholds by a unit or a
+few (most E8 `ref` thresholds below the mode by one).  Seven hot rows lose
+their outermost tail entry, the rounded-up outliers: under HAWK's rule their
+floored mass is 0, so the next value inward carries it (HAWK hot64 n = 256
+parity 0 now ends at -18 and 18, symmetric, instead of -20 with 18; HAWK
+hot64 n = 512 parity 1, HAWK hot32 n = 256 parity 1 and n = 512 parity 0,
+E8 hot32 n = 512 classes 1, 3 and 4 likewise).  Those entries were reached
+with probability about `2^-B P(tail)`, so timing is unaffected.  No
+fixed-seed test vector changed.  Key figures, former rule → HAWK's rule
+(per-draw `R_513 - 1`, eq. (6), loss factor at the optimal order):
+
+| variant | n = 256 | n = 512 | n = 1024 |
+|---|---|---|---|
+| HAWK `hot64` | 2^-2.1, no, 1.91 → 2^-71.0, yes, 1.0002 | 2^-1.0, no, 3.8e22 → 2^-69.1, no, 1.8e9 | 2^-67.3, no, 2.2e15 → 2^-69.2, no, 1.9e15 |
+| HAWK `hot32` | 2^-4.5, no, 18.8 → 2^-40.0, no, 7.90 | 2^-4.9, no → 2^-35.2, no | 2^-4.7, no → 2^-36.4, no |
+| E8 `ref` | 2^-3.7, yes, 1.38 → 2^-78.5, yes, 1.0000 | 2^-23.7, no, 8.31 → 2^-80.0, yes, 1.029 | 2^-77.8, yes, 1.40 → 2^-77.3, yes, 1.125 |
+| E8 `hot64` | 2^-84.4, yes, 1.0002 → unchanged, 1.0000 | 2^-84.2, yes, 1.009 → unchanged, 1.004 | 2^-83.6, yes, 1.006 → unchanged, 1.006 |
+| E8 `hot32` | 2^-36.6, no, 16.8 → unchanged | 2^-1.6, no → 2^-35.1, no | 2^-37.8, no → unchanged |
+
+The SDs move by at most 0.7 bits (both directions), and HAWK `ref` is
+unchanged.
+
 ### Reading
 
 **SD tracks the threshold width and is comparable between the schemes.**
-At equal width the per-draw SD is within 2.2 bits between the schemes:
-2^-76.2 to 2^-76.8 for both at 78 bits; 2^-63.4 to 2^-63.9 (HAWK) against
-2^-61.7 to 2^-62.0 (E8) at 64 bits; 2^-31.2 to 2^-31.8 against 2^-29.7 to
-2^-29.8 at 32 bits.  The per-signature SD bound is within 1.5 bits
-(for example 2^-52.9 against 2^-51.7 at 64 bits, n = 1024).  E8's slightly
-larger values come from its component CDFs (16 thresholds per draw, the
-worst E8 draws by SD) and from 9n/4 draws per signature against HAWK's 2n.
-HAWK's larger hot-table tail mass (`P(tail)` 0.2-2.7% against 3e-7 to 1.4e-5
-for E8, reproducing Step 4) does not show in the SD: tail thresholds are
-`B` bits relative to the tail.  Every SD is below `(entries + 1) 2^-B`
-(maximum ratio 0.29).
+At equal width and n the per-draw SD is within 1.7 bits between the
+schemes: 2^-76.2 to 2^-76.8 (HAWK) against 2^-76.0 to 2^-76.2 (E8) at 78
+bits; 2^-63.4 to 2^-63.9 against 2^-61.9 to 2^-62.4 at 64 bits; 2^-31.2 to
+2^-31.8 against 2^-30.0 to 2^-30.1 at 32 bits.  The per-signature SD bound
+is within 1.2 bits (for example 2^-52.9 against 2^-51.7 at 64 bits, n =
+1024).  E8's slightly larger values come from its component CDFs (16
+thresholds per draw, the worst E8 draws by SD) and from 9n/4 draws per
+signature against HAWK's 2n.  HAWK's larger hot-table tail mass (`P(tail)`
+0.2-2.7% against 3e-7 to 1.4e-5 for E8, reproducing Step 4) does not show
+in the SD: tail thresholds are `B` bits relative to the tail.  Every SD is
+below `(entries + 1) 2^-B` (maximum ratio 0.27).
 
-**The order-513 Renyi divergence is decided by single extreme-tail
-entries, not by the width.**  `P_impl^a / P_ideal^(a-1)` amplifies a
-relative error at an entry of probability `p` by `(P/Q)^512`.  So one entry
-of probability near 2^-70 with `P/Q = 1.36` dominates a distribution whose
-SD is 2^-63.  These entries come from two documented generator rules, so no
-table behaves differently from its documentation:
-
-- **Hot tables, last tail entry.**  The tail is truncated after the first
-  threshold equal to `2^B - 1`.  That entry takes the rest of the unit
-  interval, i.e. its own mass plus everything beyond, rounded up to the
-  `2^-B` grid of the tail.  When its own mass is about `2^-B P(tail)`, its
-  probability is inflated by a factor of order 1:
-
-  | table | value | `P_impl` | `P_ideal` | `P/Q` | `log2 P (P/Q)^512` |
-  |---|--:|--:|--:|--:|--:|
-  | HAWK hot64 n=256, parity 0 | -20 | 2^-71.61 | 2^-72.05 | 1.357 | 154.0 |
-  | HAWK hot64 n=512, parity 1 | -25 | 2^-69.96 | 2^-70.69 | 1.651 | 300.4 |
-  | HAWK hot32 n=256, parity 1 | -15 | 2^-40.97 | 2^-41.12 | 1.104 | 31.9 |
-  | E8 hot32 n=512, class 1 (centre 1/2) | -5 | 2^-53.13 | 2^-53.65 | 1.428 | 210.1 |
-
-  HAWK hot64 n=1024 happens to end at an entry with `P/Q = 1.0067`
-  (`R - 1 = 2^-67.3` per coordinate), and every E8 hot64 class ends at an
-  entry with `P/Q - 1 <= 2^-11.5`.  E8's narrower 1D distributions (`s` =
-  0.64 against HAWK's 1.01-1.30 for `y`) make consecutive tail masses differ
-  by large factors, so its truncation point rarely lands on an entry of mass
-  about `2^-B P(tail)`.  This is a property of where the truncation lands,
-  not of the lattice.  The forced maximum also gives the truncated values
-  probability 0, which is what makes the reverse direction infinite.
-- **E8 `ref`, mass below `lo` placed on `lo`.**  `lo` is the largest value
-  with `floor(P(X < lo) 2^78) = 0`, and the table gives it
-  `(2^78 - T[0]) / 2^78`.  That is its own mass plus the mass below it,
-  rounded up to the 2^-78 grid.  For the residue-1/2 classes (classes 1, 3,
-  4), `lo = -6` has
-  `P_impl = 2^-76.00` against `P_ideal = 2^-76.26` (`P/Q = 1.195`, n = 256),
-  `1.084` (n = 512) and `1.0044` (n = 1024), giving per-draw `R - 1` =
-  2^-3.7, 2^-23.7 and 2^-77.8.  At the other end, `hi` carries
-  `floor(P(X >= hi) 2^78) / 2^78`, the floored mass at or beyond it, as the
-  extreme entry of HAWK's one-sided table does.  Floored ends err by less
-  than one 2^-78 unit including the mass beyond, and HAWK `ref`'s largest
-  `P/Q - 1` is 2^-12.0.
+**With HAWK's rule, the order-513 divergence tracks the width and the tail
+mass.**  Every value but the mode is rounded by less than one grid unit,
+and the extreme values are rounded down, so the divergence is set by the
+floored deficit of the extreme entries:
+`sum P^a Q^(1-a) - 1 = sum Q phi(P/Q)` with `phi(r) = r^a - 1 - a (r - 1)`,
+and an entry floored by `d` grid units contributes at most about `a d`
+units, so `R_a - 1` is about the floored mass at the extremes, of order
+`2^-B P(tail)` for a hot table and `2^-78` for a `ref` table.  For example,
+HAWK `hot64` n = 512 parity 0: the two entries `x = +-24` (`P/Q = 0.963`,
+probability 2^-65.3) make up the whole of `R - 1 = 2^-69.1`; E8 `ref`
+n = 1024, residue-1/2 classes: the entries `-6` and `7` (`P/Q = 0.970`,
+2^-73.2) give `R - 1 = 2^-77.3`.  The `ref` divergences are therefore at the
+78-bit floor (HAWK 2^-78.3 to 2^-79.2, E8 2^-77.3 to 2^-80.0 per draw).  At
+64 bits E8's tail is 2^-16.1 to 2^-21.6 of the mass, so its tail entries
+are resolved to 80 bits or more and E8 `hot64` reaches 2^-83.6 to 2^-84.4,
+while HAWK's tail of 2^-5.2 to 2^-9.0 leaves HAWK `hot64` at 2^-69.1 to
+2^-71.0.  This difference is structural (K = 6 hot values cover more of
+E8's narrower 1D distributions: `s` = 0.64 against HAWK's 1.01-1.30 for
+`y`), not an artefact of the rounding.
 
 Consequences at equal width:
 
-- **78 bits, `ref` against `ref`** (the headline pair).  The SDs are the
-  same.  HAWK `ref` meets the spec's criteria at every n.  E8 `ref` meets
-  eq. (6) at n = 256 and 1024 and the 2^-78 per-draw criterion only at
-  n = 1024 (2^-77.8, against HAWK's 2^-78.6).  Its loss factors are 1.38,
-  8.31 and 1.40, against HAWK's 1.0001, 1.06 and 1.17.  E8 `ref`'s
-  component slot tables are not the cause: their `R - 1` is at most
-  2^-142, and the uniform-mass taus are exact.  The cause is the `lo`
-  placement of the residue-1/2 1D table.
-- **64 bits, `hot64`.**  The SDs are comparable (HAWK 1.4-2.2 bits better
-  per draw, at most 1.2 bits per signature).  By RD, E8 `hot64` meets every criterion (per-draw
-  `R - 1` 2^-83.6 to 2^-84.4, loss 1.0002 to 1.009, better than HAWK
-  `ref`).  HAWK `hot64` fails at every n because of its last tail entries.
-- **32 bits, `hot32`.**  The SDs are comparable (HAWK 1.4-2.1 bits better
-  per draw, at most 1.0 bit per signature).  E8 `hot32` fails at n = 512 on
-  its class-1 last tail entry; at n = 256 and 1024 it is within 2^-36.6 and
-  2^-37.8 per draw, against HAWK's 2^-4.5 and 2^-4.7.  Neither scheme meets the spec's RD criteria at any n.  The
-  per-transcript loss is unbounded except at n = 256 (`q_s` = 2^32), where
-  both are near 17-19.
+- **78 bits, `ref` against `ref`** (the headline pair).  The SDs agree
+  within 0.7 bits per draw and per signature.  Both meet eq. (6) at every
+  n.  HAWK `ref` meets the spec's per-coefficient criterion
+  `R_513 - 1 < 2^-78` at every n; E8 `ref` per draw at n = 256 and 512
+  (2^-78.5, 2^-80.0) and not quite at n = 1024 (2^-77.3, from the floored
+  entries above).  The loss factors are 1.0000, 1.029 and 1.125 (E8)
+  against 1.0001, 1.060 and 1.167 (HAWK).  E8 `ref`'s component slot
+  tables contribute `R - 1` of at most 2^-141.9.
+- **64 bits, `hot64`.**  The SDs are comparable (HAWK 1.4-1.7 bits better
+  per draw, at most 1.2 bits per signature).  By RD, E8 `hot64` meets every
+  criterion (loss 1.0000 to 1.006); HAWK `hot64` meets eq. (6) at n = 256
+  (loss 1.0002) and fails at n = 512 and 1024 (loss 1.8e9, 1.9e15): its
+  per-draw `R - 1` of about 2^-69 is what a 64-bit table with HAWK's tail
+  mass gives.
+- **32 bits, `hot32`.**  The SDs are comparable (HAWK 1.2-1.7 bits better
+  per draw, at most 1.0 bit per signature).  Neither scheme meets the spec's
+  RD criteria at any n (per draw 2^-35.2 to 2^-40.0 for HAWK, 2^-35.1 to
+  2^-37.8 for E8).  The per-transcript loss is unbounded except at n = 256
+  (`q_s` = 2^32), where it is 7.9 (HAWK) and 16.8 (E8).
 
-So neither scheme's tables are materially worse by SD at the same width.
-By the spec's RD, the generated tables' end-point rounding decides the
-outcome, and it favours E8 at 64 bits and HAWK at 78 bits.
-A generator rule that puts the floored mass at or beyond the extreme entry
-on it, as HAWK's one-sided `ref` table does, instead of rounding the
-remainder up, would remove the large outliers.  That is a table change,
-outside this step.
+So neither scheme's tables are materially worse by SD at the same width,
+and with one rounding rule for both the RD reflects the width (and, for the
+hot tables, the tail mass) rather than single entries.
 
 ### Other observations
 
-- **Exact first-entry offset.**  With `target <= threshold` and
-  `q_{-1} = -1`, the first entry of every hot CDF gets one extra unit
-  (`q_0 + 1` of `2^B`).  For the E8 component CDFs of the uniform-mass taus
-  (`q_0 = 2^B / 16` exactly) this is a relative error of exactly 2^-60
-  (hot64) or 2^-28 (hot32), the `component` rows' `R∞ - 1`.
+- **Uniform components are exact.**  The E8 component distributions of the
+  16 uniform-mass taus per logn (each component exactly 1/16) are
+  represented exactly by every variant (`R∞ - 1 = 0`).  Under the former
+  rule the hot CDFs' first entry got one extra unit (`q_{-1} = -1`), a
+  relative error of exactly 2^-60 (hot64) or 2^-28 (hot32).
 - **Zero-probability entries.**  HAWK `ref`'s parity-1 table ends with a 0
   threshold (`lo` entry `0x0`), so its last value has probability 0
   (`zero_entries` = 1).  No hot table and no E8 `ref` table has one.
 - **Exact symmetries.**  E8 classes with the same centre residue have the
   same row up to the integer shift.  Residues 1/4 and 3/4 mirror each
   other, so classes 0, 2 and 10 (residue 0), classes 1, 3 and 4 (1/2), and
-  classes 5-9, 11 and 12 (1/4, 3/4) have identical measures.  The 16
-  equal-mass E8 `ref` components per logn are exact.
+  classes 5-9, 11 and 12 (1/4, 3/4) have identical measures.
 
 ## Values for the revised paper §6.3
 
@@ -305,12 +337,13 @@ values to cite:
 - truncation: true ideal mass outside the generator's support `<= 2^-1488`
   per distribution (n = 1024: E8 1D `s = 0.649`, radius 44.97);
 - per-signature SD bound (union bound, worst target), n = 256 / 512 / 1024:
-  HAWK `ref` 2^-67.6 / 2^-66.8 / 2^-65.2, E8 `ref` 2^-67.3 / 2^-66.2 /
-  2^-65.4; HAWK `hot64` 2^-54.6 / 2^-53.4 / 2^-52.9, E8 `hot64` 2^-54.1 /
+  HAWK `ref` 2^-67.6 / 2^-66.8 / 2^-65.2, E8 `ref` 2^-67.1 / 2^-66.2 /
+  2^-65.3; HAWK `hot64` 2^-54.6 / 2^-53.4 / 2^-52.9, E8 `hot64` 2^-54.1 /
   2^-53.0 / 2^-51.7; HAWK `hot32` 2^-22.8 / 2^-21.4 / 2^-20.2, E8 `hot32`
-  2^-21.8 / 2^-20.7 / 2^-19.9;
+  2^-21.9 / 2^-20.7 / 2^-20.0;
 - per-draw `R_513 - 1` against the spec's 2^-78 and the loss factor of
-  eq. (57) at the optimal order: the Results table above;
+  eq. (57) at the optimal order: the Results table above (HAWK's rounding
+  rule for every table; the former rule's figures in "Rounding rule");
 - the spec's HAWK figures reproduced (2^-79.19 and 2^-78.57; 1.0602 at
   `a = 37286`, 1.1674 at `a = 4181`).
 

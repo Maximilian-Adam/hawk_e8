@@ -360,11 +360,19 @@ one discrete-Gaussian routine: E8 for `sigma_sign` = 3.592, 3.631, 3.669 (all
 `base_norm2`, `coord_class`, and the `ref` residue and slot tables), HAWK for
 upstream's `sigma_sign` = 1.010, 1.278, 1.299 (both parities; the `ref` table
 reproduces upstream's 78-bit table exactly, which the generator and
-`test_hawk_variants` check).  Thresholds are exact floors of
-`prefix / total * 2^B`; values within `10^-130` of an integer are exact
-symmetries (for example `P(X > 0) = 1/2` at centre 1/2) and are taken as that
-integer.  The rules are in the generator's docstring.  `make tables`
-regenerates the headers and fails if the committed ones differ.
+`test_hawk_variants` check).  Every table uses upstream HAWK's rounding
+rule (its `sig_gauss()` tables store `floor(P(|X| >= v) 2^78)`): on each side
+of the mode, a value gets the floored mass at or beyond it minus the floored
+mass beyond it, so the outermost value carries the floored mass at or beyond
+it and is never rounded up, and the mode takes the remainder (in value order
+for a distribution on Z, in weight order for the hot list with its tail, the
+components and the slots).  Up to commit `dd2c419` the hot tables, component
+CDFs and E8 `ref` tables floored cumulative masses from the other end, which
+rounded the outermost value up (see "Precision").  The floors are exact;
+values within `10^-130` of an integer are exact symmetries (for example
+`P(X > 0) = 1/2` at centre 1/2) and are taken as that integer.  The rules
+are in the generator's docstring.  `make tables` regenerates the headers and
+fails if the committed ones differ.
 
 The signing path (`e8_sign.c`, `e8_api.c`, `e8_codec.c`, `e8_f2.c`,
 `e8_ntt.c`, `e8_math.c`, `e8_sampler.c`, the variant TUs, `cmn_rng`,
@@ -379,12 +387,13 @@ for both schemes.  The norm bounds of the public API are integer constants
 `e8_verify_bound_from_sigma()` with the default `sigma_verify`.
 
 The former runtime `double` builder survives only for tests and the tools
-that sweep `sigma_sign` (`e8_sampler_runtime.c`).  Its double weights resolve
-about 53 bits, so the low bits of nearly every 64-bit threshold differ from
-the exact generated ones (at most 5,840 units of 2^-64; `test_e8_tables`
-counts them); hot values agree, sampling on either table set gives the same
-outputs in the tests, and none of the fixed-seed vectors contains a tail
-draw, so the integer tail left them unchanged.
+that sweep `sigma_sign` (`e8_sampler_runtime.c`), with the former rounding
+rule.  Its double weights resolve about 53 bits, so the low bits of nearly
+every 64-bit threshold differ from the exact generated ones (at most 5,840
+units of 2^-64; `test_e8_tables` counts them); hot values agree, sampling on
+either table set gives the same outputs in the tests, and none of the
+fixed-seed vectors contains a tail draw, so neither the integer tail nor the
+change of rounding rule changed them.
 
 ### Precision
 
@@ -396,10 +405,16 @@ hawk-spec.pdf, section 6.5) per draw, per coordinate or block, and per
 signature.  Method, results and findings: `docs/precision_audit.md`;
 per-variant summary (joined onto timing rows in Step 7):
 `docs/precision_summary.csv`.  In short, the SD at equal width is within
-about 2 bits between the schemes (78 bits: about 2^-66 per signature).  The
-order-513 divergence is decided by single extreme-tail entries, which the
-generator's end rules round up: the last hot tail entry, and E8 `ref`'s `lo`
-for the residue-1/2 classes.  HAWK `ref` reproduces the spec's figures.
+about 2 bits between the schemes (78 bits: about 2^-66 per signature), and
+HAWK `ref` reproduces the spec's figures.  With HAWK's rounding rule the
+order-513 divergence is set by the floored deficit of the extreme entries,
+about `2^-B P(tail)` per draw, so it tracks the threshold width and the hot
+tables' tail mass.  Eq. (6) of the spec holds per signature for both `ref`
+variants and E8 `hot64` at every n (loss factors at most 1.17), for HAWK
+`hot64` only at n = 256, and for neither `hot32`.  The
+former rule rounded the extreme entries up, and single entries then decided
+the divergence (E8 `ref` loss 8.3 at n = 512, HAWK `hot64` failing at every
+n).
 
 ## Signing And Verification
 

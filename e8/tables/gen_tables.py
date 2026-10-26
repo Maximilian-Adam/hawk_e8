@@ -11,24 +11,42 @@ significant digits from the exact rational exponent; every threshold is the
 floor of an exact-to-PREC-digits value, and the generator fails if any value
 lies within 10^-(PREC-30) of an integer, so the floors are exact.
 
+Rounding rule (every generated distribution, all variants of both
+schemes): upstream HAWK's. Its sig_gauss() tables store floor(P(|X| >= v)
+2^78), so each value carries the floored mass at or beyond it minus the
+floored mass beyond it, the outermost carries the floored mass at or
+beyond it (never rounded up), and the most probable value takes the
+remainder. The generator applies this on each side of the mode, in value
+order for a distribution on Z and in weight order (one side, outward =
+decreasing weight; ties: lower value or index first) for the unordered
+outcomes (the hot values followed by the tail, which lies beyond them;
+the components; the slots). With
+M(v) the integer mass of v out of 2^B and v_1, v_2, ... the outcomes of
+one side in order away from the mode:
+    M(v_i) = floor(S_i 2^B) - floor(S_{i+1} 2^B),  S_i = P(v_i) + P(v_{i+1}) + ...,
+    M(mode) = 2^B - (sum of the other M).
+Outcomes with M = 0 (only at the outer ends) are left out: the mass
+beyond the outermost kept value is in its floored mass.
+
 Hot tables (variants hot64 and hot32, B = 64 or 32 bits, K = 6):
 
   - the K highest-weight values of the support ("tiny" values), in weight
-    order (ties: lower value first), with cumulative thresholds
-        q_i = min(floor(prefix_i / total * 2^B), 2^B - 1);
-    a value whose threshold does not exceed the previous one is skipped
-    (it stays in the tail); if the tail is empty, the last q is 2^B - 1;
-  - the tail: the remaining support values in weight order, with
-    thresholds of their cumulative mass relative to the tail mass,
-        r_j = min(floor(tail_prefix_j / tail_total * 2^B), 2^B - 1),
-    the last one forced to 2^B - 1 and the list truncated after the first
-    entry equal to 2^B - 1 (later entries are unreachable);
+    order (ties: lower value first), and the tail as one outcome after
+    them, rounded by the rule (one side, mode first); thresholds
+        q_i = M(v_0) + ... + M(v_i) - 1;
+    if a tiny value gets M = 0, it and the lighter ones move to the tail;
+    if the tail gets M = 0, it is empty and the last q is 2^B - 1;
+  - the tail: the remaining support values, rounded relative to the tail
+    mass by the rule in value order around the heaviest tail value, listed
+    in weight order with thresholds r_j = M(w_0) + ... + M(w_j) - 1; the
+    last one is 2^B - 1;
   - sampling: u = next B-bit word; the first i with u <= q_i is the value;
     otherwise u' = next B-bit word, and the first j with u' <= r_j.
 
   E8 also has per-tau component CDFs over the 16 RM(1,3) components,
-        c_i = min(floor(prefix_i / total * 2^B), 2^B - 1), c_15 = 2^B - 1,
-  with component mass the product of the eight 1D normalisers.
+        c_i = M(0) + ... + M(i) - 1,  c_15 = 2^B - 1,
+  with component mass the product of the eight 1D normalisers, rounded
+  by the rule in weight order.
 
 Reference tables (variant ref, 78 bits, constant-time full scans):
 
@@ -38,14 +56,21 @@ Reference tables (variant ref, 78 bits, constant-time full scans):
     ../src/hawk_sign.c, which it reads but never writes.
   - E8: two-sided survival tables per centre residue (centres are k/4, so
     the four residues r/4, r = 0..3, give every class up to an integer
-    shift): T[k] = floor(P(X > lo + k) 2^78) for k = 0 .. hi - lo - 1, where
-    lo is the largest v with floor(P(X < v) 2^78) = 0 and hi the smallest v
-    with floor(P(X > v) 2^78) = 0; the value is lo + #{k : u < T[k]} for a
-    78-bit uniform u. Component selection uses per-tau canonical slots:
-    the 16 components sorted by mass type (counts of coordinates with
-    residue 0, 1/4 or 3/4, and 1/2), then by index; tau selects one of the
-    row classes (the distinct sorted type lists) and a permutation from
-    slot to component, and S[j] = floor(P(slot > j) 2^78), j = 0..14.
+    shift): the values lo .. hi with M >= 1 under the rule, and
+    T[k] = M(lo + k + 1) + ... + M(hi) for k = 0 .. hi - lo - 1 (above the
+    mode, T[k] = floor(P(X > lo + k) 2^78); below it,
+    T[k] = 2^78 - floor(P(X <= lo + k) 2^78)); the value is
+    lo + #{k : u < T[k]} for a 78-bit uniform u. Component selection uses
+    per-tau canonical slots: the 16 components sorted by mass type (counts
+    of coordinates with residue 0, 1/4 or 3/4, and 1/2), then by index; tau
+    selects one of the row classes (the distinct sorted type lists) and a
+    permutation from slot to component, and S[j] = M(slot j + 1) + ... +
+    M(slot 15), j = 0..14, with the slot masses rounded by the rule.
+
+Up to commit dd2c419 the hot tables, component CDFs and E8 ref tables
+floored cumulative masses from the other end instead, which rounded the
+outermost value (the last tail value, E8 ref's lo) up; see
+e8/docs/precision_audit.md.
 
 Parameters: E8 sigma_sign = 3.592, 3.631, 3.669 (logn 8, 9, 10), 1D sigma
 sigma_sign / sqrt(32), centres num/32; HAWK sigma_sign = 1.010, 1.278,
@@ -96,10 +121,51 @@ def floor_scaled(num, den, bits, what=""):
     v = num / den * (D(2) ** bits)
     near = int(v.to_integral_value(rounding=decimal.ROUND_HALF_EVEN))
     if abs(v - near) < MARGIN:
-        if num != den and num != 0:
+        # Values below MARGIN (the far tail of the support) floor to 0
+        # either way; they are not exact symmetries.
+        if num != den and num != 0 and near != 0:
             NEAR_INTEGER.append((what, bits, near))
         return near
     return int(v.to_integral_value(rounding=decimal.ROUND_FLOOR))
+
+
+def rule_masses(masses, total, bits, what, mode, sides):
+    """
+    Integer masses (summing to 2^bits) of outcomes with decimal masses
+    `masses` out of `total`, by the rounding rule (module docstring):
+    `sides` lists, per side of the outcome `mode`, the outcome indices in
+    order away from it.
+    """
+    out = [0] * len(masses)
+    for side in sides:
+        acc = D(0)
+        beyond = 0
+        for i in reversed(side):
+            acc += masses[i]
+            at = floor_scaled(acc, total, bits, what)
+            out[i] = at - beyond
+            beyond = at
+    out[mode] = (1 << bits) - sum(out)
+    assert out[mode] > 0
+    return out
+
+
+def weight_rule_masses(masses, total, bits, what):
+    """The rule in weight order: mode first (ties: lower index)."""
+    order = sorted(range(len(masses)), key=lambda i: (-masses[i], i))
+    return rule_masses(masses, total, bits, what, order[0], [order[1:]])
+
+
+def value_rule_masses(dg, xs, total, bits, what):
+    """The rule in value order for values xs (sorted) of dg: {x: M}."""
+    mode = min(xs, key=lambda x: (abs(Fraction(x) - dg.c), x))
+    m = xs.index(mode)
+    sides = [list(range(m - 1, -1, -1)), list(range(m + 1, len(xs)))]
+    M = rule_masses([dg.w[x] for x in xs], total, bits, what, m, sides)
+    nz = [i for i in range(len(xs)) if M[i] > 0]
+    # Zero masses only at the outer ends (masses decrease away from the mode).
+    assert nz == list(range(nz[0], nz[-1] + 1))
+    return {xs[i]: M[i] for i in nz}
 
 
 def double_bits(text):
@@ -131,53 +197,44 @@ class DGauss:
 def hot_row(dg, bits):
     """Hot table of one distribution: (tiny [(value, q)], tail [(value, r)])."""
     order = dg.weight_order()
-    full = (1 << bits) - 1
+    k = K_HOT
+    while True:
+        tiny_x = order[:k]
+        rest = order[k:]
+        tail_total = sum((dg.w[x] for x in rest), D(0))
+        # Outcomes: the tiny values, then the tail, one side in weight order.
+        M = rule_masses([dg.w[x] for x in tiny_x] + [tail_total], dg.total,
+                        bits, "tiny", 0, [list(range(1, k + 1))])
+        zero = [i for i in range(1, k) if M[i] == 0]
+        if not zero:
+            break
+        k = zero[0]
     tiny = []
-    mass = D(0)
-    for x in order[:K_HOT]:
-        prefix = mass + dg.w[x]
-        q = min(floor_scaled(prefix, dg.total, bits, "tiny"), full)
-        if tiny and q <= tiny[-1][1]:
-            continue
+    q = -1
+    for x, m in zip(tiny_x, M):
+        q += m
         tiny.append((x, q))
-        mass = prefix
-    used = set(x for x, _ in tiny)
-    rest = [x for x in order if x not in used]
-    tail_total = dg.total - mass
     tail = []
-    if rest and tail_total > 0:
-        tprefix = D(0)
+    if M[k] > 0:
+        mass = value_rule_masses(dg, sorted(rest), tail_total, bits, "tail")
+        r = -1
         for x in rest:
-            tprefix += dg.w[x]
-            r = min(floor_scaled(tprefix, tail_total, bits, "tail"),
-                    full)
-            tail.append((x, r))
-            if r == full:
-                break
-        tail[-1] = (tail[-1][0], full)
+            if x in mass:
+                r += mass[x]
+                tail.append((x, r))
+        assert r == (1 << bits) - 1
     else:
-        tiny[-1] = (tiny[-1][0], full)
+        assert q == (1 << bits) - 1
     return tiny, tail
 
 
 def survival_table(dg, bits=78):
     """Two-sided 78-bit survival table: (lo, [T[k]])."""
-    scale = D(2) ** bits
-    xs = list(range(dg.lo, dg.hi + 1))
-    below = {}
-    acc = D(0)
-    for x in xs:
-        below[x] = acc          # P(X < x) * total
-        acc += dg.w[x]
-    lo = max(x for x in xs if int(below[x] / dg.total * scale) == 0)
-    above = {}
-    acc = D(0)
-    for x in reversed(xs):
-        above[x] = acc          # P(X > x) * total
-        acc += dg.w[x]
-    hi = min(x for x in xs if int(above[x] / dg.total * scale) == 0)
-    table = [floor_scaled(above[v], dg.total, bits, "ref 1D c=%s" % dg.c)
-             for v in range(lo, hi)]
+    mass = value_rule_masses(dg, list(range(dg.lo, dg.hi + 1)), dg.total,
+                             bits, "ref 1D c=%s" % dg.c)
+    lo, hi = min(mass), max(mass)
+    table = [sum(mass[v] for v in range(lo + k + 1, hi + 1))
+             for k in range(hi - lo)]
     assert all(t > 0 for t in table)
     assert all(table[i] > table[i + 1] for i in range(len(table) - 1))
     return lo, table
@@ -412,13 +469,14 @@ def write_e8_hot(out, geom, bits, dists_by_logn):
                     m *= totals[cls]
                 masses.append(m)
             total = sum(masses, D(0))
-            acc = D(0)
+            M = weight_rule_masses(masses, total, bits,
+                                   "component tau=%d" % tau)
             qs = []
+            q = -1
             for c in range(16):
-                acc += masses[c]
-                qs.append(min(floor_scaled(acc, total, bits,
-                    "component tau=%d" % tau), full))
-            qs[15] = full
+                q += M[c]
+                qs.append(q)
+            assert qs[15] == full
             comp.append("\t\t{ /* tau %d */\n" % tau
                         + fmt_list(qs, hx, 4 if bits == 64 else 6, "\t\t\t")
                         + "\n\t\t}")
@@ -494,10 +552,8 @@ def write_e8_ref(out, geom, dists_by_logn):
         for key in row_classes:
             masses = [z[0] ** a * z[1] ** b * z[2] ** c for (a, b, c) in key]
             total = sum(masses, D(0))
-            surv = []
-            for j in range(15):
-                surv.append(floor_scaled(sum(masses[j + 1:], D(0)), total,
-                    78, "ref slot"))
+            M = weight_rule_masses(masses, total, 78, "ref slot")
+            surv = [sum(M[j + 1:]) for j in range(15)]
             slot_hi.append([v >> 63 for v in surv])
             slot_lo.append([v & ((1 << 63) - 1) for v in surv])
         f.write("static const e8_ref_tables e8_ref_tables_logn%d = {\n" % logn)
