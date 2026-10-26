@@ -416,6 +416,20 @@ former rule rounded the extreme entries up, and single entries then decided
 the divergence (E8 `ref` loss 8.3 at n = 512, HAWK `hot64` failing at every
 n).
 
+### Validation
+
+`make validate` (`e8/tools/validate.py`; `make validate-quick` for small
+counts) signs and verifies 10^6 signatures per variant and n for both
+schemes (no-debug build, 10% of the split variants' signatures with 4
+threads), reruns every E8 shard in the debug build (block coset, parity and
+norm checks, schoolbook reconstruction cross-check; identical signature
+digests required), and tests every 1D table, every E8 component and block
+norm distribution per tau, the product coordinates by class and the
+signature norm against the exact implemented distributions of the
+committed tables (chi-square and G-tests, Holm at 10^-3, with negative
+controls).  Method, sample sizes, seeds and results: `docs/validation.md`;
+per-variant summary: `docs/validation_summary.csv`.
+
 ## Signing And Verification
 
 The sampler-backed signer samples in the internal E8 coordinate coset:

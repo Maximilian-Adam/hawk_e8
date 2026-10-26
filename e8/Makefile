@@ -29,7 +29,7 @@ E8_API_OBJ = build/e8_api.o
 E8_PROFILE_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_codec.o build/e8_vrfy.o build/profile/e8_sign.o build/e8_sign_legacy.o build/profile/e8_api.o
 
 E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler bin/test_e8_api bin/test_e8_tables bin/test_e8_variants bin/test_e8_ref_ct bin/test_hawk_variants bin/test_cmn_common
-E8_TOOL_PROGS = bin/e8_histograms bin/e8_rejection_summary bin/e8_validation_summary
+E8_TOOL_PROGS = bin/e8_histograms bin/e8_rejection_summary bin/e8_validation_summary bin/e8_correctness bin/e8_correctness_nodebug bin/e8_distribution_sample
 E8_BENCH_PROGS = bin/e8_sampler_bench bin/e8_sampler_profile_bench bin/e8_sign_bench bin/e8_sign_profile_bench bin/hawk_sign_profile_bench
 HAWK_PROFILE_SIGN_SOURCE = build/hawk_sign_profile.c
 # Benchmark-only HAWK variants (compare/hawk_variants/): the variant signer
@@ -56,6 +56,10 @@ E8_PROFILE_SAMPLER_CFLAGS = $(E8_CFLAGS) -DHAWK_E8_PROFILE_SAMPLER=1
 HAWK_PROFILE_SIGN_CFLAGS = $(CFLAGS) -DHAWK_AVX2=0 -DHAWK_PROFILE_SIGN=1
 E8_THREAD_CFLAGS ?= -pthread
 E8_THREAD_LIBS ?= -pthread
+# The E8 objects without the debug checks (bin/e8_correctness_nodebug,
+# Step 6 validation); see the rules below.
+E8_NODEBUG_CFLAGS = $(E8_CFLAGS) -DHAWK_E8_DEBUG_CHECKS=0
+E8_NODEBUG_OBJ = build/nodebug/e8_math.o build/nodebug/e8_f2.o build/nodebug/e8_ntt.o build/nodebug/e8_codec.o build/nodebug/e8_vrfy.o build/nodebug/e8_sign.o build/nodebug/e8_sign_legacy.o build/nodebug/e8_api.o build/nodebug/e8_sampler.o build/nodebug/e8_sampler_ref.o build/nodebug/e8_sampler_hot64.o build/nodebug/e8_sampler_hot32.o build/nodebug/e8_sampler_variants.o build/nodebug/e8_sampler_runtime.o
 
 all: build bin $(E8_TEST_PROGS) $(E8_TOOL_PROGS) $(E8_BENCH_PROGS)
 test-e8: build bin $(E8_TEST_PROGS)
@@ -102,6 +106,19 @@ e8-sigma-verify-sweep: build bin bin/e8_rejection_summary
 e8-sigma-sign-sweep: build bin bin/e8_rejection_summary
 	@E8_SIGMA_SIGN_SWEEP=1 ./bin/e8_rejection_summary > e8_sigma_sign_sweep.csv
 	@printf 'wrote e8_sigma_sign_sweep.csv\n'
+
+# Step 6 validation (tools/validate.py, see docs/validation.md): signature
+# correctness of every variant of both schemes (no-debug build), the E8
+# debug-build run, sampler histograms and the distribution tests. Outputs
+# validation_quick_*.csv / validation_*.csv in e8/. validate fails if the
+# fresh validation_summary.csv differs from the committed
+# docs/validation_summary.csv (to update it, copy it there).
+VALIDATE_CSV = $(foreach p,validation_ validation_quick_,$(foreach f,correctness hist tests controls ideal signorm summary,$(p)$(f).csv))
+VALIDATE_BINS = bin/e8_correctness bin/e8_correctness_nodebug bin/e8_distribution_sample
+validate-quick: build bin $(VALIDATE_BINS)
+	python3 -I tools/validate.py --quick --out-dir .
+validate: build bin $(VALIDATE_BINS)
+	python3 -I tools/validate.py --out-dir . --check docs/validation_summary.csv
 
 # Regenerate the sampler tables into build/tables and fail if any differs
 # from the committed tables/ (to update them, run the generator command in
@@ -171,6 +188,7 @@ bin:
 clean:
 	-rm -rf build bin
 	-rm -f e8_variant_sampler_bench.csv e8_hist_public.csv e8_hist_signatures.csv e8_sampler_bench.csv e8_sampler_profile_bench.csv e8_sign_bench.csv hawk_sign_profile_bench.csv e8_rejection_summary.csv e8_validation_summary.csv e8_validation_shell.csv e8_validation_coset.csv e8_validation_global.csv e8_validation_stability.csv e8_sigma_verify_sweep.csv e8_sigma_sign_sweep.csv precision_audit.csv precision_audit_dists.csv precision_summary.csv
+	-rm -f $(VALIDATE_CSV)
 
 # Generated upstream HAWK sources:
 $(HAWK_STAMP): ../build.py ../src/*.c ../src/*.h
@@ -217,6 +235,19 @@ bin/e8_histograms: tools/e8_histograms.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ)
 # links the profiled sampler.
 bin/e8_rejection_summary: tools/e8_rejection_summary.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_PROFILE_OBJ)
 	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) -o bin/e8_rejection_summary tools/e8_rejection_summary.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_PROFILE_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+# Step 6 validation (docs/validation.md). The correctness tool is built
+# twice: with the default flags (E8 debug checks on) and without the E8
+# debug checks (HAWK_E8_DEBUG_CHECKS=0), from its own E8 objects in
+# build/nodebug/, for the long run; the default objects keep the default
+# flags. Only the E8 sources use the flag; HAWK, the HAWK variants and the
+# shared modules are the same objects in both.
+E8_CORRECTNESS_DEPS = $(HAWKV_HEAD) $(E8_HEAD) $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(CMN_OBJ)
+bin/e8_correctness: tools/e8_correctness.c $(E8_CORRECTNESS_DEPS) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_correctness tools/e8_correctness.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_correctness_nodebug: tools/e8_correctness.c $(E8_CORRECTNESS_DEPS) $(E8_NODEBUG_OBJ)
+	$(CC) $(E8_NODEBUG_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_correctness_nodebug tools/e8_correctness.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) $(E8_NODEBUG_OBJ) $(CMN_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_distribution_sample: tools/e8_distribution_sample.c $(E8_CORRECTNESS_DEPS) $(E8_TABLES) build/e8_math.o $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) $(HAWKV_INC) -o bin/e8_distribution_sample tools/e8_distribution_sample.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) $(HAWKV_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/e8_validation_summary: tools/e8_validation_summary.c compare/hawk_shim.h $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_validation_summary tools/e8_validation_summary.c $(HAWK_OBJ_NOSIGN) $(HAWK_SHIM_OBJ) build/e8_math.o $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 
@@ -335,6 +366,17 @@ build/e8_sampler_variants.o: src/e8_sampler_variants.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_sampler_variants.o src/e8_sampler_variants.c
 build/e8_sampler_runtime.o: src/e8_sampler_runtime.c $(E8_HEAD) $(E8_TABLES)
 	$(CC) $(E8_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -c -o build/e8_sampler_runtime.o src/e8_sampler_runtime.c
+
+# E8 objects without the debug checks, for bin/e8_correctness_nodebug.
+build/nodebug/e8_sampler_hot64.o: src/e8_sampler_hot.c $(E8_HEAD) $(E8_TABLES)
+	-mkdir -p build/nodebug
+	$(CC) $(E8_NODEBUG_CFLAGS) $(E8_INC) -DE8_HOT_BITS=64 -c -o build/nodebug/e8_sampler_hot64.o src/e8_sampler_hot.c
+build/nodebug/e8_sampler_hot32.o: src/e8_sampler_hot.c $(E8_HEAD) $(E8_TABLES)
+	-mkdir -p build/nodebug
+	$(CC) $(E8_NODEBUG_CFLAGS) $(E8_INC) -DE8_HOT_BITS=32 -c -o build/nodebug/e8_sampler_hot32.o src/e8_sampler_hot.c
+build/nodebug/%.o: src/%.c $(E8_HEAD) $(E8_TABLES)
+	-mkdir -p build/nodebug
+	$(CC) $(E8_NODEBUG_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -c -o $@ $<
 
 # E8 sampler with its per-stage profile (HAWK_E8_PROFILE_SAMPLER=1), used
 # only by the profiled sampler benchmark and the rejection summary.

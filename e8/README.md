@@ -36,7 +36,11 @@ e8/
               test_cmn_common.c
   tools/      diagnostics: histograms, rejection summary, validation summary;
               precision_audit.py (SD and Renyi divergence of every sampler
-              variant from the committed tables)
+              variant from the committed tables); Step 6 validation:
+              e8_correctness.c (sign and verify with real keys),
+              e8_distribution_sample.c (sampler histograms),
+              distribution_tests.py (goodness of fit against the exact
+              implemented distributions) and validate.py (the driver)
   compare/    HAWK vs E8 benchmarks
     e8_sign_bench.c          HAWK vs E8 signing, every sampler variant,
                              all_in and prepared accounting
@@ -51,7 +55,8 @@ e8/
       hawk_sampler_hot.c        hot64/hot32 (built once per width)
       hawk_sampler_ref.c        ref-T (upstream table and scan)
   docs/       design notes, recorded performance results, the precision
-              audit (precision_audit.md, precision_summary.csv)
+              audit (precision_audit.md, precision_summary.csv), the
+              validation (validation.md, validation_summary.csv)
 ```
 
 Dependencies run one way: `src/` may use `common/` and `tables/`;
@@ -71,7 +76,16 @@ make tables              # regenerate the sampler tables; fail if they differ
 make check-integer-only  # the signing paths contain no floating point
 make precision-audit     # SD / Renyi audit of every variant (docs/precision_audit.md);
                          # fail if docs/precision_summary.csv differs
+make validate-quick      # Step 6 validation at small counts (about 1-2 minutes)
+make validate            # the full validation (docs/validation.md; about half an
+                         # hour on 32 CPUs); fail if docs/validation_summary.csv
+                         # differs
 ```
+
+The validation builds `bin/e8_correctness_nodebug` from its own E8 objects
+in `build/nodebug/` (`HAWK_E8_DEBUG_CHECKS=0`, the timed build's setting)
+beside the default, debug-check build `bin/e8_correctness`; the default
+objects and flags are unchanged.
 
 Benchmarks and diagnostics: `sampler-bench`, `variant-sampler-bench`,
 `profile-sampler-bench`,

@@ -345,6 +345,50 @@ e8_ref_sample_1d(const void *tables, int64_t center_num32, cmn_rng *stream,
 
 /* see hawk_e8_inner.h */
 int
+e8_ref_sample_1d_seq(const void *tables, int64_t center_num32,
+	cmn_rng *stream, int32_t *out, size_t count)
+{
+	e8_ref_reader rd;
+
+	if (tables == NULL || stream == NULL || out == NULL
+		|| center_num32 < -32 || center_num32 > 72
+		|| (center_num32 & 7) != 0)
+	{
+		return 0;
+	}
+	e8_ref_reader_init(&rd, stream);
+	for (size_t u = 0; u < count; u ++) {
+		out[u] = e8_ref_coord(tables, center_num32, &rd);
+	}
+	return 1;
+}
+
+/* see hawk_e8_inner.h */
+int
+e8_ref_sample_blocks(const void *tables, uint8_t tau, cmn_rng *stream,
+	size_t count, uint64_t *norm2, e8_ca_sample_trace *trace)
+{
+	e8_ref_reader rd;
+
+	if (tables == NULL || stream == NULL) {
+		return 0;
+	}
+	e8_ref_reader_init(&rd, stream);
+	for (size_t u = 0; u < count; u ++) {
+		int32_t zblk[E8_BLOCK_DIM];
+
+		if (!e8_ref_sample_block(zblk, tau, tables, &rd,
+			norm2 != NULL ? &norm2[u] : NULL, NULL,
+			trace != NULL ? &trace[u] : NULL))
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* see hawk_e8_inner.h */
+int
 e8_ref_ops_get(uint64_t ops[4])
 {
 #if E8_REF_COUNT_OPS
