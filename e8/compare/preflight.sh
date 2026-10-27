@@ -1,7 +1,7 @@
 #!/bin/sh
-# Machine-state preflight of a comparison run (plan.md Steps 8 and 9),
+# Machine-state preflight of a comparison run,
 # called by run_compare.sh before every run directory. It checks the
-# conditions Step 9 requires and prints one line per condition:
+# conditions a measurement run requires and prints one line per condition:
 #
 #   preflight_<name>: ok|FAIL|unavailable (detail)
 #

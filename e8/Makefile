@@ -17,7 +17,7 @@ HAWK_OBJ = build/hawk/hawk_kgen.o build/hawk/hawk_sign.o build/hawk/hawk_vrfy.o 
 HAWK_OBJ_NOSIGN = $(filter-out build/hawk/hawk_sign.o,$(HAWK_OBJ))
 HAWK_SHIM_OBJ = build/hawk_shim.o
 CMN_OBJ = build/common/cmn_timing.o build/common/cmn_rng.o build/common/cmn_pool.o build/common/cmn_csv.o
-E8_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_codec.o build/e8_vrfy.o build/e8_sign.o build/e8_sign_legacy.o
+E8_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_codec.o build/e8_vrfy.o build/e8_vrfy_ref.o build/e8_sign.o build/e8_sign_legacy.o
 # The sampler and the shared modules it (and e8_sign.o) uses:
 # e8_sampler.o (shared, integer-only), the variants on the generated tables
 # (integer-only) and the runtime table builder (floating point, used only by
@@ -26,10 +26,10 @@ E8_SAMPLER_VARIANT_OBJ = build/e8_sampler_ref.o build/e8_sampler_hot64.o build/e
 E8_SAMPLER_OBJ = build/e8_sampler.o $(E8_SAMPLER_VARIANT_OBJ) build/e8_sampler_runtime.o $(CMN_OBJ)
 E8_SAMPLER_PROFILE_OBJ = build/profile/e8_sampler.o build/profile/e8_sampler_ref.o build/profile/e8_sampler_hot64.o build/profile/e8_sampler_hot32.o build/e8_sampler_variants.o build/e8_sampler_runtime.o $(CMN_OBJ)
 E8_API_OBJ = build/e8_api.o
-E8_PROFILE_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_codec.o build/e8_vrfy.o build/profile/e8_sign.o build/e8_sign_legacy.o build/profile/e8_api.o
+E8_PROFILE_OBJ = build/e8_math.o build/e8_f2.o build/e8_ntt.o build/e8_codec.o build/e8_vrfy.o build/e8_vrfy_ref.o build/profile/e8_sign.o build/e8_sign_legacy.o build/profile/e8_api.o
 
 E8_TEST_PROGS = bin/test_e8_math bin/test_e8_arith bin/test_e8_public bin/test_e8_verify bin/test_e8_sign bin/test_e8_sampler bin/test_e8_sign_sampler bin/test_e8_api bin/test_e8_tables bin/test_e8_variants bin/test_e8_ref_ct bin/test_hawk_variants bin/test_cmn_common
-E8_TOOL_PROGS = bin/e8_histograms bin/e8_rejection_summary bin/e8_validation_summary bin/e8_correctness bin/e8_correctness_nodebug bin/e8_distribution_sample
+E8_TOOL_PROGS = bin/e8_keygen_limits bin/e8_verify_diff bin/e8_histograms bin/e8_rejection_summary bin/e8_validation_summary bin/e8_correctness bin/e8_correctness_nodebug bin/e8_distribution_sample
 E8_BENCH_PROGS = bin/e8_sampler_bench bin/e8_sampler_profile_bench bin/e8_sign_bench bin/e8_sign_profile_bench bin/hawk_sign_profile_bench
 # The signing core shared by e8_sign_bench and bench_compare.
 BSC_HEAD = compare/bench_sign_core.h compare/hawk_shim.h
@@ -46,7 +46,7 @@ HAWKV_OBJ = build/hawkv/hawk_sign_variant.o build/hawkv/hawk_variants.o build/ha
 HAWK_HEAD = $(HAWK_STAMP)
 CMN_HEAD = common/cmn_timing.h common/cmn_rng.h common/cmn_pool.h common/cmn_csv.h $(HAWK_HEAD)
 E8_HEAD = src/hawk_e8_inner.h src/hawk_e8.h src/e8_sampler_inner.h $(CMN_HEAD)
-E8_TABLES = tables/e8_tables_geom.h tables/e8_tables_hot64.h tables/e8_tables_hot32.h tables/e8_tables_ref.h
+E8_TABLES = tables/e8_tables_geom.h tables/e8_tables_hot64.h tables/e8_tables_hot32.h tables/e8_tables_ref.h tables/e8_tables_ntt.h
 HAWK_TABLES = tables/hawk_tables_ref.h tables/hawk_tables_hot64.h tables/hawk_tables_hot32.h
 E8_INC = -I$(HAWK_DIR) -Icommon -Itables
 CMN_CFLAGS = $(CFLAGS) -I$(HAWK_DIR)
@@ -60,12 +60,12 @@ HAWK_PROFILE_SIGN_CFLAGS = $(CFLAGS) -DHAWK_AVX2=0 -DHAWK_PROFILE_SIGN=1
 E8_THREAD_CFLAGS ?= -pthread
 E8_THREAD_LIBS ?= -pthread
 # The E8 objects without the debug checks (bin/e8_correctness_nodebug,
-# Step 6 validation); see the rules below.
+# the validation); see the rules below.
 E8_NODEBUG_CFLAGS = $(E8_CFLAGS) -DHAWK_E8_DEBUG_CHECKS=0
-E8_NODEBUG_OBJ = build/nodebug/e8_math.o build/nodebug/e8_f2.o build/nodebug/e8_ntt.o build/nodebug/e8_codec.o build/nodebug/e8_vrfy.o build/nodebug/e8_sign.o build/nodebug/e8_sign_legacy.o build/nodebug/e8_api.o build/nodebug/e8_sampler.o build/nodebug/e8_sampler_ref.o build/nodebug/e8_sampler_hot64.o build/nodebug/e8_sampler_hot32.o build/nodebug/e8_sampler_variants.o build/nodebug/e8_sampler_runtime.o
+E8_NODEBUG_OBJ = build/nodebug/e8_math.o build/nodebug/e8_f2.o build/nodebug/e8_ntt.o build/nodebug/e8_codec.o build/nodebug/e8_vrfy.o build/nodebug/e8_vrfy_ref.o build/nodebug/e8_sign.o build/nodebug/e8_sign_legacy.o build/nodebug/e8_api.o build/nodebug/e8_sampler.o build/nodebug/e8_sampler_ref.o build/nodebug/e8_sampler_hot64.o build/nodebug/e8_sampler_hot32.o build/nodebug/e8_sampler_variants.o build/nodebug/e8_sampler_runtime.o
 
 all: build bin $(E8_TEST_PROGS) $(E8_TOOL_PROGS) $(E8_BENCH_PROGS) bench-builds
-test-e8: build bin $(E8_TEST_PROGS)
+test-e8: build bin $(E8_TEST_PROGS) bin/e8_verify_diff
 	./bin/test_e8_math
 	./bin/test_e8_arith
 	./bin/test_e8_public
@@ -74,6 +74,7 @@ test-e8: build bin $(E8_TEST_PROGS)
 	./bin/test_e8_sampler
 	./bin/test_e8_sign_sampler
 	./bin/test_e8_api
+	./bin/e8_verify_diff --test
 	./bin/test_e8_tables
 	./bin/test_e8_variants
 	./bin/test_e8_ref_ct
@@ -82,7 +83,7 @@ test-e8: build bin $(E8_TEST_PROGS)
 # Generated outputs live under results/ (gitignored), one directory per
 # kind: results/bench/ (benchmarks), results/diagnostics/ (diagnostic
 # tools), results/precision/ (precision audit), results/validation/ and
-# results/validation-quick/ (Step 6), results/compare/ (the comparison
+# results/validation-quick/ (the validation), results/compare/ (the comparison
 # harness, below). Committed reference copies live in docs/.
 BENCH_OUT = results/bench
 DIAG_OUT = results/diagnostics
@@ -126,30 +127,30 @@ e8-sigma-sign-sweep: build bin bin/e8_rejection_summary
 	@E8_SIGMA_SIGN_SWEEP=1 ./bin/e8_rejection_summary > $(DIAG_OUT)/e8_sigma_sign_sweep.csv
 	@printf 'wrote $(DIAG_OUT)/e8_sigma_sign_sweep.csv\n'
 
-# Step 6 validation (tools/validate.py, see docs/validation.md): signature
+# Validation (tools/validate.py, see docs/validation.md): signature
 # correctness of every variant of both schemes (no-debug build), the E8
 # debug-build run, sampler histograms and the distribution tests. Outputs
 # in results/validation-quick/ and results/validation/. validate fails if
 # the fresh results/validation/summary.csv differs from the committed
 # docs/validation_summary.csv (to update it, copy it there).
-VALIDATE_BINS = bin/e8_correctness bin/e8_correctness_nodebug bin/e8_distribution_sample
+VALIDATE_BINS = bin/e8_correctness bin/e8_correctness_nodebug bin/e8_distribution_sample bin/e8_verify_diff
 validate-quick: build bin $(VALIDATE_BINS)
 	python3 -I tools/validate.py --quick --out-dir results/validation-quick
 validate: build bin $(VALIDATE_BINS)
 	python3 -I tools/validate.py --out-dir results/validation --check docs/validation_summary.csv
 
-# Comparison harness (plan.md Steps 7-9; compare/run_compare.sh, docs/
-# harness.md): bench_compare in latency and throughput mode, the HAWK AVX2
+# Comparison harness (compare/run_compare.sh, docs/harness.md):
+# bench_compare in latency, throughput and keyverify mode, the HAWK AVX2
 # context, the sampler-only and stage benches, each run in its own
 # results/compare/<flag set>/<run_id>/ with env.txt, then the analysis
 # (compare/analysis/analyze.py) into results/compare/analysis/<name>/.
-# bench-compare: Step 9's volume per run (10 keys x 1,000 signatures);
+# bench-compare: the full volume per run (10 keys x 1,000 signatures);
 # COMPARE_FLAGSETS, COMPARE_RUNS and COMPARE_ARGS select more, for example
-# Step 9's run sets (docs/step9_runbook.md):
+# the bare-metal run sets (docs/measurement_runbook.md):
 #   COMPARE_ARGS="--run-set headline --cpus $(sh e8/compare/ccd_cpus.sh headline)"
 #   COMPARE_ARGS="--run-set cross-ccd --cpus $(sh e8/compare/ccd_cpus.sh cross-ccd)"
 # A non-smoke run first passes compare/preflight.sh (or --force).
-# bench-compare-smoke (Step 8): every configuration of both flag sets at
+# bench-compare-smoke: every configuration of both flag sets at
 # small counts, the analysis self-test and the analysis.
 COMPARE_FLAGSETS = O2
 COMPARE_RUNS = 1
@@ -187,18 +188,21 @@ precision-audit: build bin bin/test_e8_tables bin/test_hawk_variants
 		|| { echo "precision-audit: docs/precision_summary.csv differs from the fresh $(PRECISION_OUT)/precision_summary.csv"; exit 1; }; \
 		echo "precision-audit: committed docs/precision_summary.csv matches"
 
-# Integer-only signing path. Every E8 and HAWK-variant translation unit on
-# the signing path (and the shared modules it uses) must compile with
-# -mgeneral-regs-only,
+# Integer-only signing and verification paths. Every E8 and HAWK-variant
+# translation unit on the signing path (and the shared modules it uses),
+# the E8 verifier (e8_vrfy.c; the reference verifier e8_vrfy_ref.c keeps
+# its double bound and is context only) and upstream HAWK's verifier
+# (hawk_vrfy.c) must compile with -mgeneral-regs-only,
 # under which GCC rejects any floating-point use; the timed objects are
 # compiled with the ordinary flags, identical to HAWK's, and their
 # disassembly (with the upstream objects the E8 signer calls) must contain
 # no SSE/AVX or x87 floating-point instruction.
-INT_ONLY_SRC = src/e8_sign.c src/e8_api.c src/e8_codec.c src/e8_f2.c src/e8_ntt.c src/e8_math.c src/e8_sampler.c src/e8_sampler_ref.c src/e8_sampler_variants.c
+INT_ONLY_SRC = src/e8_sign.c src/e8_api.c src/e8_codec.c src/e8_f2.c src/e8_ntt.c src/e8_math.c src/e8_vrfy.c src/e8_sampler.c src/e8_sampler_ref.c src/e8_sampler_variants.c
+INT_ONLY_HAWK_SRC = $(HAWK_DIR)/hawk_vrfy.c
 INT_ONLY_VARIANTS = src/e8_sampler_hot.c:-DE8_HOT_BITS=64 src/e8_sampler_hot.c:-DE8_HOT_BITS=32
 INT_ONLY_CMN_SRC = common/cmn_rng.c common/cmn_pool.c common/cmn_timing.c
 INT_ONLY_HAWKV_SRC = $(HAWKV_SIGN_SOURCE):-DHAWK_AVX2=0 $(HAWKV_DIR)/hawk_variants.c: $(HAWKV_DIR)/hawk_sampler_ref.c: $(HAWKV_DIR)/hawk_sampler_hot.c:-DHAWK_HOT_BITS=64 $(HAWKV_DIR)/hawk_sampler_hot.c:-DHAWK_HOT_BITS=32
-INT_ONLY_OBJ = $(HAWKV_OBJ) build/e8_sign.o build/e8_api.o build/e8_codec.o build/e8_f2.o build/e8_ntt.o build/e8_math.o build/e8_sampler.o $(E8_SAMPLER_VARIANT_OBJ) build/common/cmn_rng.o build/common/cmn_pool.o build/common/cmn_timing.o build/hawk/sha3.o build/hawk/ng_hawk.o
+INT_ONLY_OBJ = $(HAWKV_OBJ) build/e8_sign.o build/e8_api.o build/e8_codec.o build/e8_f2.o build/e8_ntt.o build/e8_math.o build/e8_vrfy.o build/e8_sampler.o $(E8_SAMPLER_VARIANT_OBJ) build/common/cmn_rng.o build/common/cmn_pool.o build/common/cmn_timing.o build/hawk/sha3.o build/hawk/ng_hawk.o build/hawk/hawk_vrfy.o
 FP_INSN = (add|sub|mul|div|sqrt|min|max|rcp|rsqrt|hadd|hsub|addsub|round|dp)[sp][sd]\b|cvt|ucomis|comis|fmadd|fmsub|fnmadd|fnmsub|\bf(ld|st|ild|ist|add|sub|mul|div|cos|sin|sqrt|xch|com|ucom|chs|abs)[a-z]*\b
 check-integer-only: build $(INT_ONLY_OBJ) $(HAWKV_SIGN_SOURCE)
 	@for f in $(INT_ONLY_SRC); do \
@@ -206,6 +210,9 @@ check-integer-only: build $(INT_ONLY_OBJ) $(HAWKV_SIGN_SOURCE)
 	done
 	@for v in $(INT_ONLY_VARIANTS); do \
 		$(CC) $(E8_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -mgeneral-regs-only $${v#*:} -c -o /dev/null $${v%%:*} || exit 1; \
+	done
+	@for f in $(INT_ONLY_HAWK_SRC); do \
+		$(CC) $(CFLAGS) -I$(HAWK_DIR) -mgeneral-regs-only -c -o /dev/null $$f || exit 1; \
 	done
 	@for f in $(INT_ONLY_CMN_SRC); do \
 		$(CC) $(CMN_CFLAGS) $(E8_THREAD_CFLAGS) -mgeneral-regs-only -c -o /dev/null $$f || exit 1; \
@@ -220,7 +227,7 @@ check-integer-only: build $(INT_ONLY_OBJ) $(HAWKV_SIGN_SOURCE)
 			exit 1; \
 		fi; \
 	done
-	@echo "check-integer-only: signing path is integer-only"
+	@echo "check-integer-only: signing and verification paths are integer-only"
 
 FORCE:
 
@@ -245,8 +252,8 @@ bin/test_e8_math: tests/test_e8_math.c build/e8_math.o
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_math tests/test_e8_math.c build/e8_math.o $(LIBS)
 bin/test_e8_arith: tests/test_e8_arith.c $(E8_OBJ) $(E8_SAMPLER_OBJ) build/hawk/sha3.o
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_arith tests/test_e8_arith.c $(E8_OBJ) $(E8_SAMPLER_OBJ) build/hawk/sha3.o $(LIBS) $(E8_THREAD_LIBS) -lm
-bin/test_e8_public: tests/test_e8_public.c $(HAWK_OBJ) build/e8_math.o
-	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_public tests/test_e8_public.c $(HAWK_OBJ) build/e8_math.o $(LIBS)
+bin/test_e8_public: tests/test_e8_public.c $(HAWK_OBJ) build/e8_math.o build/e8_ntt.o
+	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_public tests/test_e8_public.c $(HAWK_OBJ) build/e8_math.o build/e8_ntt.o $(LIBS)
 bin/test_e8_verify: tests/test_e8_verify.c $(E8_OBJ) $(E8_SAMPLER_OBJ) build/hawk/sha3.o
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/test_e8_verify tests/test_e8_verify.c $(E8_OBJ) $(E8_SAMPLER_OBJ) build/hawk/sha3.o $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/test_e8_sign: tests/test_e8_sign.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ)
@@ -270,13 +277,22 @@ bin/test_cmn_common: tests/test_cmn_common.c $(CMN_HEAD) $(CMN_OBJ) build/hawk/s
 	$(CC) $(CMN_CFLAGS) -Icommon $(E8_THREAD_CFLAGS) -o bin/test_cmn_common tests/test_cmn_common.c $(CMN_OBJ) build/hawk/sha3.o $(LIBS) $(E8_THREAD_LIBS)
 
 # Tools
+# Coefficient ranges of the public form over many keys
+# (docs/verifier_range.md).
+# Differential and negative tests of the verifier against the reference
+# verifier (small run in test-e8, 10^5 candidates per degree in
+# validate-quick and validate).
+bin/e8_verify_diff: tools/e8_verify_diff.c $(E8_HEAD) $(HAWK_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_verify_diff tools/e8_verify_diff.c $(HAWK_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
+bin/e8_keygen_limits: tools/e8_keygen_limits.c $(E8_HEAD) $(HAWK_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ)
+	$(CC) $(E8_CFLAGS) $(E8_INC) $(E8_THREAD_CFLAGS) -o bin/e8_keygen_limits tools/e8_keygen_limits.c $(HAWK_OBJ) $(E8_OBJ) $(E8_API_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 bin/e8_histograms: tools/e8_histograms.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -o bin/e8_histograms tools/e8_histograms.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
 # The rejection summary reports the sampler's per-stage profile, so it
 # links the profiled sampler.
 bin/e8_rejection_summary: tools/e8_rejection_summary.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_PROFILE_OBJ)
 	$(CC) $(E8_PROFILE_SAMPLER_CFLAGS) $(E8_INC) -o bin/e8_rejection_summary tools/e8_rejection_summary.c $(HAWK_OBJ) $(E8_OBJ) $(E8_SAMPLER_PROFILE_OBJ) $(LIBS) $(E8_THREAD_LIBS) -lm
-# Step 6 validation (docs/validation.md). The correctness tool is built
+# The validation (docs/validation.md). The correctness tool is built
 # twice: with the default flags (E8 debug checks on) and without the E8
 # debug checks (HAWK_E8_DEBUG_CHECKS=0), from its own E8 objects in
 # build/nodebug/, for the long run; the default objects keep the default
@@ -315,8 +331,8 @@ build/bench_build_info.h: FORCE
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
 
 # ---------------------------------------------------------------------
-# Timed builds (plan.md Steps 7 and 9; fairness item 6: one compiler, one
-# flag set for every object). Each flag set FS in BENCH_FLAGSETS has its
+# Timed builds (one compiler, one flag set for every object of a timed
+# binary). Each flag set FS in BENCH_FLAGSETS has its
 # own object directory build/bench-FS/ holding every object of the timed
 # binaries: upstream HAWK, the HAWK variants, the shim, the shared
 # modules, E8 without the debug checks (HAWK_E8_DEBUG_CHECKS=0) and the
@@ -348,7 +364,7 @@ BENCH_E8_DEFS = -DHAWK_ENABLE_E8_EXPERIMENTAL=1 -DHAWK_E8_DEBUG_CHECKS=0
 AVX2_DIR = ../Optimized_Implementation/avx2
 AVX2_STAMP = build/avx2_sources.stamp
 BENCH_HAWK_NAMES = hawk_kgen hawk_vrfy ng_fxp ng_hawk ng_mp31 ng_ntru ng_poly ng_zint31 sha3
-BENCH_E8_NAMES = e8_math e8_f2 e8_ntt e8_codec e8_vrfy e8_sign e8_sign_legacy e8_api e8_sampler e8_sampler_ref e8_sampler_hot64 e8_sampler_hot32 e8_sampler_variants e8_sampler_runtime
+BENCH_E8_NAMES = e8_math e8_f2 e8_ntt e8_codec e8_vrfy e8_vrfy_ref e8_sign e8_sign_legacy e8_api e8_sampler e8_sampler_ref e8_sampler_hot64 e8_sampler_hot32 e8_sampler_variants e8_sampler_runtime
 BENCH_E8_PROFILE_NAMES = $(filter-out e8_sign e8_api,$(BENCH_E8_NAMES))
 BENCH_CMN_NAMES = cmn_timing cmn_rng cmn_pool cmn_csv
 BENCH_HAWKV_NAMES = hawk_sign_variant hawk_variants hawk_sampler_ref hawk_sampler_hot64 hawk_sampler_hot32
@@ -520,10 +536,12 @@ build/e8_math.o: src/e8_math.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_math.o src/e8_math.c
 build/e8_f2.o: src/e8_f2.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_f2.o src/e8_f2.c
-build/e8_ntt.o: src/e8_ntt.c $(E8_HEAD)
+build/e8_ntt.o: src/e8_ntt.c $(E8_HEAD) tables/e8_tables_ntt.h
 	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_ntt.o src/e8_ntt.c
 build/e8_vrfy.o: src/e8_vrfy.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_vrfy.o src/e8_vrfy.c
+build/e8_vrfy_ref.o: src/e8_vrfy_ref.c $(E8_HEAD)
+	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_vrfy_ref.o src/e8_vrfy_ref.c
 build/e8_codec.o: src/e8_codec.c $(E8_HEAD)
 	$(CC) $(E8_CFLAGS) $(E8_INC) -c -o build/e8_codec.o src/e8_codec.c
 build/e8_sign_legacy.o: src/e8_sign_legacy.c $(E8_HEAD)

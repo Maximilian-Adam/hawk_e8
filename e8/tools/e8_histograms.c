@@ -548,7 +548,7 @@ compute_case_qnorm(int64_t *qnorm, int64_t *norm_margin,
 		return 0;
 	}
 	reconstruct_w(w0, w1, logn, hpub, salt, salt_len, sc_data, s0, s1);
-	if (!e8_qnorm_completion(qnorm, q00, q01, w0, w1, logn)) {
+	if (!e8_qnorm_completion_ref(qnorm, q00, q01, w0, w1, logn)) {
 		return 0;
 	}
 	*norm_margin = bound - *qnorm;
@@ -685,7 +685,7 @@ collect_signature_row(FILE *sig_fp, const hist_param *param,
 	coset_diag = compute_coset_diag(logn, t0, t1, z0, z1);
 	reconstruct_w(w0, w1, logn, hpub, salt, salt_len, &sc_data, s0, s1);
 	pnorm_check = pnorm_from_apply(logn, z0, z1);
-	if (!e8_qnorm_completion(&qnorm, q00, q01, w0, w1, logn)) {
+	if (!e8_qnorm_completion_ref(&qnorm, q00, q01, w0, w1, logn)) {
 		norm_equal = 0;
 	} else if (pnorm != pnorm_check || pnorm_check != qnorm) {
 		norm_equal = 0;

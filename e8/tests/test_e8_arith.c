@@ -523,6 +523,139 @@ test_arith_logn(const arith_range *range)
 	return 1;
 }
 
+/*
+ * Generated NTT constants (tables/e8_tables_ntt.h, e8_ntt_tab) against
+ * the runtime constructions: primes and p0i equal E8_NTT_PRIMES, R2, R3,
+ * ni, and the first n entries of gm / igm equal e8_mkgm() at every
+ * degree; the Delta and S_n tables equal the NTTs of e8_make_delta() and
+ * of the S_n entries times R; the auto-adjoint NTT equals the first half
+ * of the full NTT on random auto-adjoint polynomials.
+ */
+static int
+test_ntt_tables(void)
+{
+	static uint32_t gm[MAXN], t[MAXN], ta[MAXN];
+	static int32_t a[MAXN];
+	uint64_t rng_state = UINT64_C(0xE8A77AB1E5000001);
+
+	printf("E8 NTT tables: ");
+	fflush(stdout);
+	for (unsigned i = 0; i < E8_NTT_TAB_PRIMES; i ++) {
+		const e8_ntt_tab *tab = e8_ntt_tab_get(i);
+		const e8_ntt_prime *prime = &E8_NTT_PRIMES[i];
+		uint32_t p = prime->p;
+		uint32_t r = (uint32_t)(UINT64_C(0x100000000) % p);
+		uint32_t r2 = e8_mp_mul(r, r, p);
+		uint32_t ig = e8_mp_mul(e8_mp_pow(prime->g, p - 2, p), r2, p);
+
+		if (tab == NULL || tab->p != p || tab->p0i != prime->p0i
+			|| tab->R2 != r2 || tab->R3 != e8_mp_mul(r2, r, p))
+		{
+			fprintf(stderr, "ERR: NTT table constants prime=%u\n",
+				i);
+			return 0;
+		}
+		for (unsigned logn = 8; logn <= 10; logn ++) {
+			size_t n = (size_t)1 << logn;
+			size_t hn = n >> 1;
+			int32_t delta[MAXN];
+
+			if (tab->ni[logn - 8] != e8_mp_mul(r,
+				e8_mp_pow((uint32_t)n, p - 2, p), p))
+			{
+				fprintf(stderr, "ERR: NTT table ni prime=%u"
+					" logn=%u\n", i, logn);
+				return 0;
+			}
+			e8_mkgm(logn, gm, prime->g, p, prime->p0i);
+			if (memcmp(gm, tab->gm, n * sizeof gm[0]) != 0) {
+				fprintf(stderr, "ERR: NTT table gm prime=%u"
+					" logn=%u\n", i, logn);
+				return 0;
+			}
+			e8_mkgm(logn, gm, ig, p, prime->p0i);
+			if (memcmp(gm, tab->igm, n * sizeof gm[0]) != 0) {
+				fprintf(stderr, "ERR: NTT table igm prime=%u"
+					" logn=%u\n", i, logn);
+				return 0;
+			}
+			e8_make_delta(delta, logn);
+			e8_ntt_to_ntt(logn, t, delta, prime);
+			for (size_t u = 0; u < hn; u ++) {
+				if (e8_ntt_delta_mont(logn, i)[u]
+					!= e8_mp_mul(t[u], r, p))
+				{
+					fprintf(stderr, "ERR: NTT Delta table"
+						" prime=%u logn=%u\n", i, logn);
+					return 0;
+				}
+			}
+			if (i == 0) {
+				size_t k = n >> 2;
+
+				memset(a, 0, n * sizeof a[0]);
+				a[0] = 8;
+				a[k] = 4;
+				a[3 * k] = -4;
+				e8_ntt_to_ntt(logn, t, a, prime);
+				for (size_t u = 0; u < n; u ++) {
+					if (e8_ntt_s00_mont(logn)[u]
+						!= e8_mp_mul(t[u], r, p))
+					{
+						fprintf(stderr, "ERR: NTT s00"
+							" table logn=%u\n", logn);
+						return 0;
+					}
+				}
+				memset(a, 0, n * sizeof a[0]);
+				a[2 * k] = 4;
+				e8_ntt_to_ntt(logn, t, a, prime);
+				for (size_t u = 0; u < n; u ++) {
+					if (e8_ntt_s01_mont(logn)[u]
+						!= e8_mp_mul(t[u], r, p))
+					{
+						fprintf(stderr, "ERR: NTT s01"
+							" table logn=%u\n", logn);
+						return 0;
+					}
+				}
+			}
+			for (unsigned trial = 0; trial < NTT_TRIALS; trial ++) {
+				a[0] = (int32_t)(rng_next_u64(&rng_state) >> 44)
+					- (1 << 19);
+				a[hn] = 0;
+				for (size_t u = 1; u < hn; u ++) {
+					a[u] = (int32_t)(rng_next_u64(&rng_state)
+						>> 44) - (1 << 19);
+					a[n - u] = -a[u];
+				}
+				e8_ntt_to_ntt(logn, t, a, prime);
+				e8_poly_to_ntt_tab(logn, ta, a, tab);
+				if (memcmp(t, ta, n * sizeof t[0]) != 0) {
+					fprintf(stderr, "ERR: table NTT prime=%u"
+						" logn=%u\n", i, logn);
+					return 0;
+				}
+				for (size_t u = 0; u < hn; u ++) {
+					if (t[n - 1 - u] != t[u]) {
+						fprintf(stderr, "ERR: auto-adjoint"
+							" symmetry logn=%u\n", logn);
+						return 0;
+					}
+				}
+				e8_poly_to_ntt_autoadj_tab(logn, ta, a, tab);
+				if (memcmp(t, ta, hn * sizeof t[0]) != 0) {
+					fprintf(stderr, "ERR: auto-adjoint NTT"
+						" prime=%u logn=%u\n", i, logn);
+					return 0;
+				}
+			}
+		}
+	}
+	printf("primes=%u done.\n", (unsigned)E8_NTT_TAB_PRIMES);
+	return 1;
+}
+
 int
 main(void)
 {
@@ -530,6 +663,9 @@ main(void)
 		if (!test_arith_logn(&RANGES[u])) {
 			return 1;
 		}
+	}
+	if (!test_ntt_tables()) {
+		return 1;
 	}
 	return 0;
 }

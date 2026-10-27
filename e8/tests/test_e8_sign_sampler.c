@@ -479,7 +479,7 @@ check_sampler_trace(const e8_sign_param *param,
 			" logn=%u key=%u trial=%u\n", logn, keynum, trial);
 		return 0;
 	}
-	if (!e8_qnorm_completion(&cqnorm, q00, q01, w0_32, w1_32, logn)
+	if (!e8_qnorm_completion_ref(&cqnorm, q00, q01, w0_32, w1_32, logn)
 		|| cqnorm != qnorm)
 	{
 		fprintf(stderr,

@@ -497,7 +497,7 @@ sign_and_reach_verify(unsigned logn,
 	}
 
 	make_message_context(&sc_data, logn, trial);
-	verified = e8_verify_uncompressed(logn, sig, sig_len, &sc_data,
+	verified = e8_verify_uncompressed_ref(logn, sig, sig_len, &sc_data,
 		hpub, hpub_len, q00, q01, q10, q11);
 	(void)verified;
 	return 1;
@@ -537,7 +537,7 @@ sign_offset_and_check(unsigned logn,
 	}
 
 	make_message_context(&sc_data, logn, SIGN_TRIALS + caseid);
-	verified = e8_verify_uncompressed(logn, sig, sig_len, &sc_data,
+	verified = e8_verify_uncompressed_ref(logn, sig, sig_len, &sc_data,
 		hpub, hpub_len, q00, q01, q10, q11);
 	(void)verified;
 	return 1;

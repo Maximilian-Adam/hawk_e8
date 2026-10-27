@@ -10,8 +10,8 @@
 #include "hawk_variants.h"
 
 /*
- * Sampler histograms for the distribution tests of Step 6 of the
- * fair-comparison plan (e8/docs/validation.md; analysis:
+ * Sampler histograms for the distribution tests of the validation
+ * (e8/docs/validation.md; analysis:
  * tools/distribution_tests.py).
  *
  *   e8_distribution_sample --kind 1d|block|signorm --scheme hawk|e8

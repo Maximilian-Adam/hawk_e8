@@ -40,6 +40,7 @@
 #define e8_apply_S     Zh(e8_apply_S)
 #define e8_make_delta  Zh(e8_make_delta)
 #define e8_compute_qform  Zh(e8_compute_qform)
+#define e8_compute_keygen_qform  Zh(e8_compute_keygen_qform)
 #define e8_f2_pack  Zh(e8_f2_pack)
 #define e8_f2_pack_i8_mod2  Zh(e8_f2_pack_i8_mod2)
 #define e8_f2_window_prepare  Zh(e8_f2_window_prepare)
@@ -55,6 +56,12 @@
 #define e8_sym_break  Zh(e8_sym_break)
 #define e8_qnorm_direct  Zh(e8_qnorm_direct)
 #define e8_qnorm_completion  Zh(e8_qnorm_completion)
+#define e8_qnorm_completion_ref  Zh(e8_qnorm_completion_ref)
+#define e8_verify_uncompressed_bound  Zh(e8_verify_uncompressed_bound)
+#define e8_sig_to_w  Zh(e8_sig_to_w)
+#define e8_verify_uncompressed_ref  Zh(e8_verify_uncompressed_ref)
+#define e8_verify_uncompressed_ref_bound  Zh(e8_verify_uncompressed_ref_bound)
+#define e8_verify_finish_ref  Zh(e8_verify_finish_ref)
 #define e8_sigma_verify_default  Zh(e8_sigma_verify_default)
 #define e8_verify_bound_from_sigma  Zh(e8_verify_bound_from_sigma)
 #define e8_verify_uncompressed  Zh(e8_verify_uncompressed)
@@ -78,6 +85,13 @@
 #define E8_NTT_PRIMES  Zh(E8_NTT_PRIMES)
 #define e8_mp_montymul  Zh(e8_mp_montymul)
 #define e8_mp_add  Zh(e8_mp_add)
+#define e8_mp_sub  Zh(e8_mp_sub)
+#define e8_ntt_tab_get  Zh(e8_ntt_tab_get)
+#define e8_ntt_delta_mont  Zh(e8_ntt_delta_mont)
+#define e8_ntt_s00_mont  Zh(e8_ntt_s00_mont)
+#define e8_ntt_s01_mont  Zh(e8_ntt_s01_mont)
+#define e8_poly_to_ntt_tab  Zh(e8_poly_to_ntt_tab)
+#define e8_poly_to_ntt_autoadj_tab  Zh(e8_poly_to_ntt_autoadj_tab)
 #define e8_mp_mul  Zh(e8_mp_mul)
 #define e8_mp_pow  Zh(e8_mp_pow)
 #define e8_mp_set_i32  Zh(e8_mp_set_i32)
@@ -120,6 +134,8 @@
 #define e8_hot64_tables_get  Zh(e8_hot64_tables_get)
 #define e8_sampler_runtime_hot64  Zh(e8_sampler_runtime_hot64)
 #define e8_norm_bound_default  Zh(e8_norm_bound_default)
+#define e8_keygen_limits_bits  Zh(e8_keygen_limits_bits)
+#define e8_keygen_limits_ok  Zh(e8_keygen_limits_ok)
 #define e8_sampler_warm_cache  Zh(e8_sampler_warm_cache)
 #define e8_sampler_set_thread_count  Zh(e8_sampler_set_thread_count)
 #define e8_sampler_get_thread_count  Zh(e8_sampler_get_thread_count)
@@ -231,6 +247,35 @@ typedef struct {
 
 extern const e8_ntt_prime E8_NTT_PRIMES[E8_NTT_PRIME_COUNT];
 
+/*
+ * NTT constants of the verifier (e8_verify_uncompressed()) and of key
+ * generation (e8_compute_keygen_qform()), generated offline into
+ * tables/e8_tables_ntt.h by tables/gen_tables.py, as HAWK's verifier
+ * tables: for each of the first E8_NTT_TAB_PRIMES primes of
+ * E8_NTT_PRIMES, p, p0i = -1/p mod 2^32, R2 = 2^64 mod p,
+ * R3 = 2^96 mod p, ni[logn - 8] = 2^32/n mod p, and the twiddle tables
+ * gm[] = e8_mkgm(10, g) and igm[] = e8_mkgm(10, 1/g), whose first n
+ * entries are the tables of degree n.
+ *
+ * E8_VRFY_PRIMES is the number of primes the verifier uses: the minimum
+ * the range argument of docs/verifier_range.md proves sound with the
+ * key generation limits (HAWK uses 2). E8_NTT_PRIME_COUNT (4) primes
+ * remain for the reference verifier (e8_verify_uncompressed_ref()) and
+ * the tests.
+ */
+#define E8_NTT_TAB_PRIMES   3
+#define E8_VRFY_PRIMES      3
+
+typedef struct {
+	uint32_t p;
+	uint32_t p0i;
+	uint32_t R2;
+	uint32_t R3;
+	uint32_t ni[3];
+	uint32_t gm[1024];
+	uint32_t igm[1024];
+} e8_ntt_tab;
+
 #define E8_INVERSE_W_NTT_PRIMES   1
 #define E8_NTT_MAXN               1024
 #define E8_F2_MAXW                 16
@@ -295,6 +340,16 @@ void e8_compute_qform(int32_t *q00, int32_t *q01,
 	int32_t *q10, int32_t *q11, const int8_t *f, const int8_t *g,
 	const int8_t *F, const int8_t *G, unsigned logn);
 
+/*
+ * Key generation form: q00, q01 and q11 of Q = B^* S_n B (q10 = adj(q01)
+ * is not computed), with HAWK's make_q001() technique (NTT modulo the
+ * first verifier prime, exact for int8 keys). Equal to the corresponding
+ * entries of e8_compute_qform() (checked by test_e8_public).
+ */
+void e8_compute_keygen_qform(int32_t *q00, int32_t *q01, int32_t *q11,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G, unsigned logn);
+
 void e8_f2_pack(uint64_t *d, const uint8_t *a, size_t n);
 
 void e8_f2_pack_i8_mod2(uint64_t *d, const int8_t *a, size_t n);
@@ -344,7 +399,53 @@ int e8_qnorm_direct(int64_t *norm,
 	const int32_t *q10, const int32_t *q11,
 	const int32_t *w0, const int32_t *w1, unsigned logn);
 
+/*
+ * Verifier (e8_vrfy.c, integer-only, HAWK's techniques, E8_VRFY_PRIMES
+ * primes; see e8_verify_finish()). e8_qnorm_completion() returns the
+ * Q-norm ||w||^2_Q of w = (w0, w1) by the completion of squares (0 if
+ * the residues disagree, i.e. the value is out of range, or q00 is not
+ * invertible). e8_verify_uncompressed() verifies an uncompressed
+ * signature against a decoded public key (q00, q01, hpub) and the
+ * default integer bound; _bound() takes the bound (at most
+ * 2^30 / (n/2)).
+ */
 int e8_qnorm_completion(int64_t *norm,
+	const int32_t *q00, const int32_t *q01,
+	const int32_t *w0, const int32_t *w1, unsigned logn);
+
+int e8_verify_uncompressed(unsigned logn,
+	const void *sig, size_t sig_len,
+	const shake_context *sc_data, const void *hpub, size_t hpub_len,
+	const int32_t *q00, const int32_t *q01);
+
+int e8_verify_uncompressed_bound(unsigned logn,
+	const void *sig, size_t sig_len,
+	const shake_context *sc_data, const void *hpub, size_t hpub_len,
+	const int32_t *q00, const int32_t *q01, int64_t bound);
+
+/*
+ * w = h - 2 s of an uncompressed signature (test and tool helper):
+ * decodes sig, hashes the message context with hpub (n/16 bytes) and the
+ * salt into h, and writes w0, w1. Returns 0 if sig does not decode.
+ */
+int e8_sig_to_w(unsigned logn, int32_t *w0, int32_t *w1,
+	const void *sig, size_t sig_len,
+	const shake_context *sc_data, const void *hpub);
+
+/*
+ * Reference verifier (e8_vrfy_ref.c: the submission's verifier, kept as
+ * context rows and for differential tests; E8_NTT_PRIME_COUNT primes,
+ * twiddles and Delta's NTT rebuilt per call, one Fermat inversion per
+ * coefficient, the bound from sigma_verify in double).
+ * e8_verify_uncompressed_with_sigma() uses the bound
+ * floor(8 n sigma_verify^2), e8_verify_uncompressed_ref() the default
+ * sigma_verify and e8_verify_uncompressed_ref_bound() an integer bound;
+ * q10 and q11 are unused (may be NULL). e8_verify_finish_ref()
+ * (e8_api.c) is the submission's e8_verify_finish() on this verifier
+ * (encoded public key, no key limit check), which also accepts a decoded
+ * public key (pub_len = (size_t)-1) for the prepared accounting.
+ */
+int e8_qnorm_completion_ref(int64_t *norm,
 	const int32_t *q00, const int32_t *q01,
 	const int32_t *w0, const int32_t *w1, unsigned logn);
 
@@ -353,17 +454,28 @@ int e8_sigma_verify_default(unsigned logn, double *sigma_verify);
 int e8_verify_bound_from_sigma(unsigned logn,
 	double sigma_verify, int64_t *bound);
 
-int e8_verify_uncompressed(unsigned logn,
+int e8_verify_uncompressed_ref(unsigned logn,
 	const void *sig, size_t sig_len,
 	const shake_context *sc_data, const void *hpub, size_t hpub_len,
 	const int32_t *q00, const int32_t *q01,
 	const int32_t *q10, const int32_t *q11);
+
+int e8_verify_uncompressed_ref_bound(unsigned logn,
+	const void *sig, size_t sig_len,
+	const shake_context *sc_data, const void *hpub, size_t hpub_len,
+	const int32_t *q00, const int32_t *q01, int64_t bound);
 
 int e8_verify_uncompressed_with_sigma(unsigned logn,
 	const void *sig, size_t sig_len,
 	const shake_context *sc_data, const void *hpub, size_t hpub_len,
 	const int32_t *q00, const int32_t *q01,
 	const int32_t *q10, const int32_t *q11, double sigma_verify);
+
+int e8_verify_finish_ref(unsigned logn,
+	const void *sig, size_t sig_len,
+	const shake_context *sc_data,
+	const void *pub, size_t pub_len,
+	void *tmp, size_t tmp_len);
 
 /*
  * Experimental dummy signing helpers.  These only exercise algebra and
@@ -536,6 +648,17 @@ int e8_sign_sampler_core(unsigned logn,
 int64_t e8_norm_bound_default(unsigned logn);
 
 /*
+ * E8 key generation limits (e8_api.c): bits[0..4] receive the bit limits
+ * of q00[0], q00[u] (u > 0), q01, q11[0] and q11[u] (u > 0); every
+ * coefficient x satisfies |x| < 2^bits. e8_keygen_limits_ok() returns 1
+ * if q00, q01 and (unless NULL) q11 are within them.
+ */
+void e8_keygen_limits_bits(unsigned logn, unsigned *bits);
+
+int e8_keygen_limits_ok(unsigned logn, const int32_t *q00,
+	const int32_t *q01, const int32_t *q11);
+
+/*
  * Implementation of e8_sign_finish() and e8_sign_finish_prepared() (see
  * hawk_e8.h), with the key format selected by priv_len as in HAWK's
  * sign_finish_inner(): E8_PRIVKEY_SIZE(logn) for an encoded key, or
@@ -597,6 +720,39 @@ void e8_intt(unsigned logn, uint32_t *a,
 
 void e8_ntt_to_ntt(unsigned logn, uint32_t *d,
 	const int32_t *a, const e8_ntt_prime *prime);
+
+/*
+ * Generated NTT constants (see e8_ntt_tab): the tables of prime
+ * index 0 .. E8_NTT_TAB_PRIMES - 1; the NTT of Delta (e8_make_delta())
+ * modulo that prime in Montgomery form, first n/2 values; and the NTTs of
+ * the S_n entries s00 = 8 + 4 X^(n/4) - 4 X^(3n/4) and s01 = 4 X^(n/2)
+ * modulo prime 0 in Montgomery form (n values).
+ */
+const e8_ntt_tab *e8_ntt_tab_get(unsigned prime);
+
+const uint32_t *e8_ntt_delta_mont(unsigned logn, unsigned prime);
+
+const uint32_t *e8_ntt_s00_mont(unsigned logn);
+
+const uint32_t *e8_ntt_s01_mont(unsigned logn);
+
+uint32_t e8_mp_sub(uint32_t a, uint32_t b, uint32_t p);
+
+/*
+ * d <- NTT(a) modulo tab->p, with the plain residues of a (every
+ * |a[u]| < p) and the generated twiddles; HAWK's mp_poly_to_NTT().
+ */
+void e8_poly_to_ntt_tab(unsigned logn, uint32_t *d, const int32_t *a,
+	const e8_ntt_tab *tab);
+
+/*
+ * Same as e8_poly_to_ntt_tab() for an auto-adjoint a (a[n - u] = -a[u]
+ * for 0 < u < n): reads a[0 .. n/2 - 1] and writes the first n/2 NTT
+ * values (the others are equal in reverse order: NTT(a)[n - 1 - u] =
+ * NTT(a)[u]); HAWK's mp_poly_to_NTT_autoadj().
+ */
+void e8_poly_to_ntt_autoadj_tab(unsigned logn, uint32_t *d,
+	const int32_t *a, const e8_ntt_tab *tab);
 
 void e8_ntt_from_ntt(unsigned logn, uint32_t *a,
 	const e8_ntt_prime *prime);

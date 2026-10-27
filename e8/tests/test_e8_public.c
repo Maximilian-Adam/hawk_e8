@@ -353,6 +353,32 @@ check_random_norms(unsigned logn,
 	return 1;
 }
 
+/*
+ * The key generation form (NTT, three entries) equals the four-entry
+ * reference form (schoolbook) on q00, q01 and q11.
+ */
+static int
+check_keygen_qform(unsigned logn,
+	const int8_t *f, const int8_t *g, const int8_t *F, const int8_t *G,
+	const int32_t *q00, const int32_t *q01, const int32_t *q11,
+	unsigned keynum)
+{
+	size_t n = (size_t)1 << logn;
+	static int32_t k00[MAXN], k01[MAXN], k11[MAXN];
+
+	e8_compute_keygen_qform(k00, k01, k11, f, g, F, G, logn);
+	if (memcmp(k00, q00, n * sizeof k00[0]) != 0
+		|| memcmp(k01, q01, n * sizeof k01[0]) != 0
+		|| memcmp(k11, q11, n * sizeof k11[0]) != 0)
+	{
+		fprintf(stderr,
+			"ERR: keygen form differs logn=%u key=%u\n",
+			logn, keynum);
+		return 0;
+	}
+	return 1;
+}
+
 static int
 test_logn(unsigned logn)
 {
@@ -369,6 +395,11 @@ test_logn(unsigned logn)
 		}
 
 		e8_compute_qform(q00, q01, q10, q11, f, g, F, G, logn);
+		if (!check_keygen_qform(logn, f, g, F, G,
+			q00, q01, q11, keynum))
+		{
+			return 0;
+		}
 		if (!check_adjoint(logn, q01, q10)) {
 			return 0;
 		}

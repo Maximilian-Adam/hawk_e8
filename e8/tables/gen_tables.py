@@ -711,6 +711,139 @@ def write_hawk_hot(out, bits):
     header_close(f, g)
 
 
+# ---------------------------------------------------------------------------
+# E8 verifier and key generation NTT constants
+
+
+# E8_NTT_PRIMES of e8/src/e8_ntt.c: (p, p0i = -1/p mod 2^32, g), g the
+# Montgomery representation of a primitive 2048-th root of 1 mod p.
+E8_NTT_PRIMES = [
+    (2147473409, 2042615807, 1790111537),
+    (2147389441, 1862176767, 677655126),
+    (2147387393, 1472104447, 563781659),
+]
+R32 = 1 << 32
+
+
+def mont(a, b, p):
+    """Montgomery product a*b/2^32 mod p (canonical, as e8_mp_montymul)."""
+    return a * b * pow(R32, -1, p) % p
+
+
+def bitrev(x, logn):
+    y = 0
+    for _ in range(logn):
+        y = (y << 1) | (x & 1)
+        x >>= 1
+    return y
+
+
+def mkgm(logn, g, p):
+    """e8_mkgm(): gm[rev(u)] = 2^32 g^u mod p (g in Montgomery form)."""
+    for _ in range(logn, 10):
+        g = mont(g, g, p)
+    gm = [0] * (1 << logn)
+    x = R32 % p
+    for u in range(1 << logn):
+        gm[bitrev(u, logn)] = x
+        x = mont(x, g, p)
+    return gm
+
+
+def ntt(logn, a, gm, p):
+    """e8_ntt() on plain residues."""
+    a = list(a)
+    t = 1 << logn
+    for lm in range(logn):
+        m = 1 << lm
+        ht = t >> 1
+        v0 = 0
+        for u in range(m):
+            s = gm[u + m]
+            for v in range(ht):
+                k1 = v0 + v
+                k2 = k1 + ht
+                x1 = a[k1]
+                x2 = mont(a[k2], s, p)
+                a[k1] = (x1 + x2) % p
+                a[k2] = (x1 - x2) % p
+            v0 += t
+        t = ht
+    return a
+
+
+def xpoly(logn, terms):
+    """Coefficients (mod nothing) of sum c X^e in Z[X]/(X^n + 1)."""
+    n = 1 << logn
+    a = [0] * n
+    for c, e in terms:
+        a[e] += c
+    return a
+
+
+def write_e8_ntt(out):
+    f, g = header_open(os.path.join(out, "e8_tables_ntt.h"),
+        "HAWK-E8-CM NTT constants of the verifier and key generation.",
+        ["",
+         "For each of the first E8_NTT_TAB_PRIMES primes of E8_NTT_PRIMES",
+         "(e8_ntt.c), as HAWK's verifier tables: p, p0i = -1/p mod 2^32,",
+         "R2 = 2^64 mod p, R3 = 2^96 mod p, gm[] = e8_mkgm(10, g) and",
+         "igm[] = e8_mkgm(10, 1/g) (2^32 g^rev(u) mod p, bit reversal over",
+         "10 bits; their first n entries are the tables of degree n), and",
+         "ni[logn - 8] = 2^32 / n mod p. Then, per logn and prime, the NTT",
+         "(e8_ntt order) of Delta = 48 + 32 X^(n/4) - 32 X^(3n/4) in",
+         "Montgomery form (times 2^32 mod p), first n/2 values (Delta is",
+         "auto-adjoint), and, for the first prime only, the NTTs of the",
+         "entries s00 = 8 + 4 X^(n/4) - 4 X^(3n/4) and s01 = 4 X^(n/2) of",
+         "S_n in Montgomery form (s10 = -s01, s11 = 8).",
+         "Requires the e8_ntt_tab type (hawk_e8_inner.h); included only by",
+         "e8_ntt.c."])
+    nprimes = len(E8_NTT_PRIMES)
+    f.write("#if E8_NTT_TAB_PRIMES != %d\n#error E8_NTT_TAB_PRIMES\n#endif\n\n" % nprimes)
+    f.write("static const e8_ntt_tab e8_ntt_tabs[E8_NTT_TAB_PRIMES] = {\n")
+    ents = []
+    for p, p0i, gq in E8_NTT_PRIMES:
+        assert (p * p0i + 1) % R32 == 0
+        gp = gq * pow(R32, -1, p) % p
+        assert pow(gp, 1024, p) == p - 1
+        ig = pow(gp, -1, p) * R32 % p
+        ni = [R32 * pow(1 << logn, -1, p) % p for logn in (8, 9, 10)]
+        ents.append(
+            "\t{\n\t\t%d, %d, %d, %d,\n" % (p, p0i, R32 * R32 % p,
+                                             R32 ** 3 % p)
+            + "\t\t{ " + ", ".join(str(v) for v in ni) + " },\n"
+            + "\t\t{\n" + fmt_list(mkgm(10, gq, p), str, 6, "\t\t\t")
+            + "\n\t\t},\n"
+            + "\t\t{\n" + fmt_list(mkgm(10, ig, p), str, 6, "\t\t\t")
+            + "\n\t\t}\n\t}")
+    f.write(",\n".join(ents) + "\n};\n\n")
+    for logn in (8, 9, 10):
+        n = 1 << logn
+        k = n >> 2
+        delta = xpoly(logn, [(48, 0), (32, k), (-32, 3 * k)])
+        f.write("static const uint32_t e8_ntt_delta_logn%d"
+                "[E8_NTT_TAB_PRIMES][%d] = {\n" % (logn, n >> 1))
+        rows = []
+        for p, _, gq in E8_NTT_PRIMES:
+            gm = mkgm(10, gq, p)
+            t = ntt(logn, [x % p for x in delta], gm, p)
+            assert all(t[u] == t[n - 1 - u] for u in range(n >> 1))
+            rows.append("\t{\n" + fmt_list(
+                [x * R32 % p for x in t[:n >> 1]], str, 6, "\t\t")
+                + "\n\t}")
+        f.write(",\n".join(rows) + "\n};\n\n")
+        p, _, gq = E8_NTT_PRIMES[0]
+        gm = mkgm(10, gq, p)
+        for name, terms in (("s00", [(8, 0), (4, k), (-4, 3 * k)]),
+                            ("s01", [(4, 2 * k)])):
+            t = ntt(logn, [x % p for x in xpoly(logn, terms)], gm, p)
+            f.write("static const uint32_t e8_ntt_%s_logn%d[%d] = {\n"
+                    % (name, logn, n))
+            f.write(fmt_list([x * R32 % p for x in t], str, 6, "\t")
+                    + "\n};\n\n")
+    header_close(f, g)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.dirname(os.path.abspath(__file__)))
@@ -732,6 +865,7 @@ def main():
     write_hawk_ref(args.out, upstream)
     write_hawk_hot(args.out, 64)
     write_hawk_hot(args.out, 32)
+    write_e8_ntt(args.out)
     kinds = {}
     for what, bits, _ in NEAR_INTEGER:
         key = (what.split(" tau=")[0], bits)

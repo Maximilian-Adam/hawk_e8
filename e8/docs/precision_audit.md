@@ -1,6 +1,6 @@
 # Precision audit of the sampler variants
 
-Step 5 of the fair-comparison plan: one tool and one set of measures give
+For the fair comparison, one tool and one set of measures give
 the distance of every sampler variant of both schemes from its ideal
 discrete Gaussian, per draw, per unit (HAWK coordinate, E8 block) and per
 signature.  The audit reads the committed tables; it changes no table,
@@ -19,7 +19,7 @@ audits every variant and writes, in `e8/results/precision/`:
   kind `1d` / `component` / `block`, id = parity, class or tau);
 - `precision_audit_dists.csv`: every implemented distribution exactly
   (numerator and `log2` of the power-of-two denominator) beside the ideal,
-  for Step 6's goodness-of-fit tests;
+  for the validation's goodness-of-fit tests (`validation.md`);
 - `precision_summary.csv`: one row per (scheme, variant, logn); the target
   fails if it differs from the committed copy `e8/docs/precision_summary.csv`
   (to update it after a table change, copy it there).
@@ -259,7 +259,7 @@ is within 1.2 bits (for example 2^-52.9 against 2^-51.7 at 64 bits, n =
 1024).  E8's slightly larger values come from its component CDFs (16
 thresholds per draw, the worst E8 draws by SD) and from 9n/4 draws per
 signature against HAWK's 2n.  HAWK's larger hot-table tail mass (`P(tail)`
-0.2-2.7% against 3e-7 to 1.4e-5 for E8, reproducing Step 4) does not show
+0.2-2.7% against 3e-7 to 1.4e-5 for E8, as measured for the sampler variants) does not show
 in the SD: tail thresholds are `B` bits relative to the tail.  Every SD is
 below `(entries + 1) 2^-B` (maximum ratio 0.27).
 
@@ -330,8 +330,8 @@ The submitted §6.3 bounded the E8 distance heuristically
 (`eps_DG ≲ eps_tail + eps_arith + eps_cdf ≈ 2^-32` at n = 1024, from
 `double` table construction) and used SD where HAWK uses RD (Review 1).
 Both premises are gone: tables are generated offline in exact arithmetic
-and the runtime is integer-only (Step 4), and both schemes are now measured
-by the same tool under both measures.  The paper text is Step 11.  The
+and the runtime is integer-only (`HAWK_E8_VARIANT.md`), and both schemes are now measured
+by the same tool under both measures.  The paper text is written separately.  The
 values to cite:
 
 - truncation: true ideal mass outside the generator's support `<= 2^-1488`
@@ -349,7 +349,7 @@ values to cite:
 
 ## Files and columns
 
-`precision_summary.csv` (one row per scheme, variant, logn; Step 7 joins it
+`precision_summary.csv` (one row per scheme, variant, logn; the harness analysis joins it
 onto its timing rows by `(scheme, variant, logn)`):
 
 | column | definition |

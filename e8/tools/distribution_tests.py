@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Distribution tests of every HAWK and HAWK-E8-CM sampler variant (Step 6
-of the fair-comparison plan; method and results: e8/docs/validation.md).
+Distribution tests of every HAWK and HAWK-E8-CM sampler variant (method
+and results: e8/docs/validation.md).
 Python standard library only.
 
 Input: histograms written by e8_distribution_sample (rows kind, scheme,
@@ -10,7 +10,7 @@ the exact implemented distributions of the committed tables, from
 precision_audit.load() (Fractions with power-of-two denominators), not
 the ideal Gaussians: the tests detect implementation errors (wrong table,
 comparison, mapping or stream layout), not the table approximation, whose
-distance from the ideal (Step 5) is far below what any feasible sample
+distance from the ideal (e8/docs/precision_audit.md) is far below what any feasible sample
 resolves.
 
 Tests, the same for both schemes:

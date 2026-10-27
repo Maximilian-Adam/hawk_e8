@@ -41,7 +41,7 @@
  * each attempt calls it exactly twice (salt, then sampler seed), so
  * attempts = rng_calls / 2.
  *
- * Sampler variants (Step 4): every block is one (scheme, variant, thread
+ * Sampler variants: every block is one (scheme, variant, thread
  * count, degree). HAWK variants: ref (upstream hawk_sign_finish() and the
  * decoded-key shim, unmodified), and ref-T, hot64, hot32 through the
  * variant signer (compare/hawk_variants/: upstream sign_finish_inner()
@@ -85,7 +85,7 @@
  *
  * Key generation, preparation, signing, verification, seeds and messages
  * are bench_sign_core.c's, shared with bench_compare (the interleaved
- * comparison harness, plan.md Step 7). Profile builds
+ * comparison harness). Profile builds
  * (HAWK_E8_PROFILE_SIGN = 1, bin/e8_sign_profile_bench) record E8's
  * per-stage trace for every E8 block; --stage-csv FILE writes it as CSV.
  */

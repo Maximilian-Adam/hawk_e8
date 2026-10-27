@@ -13,7 +13,7 @@
 #include "bench_sign_core.h"
 
 /*
- * The comparison harness (plan.md Step 7): every (scheme, variant,
+ * The comparison harness: every (scheme, variant,
  * threads, logn) configuration of HAWK and HAWK-E8-CM signing, timed under
  * identical conditions in one binary built with one flag set.
  *
@@ -41,8 +41,8 @@
  * group. Between groups the pool is resized (cmn_pool_ensure(T - 1),
  * outside every timed region) and every configuration of the next group
  * is warmed again, so that no timed call starts or joins a thread and
- * serial configurations never run beside spinning pool workers (Step 4
- * finding (d)).
+ * serial configurations never run beside spinning pool workers (which
+ * slow them down).
  *
  * Warm-up: before a group's first batch, --warmup W untimed-for-the-
  * results signatures per configuration and accounting mode (key 0,
@@ -58,6 +58,9 @@
  *               (proc). Signatures per second per core follow from the
  *               rows' wall_ns.
  *
+ *   keyverify   key generation and verification timing, single thread, pinned to LIST[0], no pool;
+ *               see "Key generation and verification" below.
+ *
  * Pinning (--cpus LIST): latency pins the caller to LIST[0] and pool
  * worker w to LIST[w mod |LIST|] (cmn_pool affinity), so T <= |LIST|
  * threads run on distinct CPUs; throughput pins process p to LIST[p]. The
@@ -70,6 +73,39 @@
  * configuration and accounting mode, the pool activity per group, and
  * the failure count. The exit status is 1 if any signature failed to
  * sign or verify.
+ *
+ * Key generation and verification (--mode keyverify; bench_sign_core.h
+ * defines the accounting). Per degree, in the order of --logn:
+ *
+ *   keygen phase   --warmup W warm-up calls per unit (warmup_keygen
+ *                  rows, warm-up stream), then for key index
+ *                  i = 0 .. N-1 (--keygen-keys N) the units HAWK keygen,
+ *                  E8 keygen and keygen_core (HAWK's NTRU core alone,
+ *                  scheme hawk_core), all from the paired stream with
+ *                  index i, in an order rotated by i (unit i mod U first).
+ *                  attempts = RNG calls (one per (f, g) draw), rng_bytes
+ *                  = bytes drawn. Every HAWK and E8 key then signs one
+ *                  message and verifies it, untimed (keygen_check).
+ *   verify phase   keys 0 .. K-1 of the paired stream (--keys K),
+ *                  untimed; pub_decode rows (one per key and scheme,
+ *                  rotated); M signatures per key (--sigs-per-key M) by
+ *                  each scheme's ref signer, all_in, T = 1, with the
+ *                  harness's messages i = k M + m and signing streams
+ *                  16 + all_in, index i, untimed; per key, the first
+ *                  signature with one bit flipped in the salt, in s1 and
+ *                  (E8) in s0, checked by every verifier unit untimed
+ *                  (verify_reject rows, verify_ok = 1 if accepted); W
+ *                  warm-up verifications per unit (warmup_verify rows);
+ *                  then per signature (index j = k M + m) the units
+ *                  {HAWK upstream, E8 fast, E8 ref} x {all_in, prepared},
+ *                  rotated by j, one timed verify row each.
+ *
+ * Rows carry variant ref (ref-avx2 in the AVX2 context build), threads
+ * 1, and the verifier column on verify, verify_reject and warmup_verify
+ * rows. --list prints the expected row counts of the schedule; --sizes
+ * prints the sizes CSV (bench_sign_core.c, bsc_sizes()). The exit status
+ * is 1 if any key generation, check, signature or timed verification
+ * failed, or any tampered signature was accepted.
  */
 
 #define DEFAULT_KEYS           4
@@ -89,8 +125,14 @@
 
 #define MODE_LATENCY      0
 #define MODE_THROUGHPUT   1
+#define MODE_KEYVERIFY    2
 
-static const char *const MODE_NAME[] = { "latency", "throughput" };
+static const char *const MODE_NAME[] = {
+	"latency", "throughput", "keyverify"
+};
+
+#define DEFAULT_KEYGEN_KEYS    20
+#define MAX_KEYGEN_KEYS        1000000
 
 typedef struct {
 	int mode;
@@ -111,6 +153,8 @@ typedef struct {
 	const char *out_path;
 	int no_header;
 	int pool_accounting;
+	unsigned keygen_keys;
+	int sizes;
 } compare_options;
 
 /*
@@ -827,11 +871,669 @@ run_throughput(const compare_options *opts)
 	return status_all;
 }
 
+/* ==================================================================== */
+/*
+ * Key generation and verification timing (--mode keyverify).
+ */
+
+#define KV_SCHEME_CORE     BSC_SCHEME_COUNT
+#define KV_CHECK_MESSAGE   0xFFFFFEu
+#define KV_MAX_FLIPS       3
+
+static const char *const KV_FLIP_NAME[KV_MAX_FLIPS] = { "salt", "s1", "s0" };
+
+typedef struct {
+	const char *kind;
+	unsigned scheme;           /* BSC_SCHEME_* or KV_SCHEME_CORE */
+} kv_keygen_unit;
+
+typedef struct {
+	unsigned scheme;
+	unsigned verifier;
+	unsigned acct;
+} kv_verify_unit;
+
+/* Timed values of one unit at one degree, for the summary. */
+typedef struct {
+	uint64_t *core;
+	uint64_t *tsc;
+	uint64_t count;
+} kv_values;
+
+static kv_keygen_unit kv_kg[3];
+static unsigned kv_kg_count;
+static kv_verify_unit kv_vf[2 * BSC_VERIFIER_COUNT];
+static unsigned kv_vf_count;
+static kv_values kv_kg_values[3][3];
+static kv_values kv_vf_values[3][2 * BSC_VERIFIER_COUNT];
+static kv_values kv_dec_values[3][BSC_SCHEME_COUNT];
+
+static struct {
+	uint64_t keygen_failures;
+	uint64_t check_failures;
+	uint64_t decode_failures;
+	uint64_t sign_failures;
+	uint64_t verify_failures;
+	uint64_t tamper_checks;
+	uint64_t tamper_accepts;
+} kv_fail;
+
+static const char *
+kv_scheme_name(unsigned scheme)
+{
+	return scheme == KV_SCHEME_CORE ? "hawk_core" : bsc_scheme_name[scheme];
+}
+
+/*
+ * The implementation variant of a scheme's rows: ref (ref-avx2 in the
+ * AVX2 context build); the core is HAWK's code.
+ */
+static const char *
+kv_variant(unsigned scheme)
+{
+	bsc_config c;
+
+	(void)bsc_config_init(&c, scheme == KV_SCHEME_CORE
+		? BSC_SCHEME_HAWK : scheme, 0, 8, 1);
+	return c.variant;
+}
+
+static unsigned
+kv_flip_count(unsigned scheme)
+{
+	return scheme == BSC_SCHEME_HAWK ? 2 : 3;
+}
+
+static void
+kv_init_units(const compare_options *opts)
+{
+	kv_kg_count = 0;
+	kv_vf_count = 0;
+	for (unsigned scheme = 0; scheme < BSC_SCHEME_COUNT; scheme ++) {
+		if (!(opts->scheme_mask & (1u << scheme))) {
+			continue;
+		}
+		kv_kg[kv_kg_count].kind = "keygen";
+		kv_kg[kv_kg_count ++].scheme = scheme;
+		for (unsigned v = 0; v < BSC_VERIFIER_COUNT; v ++) {
+			if ((scheme == BSC_SCHEME_HAWK)
+				!= (v == BSC_VERIFIER_UPSTREAM))
+			{
+				continue;
+			}
+			for (unsigned a = 0; a < BSC_ACCT_COUNT; a ++) {
+				kv_vf[kv_vf_count].scheme = scheme;
+				kv_vf[kv_vf_count].verifier = v;
+				kv_vf[kv_vf_count ++].acct = a;
+			}
+		}
+	}
+	kv_kg[kv_kg_count].kind = "keygen_core";
+	kv_kg[kv_kg_count ++].scheme = KV_SCHEME_CORE;
+}
+
+static int
+kv_alloc(kv_values *v, uint64_t count)
+{
+	v->core = malloc((size_t)(count ? count : 1) * sizeof(uint64_t));
+	v->tsc = malloc((size_t)(count ? count : 1) * sizeof(uint64_t));
+	v->count = 0;
+	return v->core != NULL && v->tsc != NULL;
+}
+
+static void
+kv_add(kv_values *v, const cmn_measure *m)
+{
+	v->core[v->count] = m->core_cycles;
+	v->tsc[v->count] = m->tsc_cycles;
+	v->count ++;
+}
+
+static void
+kv_keygen_row(const char *kind, unsigned scheme, unsigned logn,
+	unsigned index, const cmn_measure *m, int ok,
+	uint64_t rng_calls, uint64_t rng_bytes)
+{
+	cmn_sign_row row;
+
+	bsc_row_init(&row, run_id, kind, NULL,
+		scheme == KV_SCHEME_CORE ? BSC_SCHEME_HAWK : scheme, logn,
+		index, m);
+	row.scheme = kv_scheme_name(scheme);
+	row.variant = kv_variant(scheme);
+	row.threads = 1;
+	row.attempts = rng_calls;
+	row.rng_bytes = rng_bytes;
+	row.verify_ok = (uint64_t)(ok != 0);
+	row.mode = MODE_NAME[MODE_KEYVERIFY];
+	cmn_csv_sign_row(&csv, &row);
+}
+
+static size_t kv_sig_size(unsigned scheme, unsigned logn);
+
+static void
+kv_verify_row(const char *kind, const kv_verify_unit *vu, unsigned logn,
+	unsigned key_index, uint64_t msg_index, const cmn_measure *m,
+	int ok, uint64_t batch)
+{
+	cmn_sign_row row;
+
+	bsc_row_init(&row, run_id, kind, NULL, vu->scheme, logn,
+		key_index, m);
+	row.variant = kv_variant(vu->scheme);
+	row.threads = 1;
+	row.msg_index = msg_index;
+	row.sig_bytes = kv_sig_size(vu->scheme, logn);
+	row.accounting = bsc_acct_name[vu->acct];
+	row.encoding_included = 1;
+	row.verify_ok = (uint64_t)(ok != 0);
+	row.mode = MODE_NAME[MODE_KEYVERIFY];
+	row.batch = batch;
+	row.verifier = bsc_verifier_name[vu->verifier];
+	cmn_csv_sign_row(&csv, &row);
+}
+
+static size_t
+kv_sig_size(unsigned scheme, unsigned logn)
+{
+#if !BSC_HAWK_ONLY
+	if (scheme == BSC_SCHEME_E8) {
+		return E8_SIG_SIZE(logn);
+	}
+#endif
+	(void)scheme;
+	return HAWK_SIG_SIZE(logn);
+}
+
+/*
+ * One bit flipped in the salt (byte 0, bit 0), in s1 (HAWK: the first
+ * byte of the encoded s1, bit 0; E8: bit 14 of s1[0]) or, for E8, in s0
+ * (bit 14 of s0[0]).
+ */
+static void
+kv_flip(uint8_t *sig, unsigned scheme, unsigned logn, unsigned flip)
+{
+	/* Both schemes' salts: 14, 24 or 40 bytes. */
+	size_t salt_len = logn == 8 ? 14 : logn == 9 ? 24 : 40;
+	size_t n = (size_t)1 << logn;
+
+	if (flip == 0) {
+		sig[0] ^= 1;
+	} else if (scheme == BSC_SCHEME_HAWK) {
+		sig[salt_len] ^= 1;
+	} else if (flip == 1) {
+		sig[salt_len + 2 * n + 1] ^= 0x40;
+	} else {
+		sig[salt_len + 1] ^= 0x40;
+	}
+}
+
+/*
+ * Key generation phase at logn: warm-up, then N key indices with the
+ * units in rotated order, then the untimed check of every key.
+ */
+static int
+kv_keygen_phase(const compare_options *opts, unsigned logn)
+{
+	static bsc_key kg_keys[BSC_SCHEME_COUNT];
+
+	for (unsigned u = 0; u < kv_kg_count; u ++) {
+		if (!kv_alloc(&kv_kg_values[logn - 8][u], opts->keygen_keys)) {
+			return 0;
+		}
+	}
+	for (unsigned w = 0; w < opts->warmup; w ++) {
+		for (unsigned u = 0; u < kv_kg_count; u ++) {
+			const kv_keygen_unit *ku = &kv_kg[u];
+			cmn_measure m;
+			uint64_t calls, bytes;
+			int ok;
+
+			if (ku->scheme == KV_SCHEME_CORE) {
+				ok = bsc_keygen_core(logn,
+					BSC_STREAM_KEYGEN_WARMUP, w, &m,
+					&calls, &bytes);
+			} else {
+				ok = bsc_keygen_stream(ku->scheme, logn,
+					BSC_STREAM_KEYGEN_WARMUP, w,
+					&kg_keys[ku->scheme], &m, &calls, &bytes);
+			}
+			kv_keygen_row("warmup_keygen", ku->scheme, logn, w, &m,
+				ok, calls, bytes);
+		}
+	}
+	for (unsigned i = 0; i < opts->keygen_keys; i ++) {
+		for (unsigned r = 0; r < kv_kg_count; r ++) {
+			unsigned u = (i + r) % kv_kg_count;
+			const kv_keygen_unit *ku = &kv_kg[u];
+			cmn_measure m;
+			uint64_t calls, bytes;
+			int ok;
+
+			if (ku->scheme == KV_SCHEME_CORE) {
+				ok = bsc_keygen_core(logn,
+					BSC_STREAM_KEYGEN_PAIRED, i, &m,
+					&calls, &bytes);
+			} else {
+				ok = bsc_keygen_stream(ku->scheme, logn,
+					BSC_STREAM_KEYGEN_PAIRED, i,
+					&kg_keys[ku->scheme], &m, &calls, &bytes);
+			}
+			if (!ok) {
+				kv_fail.keygen_failures ++;
+			} else {
+				kv_add(&kv_kg_values[logn - 8][u], &m);
+			}
+			kv_keygen_row(ku->kind, ku->scheme, logn, i, &m, ok,
+				calls, bytes);
+		}
+
+		/*
+		 * Untimed: every key signs one message (ref signer, all_in)
+		 * that must verify.
+		 */
+		for (unsigned u = 0; u < kv_kg_count; u ++) {
+			unsigned scheme = kv_kg[u].scheme;
+			bsc_config c;
+			shake_context sc;
+			cmn_sign_rng rng;
+			cmn_measure m;
+			unsigned attempts;
+			uint64_t rng_bytes;
+
+			if (scheme == KV_SCHEME_CORE) {
+				continue;
+			}
+			if (!bsc_config_init(&c, scheme, 0, logn, 1)
+				|| !bsc_select(&c))
+			{
+				return 0;
+			}
+			bsc_make_message(&sc, logn, KV_CHECK_MESSAGE);
+			bsc_rng_init(&rng, BSC_STREAM_WARMUP, logn, i);
+			if (!bsc_sign(&c, BSC_ACCT_ALL_IN, &kg_keys[scheme],
+				&sc, &rng, sig_buf, &attempts, &rng_bytes, &m,
+				NULL, NULL)
+				|| !bsc_verify(scheme, logn, &kg_keys[scheme],
+					sig_buf, &sc))
+			{
+				kv_fail.check_failures ++;
+			}
+			bsc_deselect();
+		}
+	}
+	return 1;
+}
+
+/*
+ * Verification phase at logn.
+ */
+static int
+kv_verify_phase(const compare_options *opts, unsigned logn)
+{
+	unsigned K = opts->keys, M = opts->sigs_per_key;
+	uint64_t total = (uint64_t)K * M;
+	bsc_key *vkeys[BSC_SCHEME_COUNT] = { NULL };
+	uint8_t *sigs[BSC_SCHEME_COUNT] = { NULL };
+	uint8_t tsig[BSC_SIG_SIZE];
+	int ret = 0;
+
+	for (unsigned u = 0; u < kv_vf_count; u ++) {
+		if (!kv_alloc(&kv_vf_values[logn - 8][u], total)) {
+			return 0;
+		}
+	}
+	for (unsigned s = 0; s < BSC_SCHEME_COUNT; s ++) {
+		if (!kv_alloc(&kv_dec_values[logn - 8][s], K)) {
+			return 0;
+		}
+		if (!(opts->scheme_mask & (1u << s))) {
+			continue;
+		}
+		vkeys[s] = calloc(K, sizeof *vkeys[s]);
+		sigs[s] = malloc((size_t)total * kv_sig_size(s, logn));
+		if (vkeys[s] == NULL || sigs[s] == NULL) {
+			fprintf(stderr, "ERR: out of memory (keyverify)\n");
+			goto done;
+		}
+	}
+
+	/* Keys (untimed) and their decoded public keys (timed). */
+	for (unsigned k = 0; k < K; k ++) {
+		for (unsigned s = 0; s < BSC_SCHEME_COUNT; s ++) {
+			cmn_measure m;
+			uint64_t calls, bytes;
+
+			if (vkeys[s] != NULL && !bsc_keygen_stream(s, logn,
+				BSC_STREAM_KEYGEN_PAIRED, k, &vkeys[s][k], &m,
+				&calls, &bytes))
+			{
+				fprintf(stderr, "ERR: keygen failed (keyverify)"
+					" scheme=%s logn=%u key=%u\n",
+					bsc_scheme_name[s], logn, k);
+				goto done;
+			}
+		}
+		for (unsigned r = 0; r < BSC_SCHEME_COUNT; r ++) {
+			unsigned s = (k + r) % BSC_SCHEME_COUNT;
+			cmn_measure m;
+			cmn_sign_row row;
+			int ok;
+
+			if (vkeys[s] == NULL) {
+				continue;
+			}
+			ok = bsc_decode_pub(s, logn, &vkeys[s][k], &m);
+			if (!ok) {
+				kv_fail.decode_failures ++;
+			} else {
+				kv_add(&kv_dec_values[logn - 8][s], &m);
+			}
+			bsc_row_init(&row, run_id, "pub_decode", NULL, s, logn,
+				k, &m);
+			row.variant = kv_variant(s);
+			row.threads = 1;
+			row.accounting = bsc_acct_name[BSC_ACCT_PREPARED];
+			row.verify_ok = (uint64_t)(ok != 0);
+			row.mode = MODE_NAME[MODE_KEYVERIFY];
+			cmn_csv_sign_row(&csv, &row);
+		}
+	}
+
+	/* Signatures (untimed): ref signer, all_in, T = 1. */
+	for (unsigned s = 0; s < BSC_SCHEME_COUNT; s ++) {
+		bsc_config c;
+
+		if (vkeys[s] == NULL) {
+			continue;
+		}
+		if (!bsc_config_init(&c, s, 0, logn, 1) || !bsc_select(&c)) {
+			goto done;
+		}
+		for (uint64_t j = 0; j < total; j ++) {
+			unsigned k = (unsigned)(j / M);
+			shake_context sc;
+			cmn_sign_rng rng;
+			cmn_measure m;
+			unsigned attempts;
+			uint64_t rng_bytes;
+
+			bsc_make_message(&sc, logn, (unsigned)j);
+			bsc_rng_init(&rng, BSC_STREAM_SIGN + BSC_ACCT_ALL_IN,
+				logn, (unsigned)j);
+			if (!bsc_sign(&c, BSC_ACCT_ALL_IN, &vkeys[s][k], &sc,
+				&rng, sig_buf, &attempts, &rng_bytes, &m,
+				NULL, NULL))
+			{
+				kv_fail.sign_failures ++;
+			}
+			memcpy(sigs[s] + j * kv_sig_size(s, logn), sig_buf,
+				kv_sig_size(s, logn));
+		}
+		bsc_deselect();
+	}
+
+	/* Tampered signatures (untimed): every verifier unit rejects. */
+	for (unsigned k = 0; k < K; k ++) {
+		uint64_t j = (uint64_t)k * M;
+		shake_context sc;
+
+		bsc_make_message(&sc, logn, (unsigned)j);
+		for (unsigned u = 0; u < kv_vf_count; u ++) {
+			const kv_verify_unit *vu = &kv_vf[u];
+			size_t len = kv_sig_size(vu->scheme, logn);
+
+			for (unsigned f = 0; f < kv_flip_count(vu->scheme); f ++) {
+				int ok;
+
+				memcpy(tsig, sigs[vu->scheme] + j * len, len);
+				kv_flip(tsig, vu->scheme, logn, f);
+				ok = bsc_verify_timed(vu->scheme, vu->verifier,
+					vu->acct, logn, &vkeys[vu->scheme][k],
+					tsig, &sc, NULL);
+				kv_fail.tamper_checks ++;
+				if (ok) {
+					kv_fail.tamper_accepts ++;
+					fprintf(stderr, "ERR: tampered signature"
+						" accepted: %s %s %s logn=%u"
+						" key=%u flip=%s\n",
+						bsc_scheme_name[vu->scheme],
+						bsc_verifier_name[vu->verifier],
+						bsc_acct_name[vu->acct], logn, k,
+						KV_FLIP_NAME[f]);
+				}
+				kv_verify_row("verify_reject", vu, logn, k, j,
+					NULL, ok, CMN_UNAVAILABLE);
+			}
+		}
+	}
+
+	/* Warm-up verifications (key 0, signature 0). */
+	for (unsigned w = 0; w < opts->warmup; w ++) {
+		shake_context sc;
+
+		bsc_make_message(&sc, logn, 0);
+		for (unsigned u = 0; u < kv_vf_count; u ++) {
+			const kv_verify_unit *vu = &kv_vf[u];
+			cmn_measure m;
+			int ok;
+
+			ok = bsc_verify_timed(vu->scheme, vu->verifier,
+				vu->acct, logn, &vkeys[vu->scheme][0],
+				sigs[vu->scheme], &sc, &m);
+			kv_verify_row("warmup_verify", vu, logn, 0, 0, &m, ok,
+				CMN_UNAVAILABLE);
+		}
+	}
+
+	/* The timed schedule: per signature, every unit, rotated. */
+	for (uint64_t j = 0; j < total; j ++) {
+		unsigned k = (unsigned)(j / M);
+		uint64_t batch = batch_counter ++;
+		shake_context sc;
+
+		bsc_make_message(&sc, logn, (unsigned)j);
+		for (unsigned r = 0; r < kv_vf_count; r ++) {
+			unsigned u = (unsigned)((j + r) % kv_vf_count);
+			const kv_verify_unit *vu = &kv_vf[u];
+			size_t len = kv_sig_size(vu->scheme, logn);
+			cmn_measure m;
+			int ok;
+
+			ok = bsc_verify_timed(vu->scheme, vu->verifier,
+				vu->acct, logn, &vkeys[vu->scheme][k],
+				sigs[vu->scheme] + j * len, &sc, &m);
+			if (!ok) {
+				kv_fail.verify_failures ++;
+			} else {
+				kv_add(&kv_vf_values[logn - 8][u], &m);
+			}
+			kv_verify_row("verify", vu, logn, k, j, &m, ok, batch);
+		}
+	}
+	ret = 1;
+done:
+	for (unsigned s = 0; s < BSC_SCHEME_COUNT; s ++) {
+		free(vkeys[s]);
+		free(sigs[s]);
+	}
+	return ret;
+}
+
+/*
+ * Expected rows of the keyverify schedule (--list).
+ */
+static void
+kv_list(const compare_options *opts)
+{
+	printf("mode,logn,kind,scheme,variant,verifier,accounting,rows\n");
+	for (unsigned l = 0; l < opts->logn_count; l ++) {
+		unsigned logn = opts->logns[l];
+
+		for (unsigned u = 0; u < kv_kg_count; u ++) {
+			const char *sn = kv_scheme_name(kv_kg[u].scheme);
+			const char *vn = kv_variant(kv_kg[u].scheme);
+
+			printf("keyverify,%u,warmup_keygen,%s,%s,,,%u\n",
+				logn, sn, vn, opts->warmup);
+			printf("keyverify,%u,%s,%s,%s,,,%u\n", logn,
+				kv_kg[u].kind, sn, vn, opts->keygen_keys);
+		}
+		for (unsigned s = 0; s < BSC_SCHEME_COUNT; s ++) {
+			if (opts->scheme_mask & (1u << s)) {
+				printf("keyverify,%u,pub_decode,%s,%s,,prepared,"
+					"%u\n", logn, bsc_scheme_name[s],
+					kv_variant(s), opts->keys);
+			}
+		}
+		for (unsigned u = 0; u < kv_vf_count; u ++) {
+			const kv_verify_unit *vu = &kv_vf[u];
+			const char *sn = bsc_scheme_name[vu->scheme];
+			const char *vn = kv_variant(vu->scheme);
+			const char *vf = bsc_verifier_name[vu->verifier];
+			const char *an = bsc_acct_name[vu->acct];
+
+			printf("keyverify,%u,verify_reject,%s,%s,%s,%s,%u\n",
+				logn, sn, vn, vf, an,
+				opts->keys * kv_flip_count(vu->scheme));
+			printf("keyverify,%u,warmup_verify,%s,%s,%s,%s,%u\n",
+				logn, sn, vn, vf, an, opts->warmup);
+			printf("keyverify,%u,verify,%s,%s,%s,%s,%llu\n",
+				logn, sn, vn, vf, an, (unsigned long long)
+				opts->keys * opts->sigs_per_key);
+		}
+	}
+}
+
+static uint64_t
+kv_mean(const uint64_t *v, uint64_t count)
+{
+	long double s = 0;
+
+	if (count == 0) {
+		return CMN_UNAVAILABLE;
+	}
+	for (uint64_t u = 0; u < count; u ++) {
+		if (v[u] == CMN_UNAVAILABLE) {
+			return CMN_UNAVAILABLE;
+		}
+		s += (long double)v[u];
+	}
+	return (uint64_t)(s / (long double)count + 0.5L);
+}
+
+static void
+kv_summary_line(FILE *fp, unsigned logn, const char *kind,
+	const char *scheme, const char *verifier, const char *acct,
+	kv_values *v)
+{
+	uint64_t mean_core = kv_mean(v->core, v->count);
+	uint64_t mean_tsc = kv_mean(v->tsc, v->count);
+
+	fprintf(fp, "%u,%s,%s,%s,%s,%llu,", logn, kind, scheme, verifier,
+		acct, (unsigned long long)v->count);
+	print_u64(fp, mean_core);
+	fputc(',', fp);
+	print_u64(fp, median_u64(v->core, v->count));
+	fputc(',', fp);
+	print_u64(fp, mean_tsc);
+	fputc(',', fp);
+	print_u64(fp, median_u64(v->tsc, v->count));
+	fputc('\n', fp);
+}
+
+static int
+run_keyverify(const compare_options *opts)
+{
+	if (opts->cpu_count > 0 && !cmn_pin_current_thread(opts->cpus[0])) {
+		fprintf(stderr, "ERR: cannot pin to cpu %u\n", opts->cpus[0]);
+		return 1;
+	}
+	for (unsigned l = 0; l < opts->logn_count; l ++) {
+		if (!kv_keygen_phase(opts, opts->logns[l])) {
+			return 1;
+		}
+	}
+	for (unsigned l = 0; l < opts->logn_count; l ++) {
+		if (!kv_verify_phase(opts, opts->logns[l])) {
+			return 1;
+		}
+	}
+	fflush(csv.fp);
+	print_cpus(stderr, opts);
+	fprintf(stderr, "\nBENCH_COMPARE run_id=%s mode=keyverify flags=%s"
+		" keygen_keys=%u keys=%u sigs_per_key=%u warmup=%u"
+		" core_cycles=%s\n"
+		"logn,kind,scheme,verifier,accounting,count,mean_core_cycles,"
+		"median_core_cycles,mean_tsc_cycles,median_tsc_cycles\n",
+		run_id, bsc_build_flagset, opts->keygen_keys, opts->keys,
+		opts->sigs_per_key, opts->warmup, cmn_core_cycles_status());
+	for (unsigned l = 0; l < opts->logn_count; l ++) {
+		unsigned logn = opts->logns[l];
+
+		for (unsigned u = 0; u < kv_kg_count; u ++) {
+			kv_summary_line(stderr, logn, kv_kg[u].kind,
+				kv_scheme_name(kv_kg[u].scheme), "", "",
+				&kv_kg_values[logn - 8][u]);
+		}
+		for (unsigned s = 0; s < BSC_SCHEME_COUNT; s ++) {
+			if (opts->scheme_mask & (1u << s)) {
+				kv_summary_line(stderr, logn, "pub_decode",
+					bsc_scheme_name[s], "", "prepared",
+					&kv_dec_values[logn - 8][s]);
+			}
+		}
+		for (unsigned u = 0; u < kv_vf_count; u ++) {
+			kv_summary_line(stderr, logn, "verify",
+				bsc_scheme_name[kv_vf[u].scheme],
+				bsc_verifier_name[kv_vf[u].verifier],
+				bsc_acct_name[kv_vf[u].acct],
+				&kv_vf_values[logn - 8][u]);
+		}
+	}
+	fprintf(stderr, "\nBENCH_COMPARE keyverify failures: keygen=%llu"
+		" keygen_check=%llu pub_decode=%llu sign=%llu verify=%llu"
+		" tampered_accepted=%llu of %llu\n",
+		(unsigned long long)kv_fail.keygen_failures,
+		(unsigned long long)kv_fail.check_failures,
+		(unsigned long long)kv_fail.decode_failures,
+		(unsigned long long)kv_fail.sign_failures,
+		(unsigned long long)kv_fail.verify_failures,
+		(unsigned long long)kv_fail.tamper_accepts,
+		(unsigned long long)kv_fail.tamper_checks);
+	if (kv_fail.keygen_failures || kv_fail.check_failures
+		|| kv_fail.decode_failures || kv_fail.sign_failures
+		|| kv_fail.verify_failures || kv_fail.tamper_accepts)
+	{
+		fprintf(stderr, "\nERR: keyverify failures\n");
+		return 1;
+	}
+	return 0;
+}
+
+/*
+ * Sizes CSV (--sizes).
+ */
+static void
+print_sizes(void)
+{
+	printf("scheme,object,logn,bytes\n");
+	for (unsigned logn = 8; logn <= 10; logn ++) {
+		bsc_size sz[32];
+		size_t count = bsc_sizes(logn, sz, 32);
+
+		for (size_t u = 0; u < count; u ++) {
+			printf("%s,%s,%u,%lu\n", sz[u].scheme, sz[u].object,
+				logn, sz[u].bytes);
+		}
+	}
+}
+
 static void
 usage(const char *prog)
 {
 	fprintf(stderr,
-		"usage: %s [--mode latency|throughput] [--keys K]"
+		"usage: %s [--mode latency|throughput|keyverify] [--keys K]"
 		" [--sigs-per-key M]\n"
 		"       [--warmup W] [--logn LIST] [--threads LIST]"
 		" [--variant NAME]...\n"
@@ -839,11 +1541,19 @@ usage(const char *prog)
 		" [--run-id ID]\n"
 		"       [--out FILE] [--no-header] [--no-pool-accounting]"
 		" [--list] [--build-info]\n"
+		"       [--keygen-keys N] [--sizes]\n"
 		"  --mode MODE       latency (one signer, T sampler threads;"
-		" default) or\n"
+		" default),\n"
 		"                    throughput (P single-thread signer"
-		" processes)\n"
-		"  --keys K          keys per scheme and degree (default %u)\n"
+		" processes) or\n"
+		"                    keyverify (key generation and"
+		" verification timing)\n"
+		"  --keys K          keys per scheme and degree (default %u;"
+		" keyverify:\n"
+		"                    keys of the verification phase)\n"
+		"  --keygen-keys N   keyverify: timed key generations per"
+		" scheme and degree\n"
+		"                    (default %u)\n"
 		"  --sigs-per-key M  signatures per key and configuration, each"
 		" under both\n"
 		"                    accounting modes (default %u)\n"
@@ -874,11 +1584,15 @@ usage(const char *prog)
 		" random suffix)\n"
 		"  --out FILE        write the CSV to FILE (default stdout)\n"
 		"  --list            print the configurations in schedule"
-		" order and exit\n"
+		" order (keyverify:\n"
+		"                    the expected rows) and exit\n"
+		"  --sizes           print the key, signature and tmp sizes"
+		" CSV and exit\n"
 		"  --build-info      print the build's flag set, flags,"
 		" compiler and the\n"
 		"                    core-cycle counter status and exit\n",
-		prog, DEFAULT_KEYS, DEFAULT_SIGS_PER_KEY, DEFAULT_WARMUP,
+		prog, DEFAULT_KEYS, DEFAULT_KEYGEN_KEYS, DEFAULT_SIGS_PER_KEY,
+		DEFAULT_WARMUP,
 		CMN_POOL_MAX_THREADS + 1, DEFAULT_PROCS);
 }
 
@@ -929,6 +1643,7 @@ parse_options(int argc, char **argv, compare_options *opts)
 	opts->thread_cases[4] = 16;
 	opts->thread_case_count = 5;
 	opts->pool_accounting = 1;
+	opts->keygen_keys = DEFAULT_KEYGEN_KEYS;
 	for (unsigned s = 0; s < BSC_SCHEME_COUNT; s ++) {
 		if (bsc_variant_count(s) > 0) {
 			opts->scheme_mask |= 1u << s;
@@ -959,6 +1674,9 @@ parse_options(int argc, char **argv, compare_options *opts)
 		} else if (strcmp(arg, "--no-pool-accounting") == 0) {
 			opts->pool_accounting = 0;
 			continue;
+		} else if (strcmp(arg, "--sizes") == 0) {
+			opts->sizes = 1;
+			continue;
 		}
 		if (val == NULL) {
 			fprintf(stderr, "ERR: missing value or unknown"
@@ -971,11 +1689,16 @@ parse_options(int argc, char **argv, compare_options *opts)
 				opts->mode = MODE_LATENCY;
 			} else if (strcmp(val, "throughput") == 0) {
 				opts->mode = MODE_THROUGHPUT;
+			} else if (strcmp(val, "keyverify") == 0) {
+				opts->mode = MODE_KEYVERIFY;
 			} else {
 				ok = 0;
 			}
 		} else if (strcmp(arg, "--keys") == 0) {
 			ok = parse_unsigned_arg(val, 1, MAX_KEYS, &opts->keys);
+		} else if (strcmp(arg, "--keygen-keys") == 0) {
+			ok = parse_unsigned_arg(val, 1, MAX_KEYGEN_KEYS,
+				&opts->keygen_keys);
 		} else if (strcmp(arg, "--sigs-per-key") == 0) {
 			ok = parse_unsigned_arg(val, 1, MAX_SIGS_PER_KEY,
 				&opts->sigs_per_key);
@@ -1053,6 +1776,18 @@ parse_options(int argc, char **argv, compare_options *opts)
 			return 0;
 		}
 	}
+	if (opts->sizes) {
+		print_sizes();
+		return -1;
+	}
+	if (opts->mode == MODE_KEYVERIFY) {
+		kv_init_units(opts);
+		if (list) {
+			kv_list(opts);
+			return -1;
+		}
+		return 1;
+	}
 	if (!build_configs(opts)) {
 		return 0;
 	}
@@ -1111,7 +1846,7 @@ main(int argc, char **argv)
 			return 1;
 		}
 	}
-	if (!alloc_stats(&opts)) {
+	if (opts.mode != MODE_KEYVERIFY && !alloc_stats(&opts)) {
 		fprintf(stderr, "ERR: out of memory\n");
 		return 1;
 	}
@@ -1126,8 +1861,9 @@ main(int argc, char **argv)
 		fprintf(stderr, "ERR: cannot set pool accounting\n");
 		return 1;
 	}
-	r = opts.mode == MODE_LATENCY
-		? run_latency(&opts) : run_throughput(&opts);
+	r = opts.mode == MODE_LATENCY ? run_latency(&opts)
+		: opts.mode == MODE_THROUGHPUT ? run_throughput(&opts)
+		: run_keyverify(&opts);
 	if (out != stdout && fclose(out) != 0) {
 		fprintf(stderr, "ERR: cannot write %s\n", opts.out_path);
 		return 1;

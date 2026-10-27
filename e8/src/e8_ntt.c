@@ -18,6 +18,70 @@ const e8_ntt_prime E8_NTT_PRIMES[E8_NTT_PRIME_COUNT] = {
 	{ 2147377153, 3690881023,  978644358 }
 };
 
+/*
+ * Generated twiddle tables and constants (e8_ntt_tab, hawk_e8_inner.h);
+ * this is the only translation unit that includes them.
+ */
+#include "e8_tables_ntt.h"
+
+/* see hawk_e8_inner.h */
+const e8_ntt_tab *
+e8_ntt_tab_get(unsigned prime)
+{
+	return prime < E8_NTT_TAB_PRIMES ? &e8_ntt_tabs[prime] : NULL;
+}
+
+/* see hawk_e8_inner.h */
+const uint32_t *
+e8_ntt_delta_mont(unsigned logn, unsigned prime)
+{
+	if (prime >= E8_NTT_TAB_PRIMES) {
+		return NULL;
+	}
+	switch (logn) {
+	case 8:
+		return e8_ntt_delta_logn8[prime];
+	case 9:
+		return e8_ntt_delta_logn9[prime];
+	case 10:
+		return e8_ntt_delta_logn10[prime];
+	default:
+		return NULL;
+	}
+}
+
+/* see hawk_e8_inner.h */
+const uint32_t *
+e8_ntt_s00_mont(unsigned logn)
+{
+	switch (logn) {
+	case 8:
+		return e8_ntt_s00_logn8;
+	case 9:
+		return e8_ntt_s00_logn9;
+	case 10:
+		return e8_ntt_s00_logn10;
+	default:
+		return NULL;
+	}
+}
+
+/* see hawk_e8_inner.h */
+const uint32_t *
+e8_ntt_s01_mont(unsigned logn)
+{
+	switch (logn) {
+	case 8:
+		return e8_ntt_s01_logn8;
+	case 9:
+		return e8_ntt_s01_logn9;
+	case 10:
+		return e8_ntt_s01_logn10;
+	default:
+		return NULL;
+	}
+}
+
 /* see hawk_e8_inner.h */
 uint32_t
 e8_mp_montymul(uint32_t a, uint32_t b, uint32_t p, uint32_t p0i)
@@ -34,6 +98,14 @@ e8_mp_add(uint32_t a, uint32_t b, uint32_t p)
 {
 	uint32_t d = a + b;
 	return d >= p ? d - p : d;
+}
+
+/* see hawk_e8_inner.h */
+uint32_t
+e8_mp_sub(uint32_t a, uint32_t b, uint32_t p)
+{
+	uint32_t d = a - b;
+	return d + (p & tbmask(d));
 }
 
 /* see hawk_e8_inner.h */
@@ -177,6 +249,72 @@ e8_ntt_to_ntt(unsigned logn, uint32_t *d,
 
 /* see hawk_e8_inner.h */
 void
+e8_poly_to_ntt_tab(unsigned logn, uint32_t *d, const int32_t *a,
+	const e8_ntt_tab *tab)
+{
+	size_t n = (size_t)1 << logn;
+	uint32_t p = tab->p;
+
+	for (size_t u = 0; u < n; u ++) {
+		uint32_t x = (uint32_t)a[u];
+		d[u] = x + (p & tbmask(x));
+	}
+	e8_ntt(logn, d, tab->gm, p, tab->p0i);
+}
+
+/* see hawk_e8_inner.h */
+void
+e8_poly_to_ntt_autoadj_tab(unsigned logn, uint32_t *d, const int32_t *a,
+	const e8_ntt_tab *tab)
+{
+	size_t hn = (size_t)1 << (logn - 1);
+	size_t qn = hn >> 1;
+	uint32_t p = tab->p;
+	uint32_t p0i = tab->p0i;
+	const uint32_t *gm = tab->gm;
+
+	for (size_t u = 0; u < hn; u ++) {
+		uint32_t x = (uint32_t)a[u];
+		d[u] = x + (p & tbmask(x));
+	}
+
+	/*
+	 * HAWK's mp_NTT_autoadj(): the first NTT layer combines a[u] with
+	 * a[u + n/2] = -a[n/2 - u] (and a[n/2] = 0), then the remaining
+	 * layers run on the first half only.
+	 */
+	uint32_t s1 = gm[1];
+	for (size_t u = 1; u < qn; u ++) {
+		uint32_t x1 = d[u];
+		uint32_t x2 = d[hn - u];
+		d[u] = e8_mp_sub(x1, e8_mp_montymul(x2, s1, p, p0i), p);
+		d[hn - u] = e8_mp_sub(x2, e8_mp_montymul(x1, s1, p, p0i), p);
+	}
+	d[qn] = e8_mp_sub(d[qn], e8_mp_montymul(d[qn], s1, p, p0i), p);
+
+	size_t t = hn;
+	for (unsigned lm = 1; lm < logn; lm ++) {
+		size_t m = (size_t)1 << lm;
+		size_t ht = t >> 1;
+		size_t v0 = 0;
+		for (size_t u = 0; u < (m >> 1); u ++) {
+			uint32_t s = gm[u + m];
+			for (size_t v = 0; v < ht; v ++) {
+				size_t k1 = v0 + v;
+				size_t k2 = k1 + ht;
+				uint32_t x1 = d[k1];
+				uint32_t x2 = e8_mp_montymul(d[k2], s, p, p0i);
+				d[k1] = e8_mp_add(x1, x2, p);
+				d[k2] = e8_mp_sub(x1, x2, p);
+			}
+			v0 += t;
+		}
+		t = ht;
+	}
+}
+
+/* see hawk_e8_inner.h */
+void
 e8_ntt_from_ntt(unsigned logn, uint32_t *a, const e8_ntt_prime *prime)
 {
 	size_t n = (size_t)1 << logn;
@@ -254,6 +392,118 @@ e8_ntt_crt_reconstruct(int32_t *d, const uint32_t *const residues[],
 		d[u] = (int32_t)x;
 	}
 	return 1;
+}
+
+/* see hawk_e8_inner.h */
+void
+e8_compute_keygen_qform(int32_t *q00, int32_t *q01, int32_t *q11,
+	const int8_t *f, const int8_t *g,
+	const int8_t *F, const int8_t *G, unsigned logn)
+{
+	/*
+	 * HAWK's make_q001() technique: one NTT prime p (the verifier's
+	 * first), Q = B^* S_n B entry by entry in the NTT domain, then back.
+	 * The result is exact: with |f|, |g|, |F|, |G| <= 127 (int8 keys)
+	 * and the S_n entries s00 = 8 + 4 X^(n/4) - 4 X^(3n/4),
+	 * s01 = -s10 = 4 X^(n/2), s11 = 8, every coefficient of q00, q01 and
+	 * q11 is at most n * 127 * (20 + 12) * 127 = 516128 n
+	 * (5.3e8 for n = 1024) in absolute value, below p/2 (1.07e9).
+	 */
+	size_t n = (size_t)1 << logn;
+	size_t hn = n >> 1;
+	const e8_ntt_tab *tab = e8_ntt_tab_get(0);
+	const uint32_t *s00 = e8_ntt_s00_mont(logn);
+	const uint32_t *s01 = e8_ntt_s01_mont(logn);
+	uint32_t p = tab->p;
+	uint32_t p0i = tab->p0i;
+	uint32_t R2 = tab->R2;
+	uint32_t ni = tab->ni[logn - 8];
+	uint32_t tf[E8_NTT_MAXN], tg[E8_NTT_MAXN], tF[E8_NTT_MAXN], tG[E8_NTT_MAXN];
+	uint32_t *t00 = (uint32_t *)q00;
+	uint32_t *t01 = (uint32_t *)q01;
+	uint32_t *t11 = (uint32_t *)q11;
+
+	for (size_t u = 0; u < n; u ++) {
+		tf[u] = (uint32_t)f[u] + (p & tbmask((uint32_t)f[u]));
+		tg[u] = (uint32_t)g[u] + (p & tbmask((uint32_t)g[u]));
+		tF[u] = (uint32_t)F[u] + (p & tbmask((uint32_t)F[u]));
+		tG[u] = (uint32_t)G[u] + (p & tbmask((uint32_t)G[u]));
+	}
+	e8_ntt(logn, tf, tab->gm, p, p0i);
+	e8_ntt(logn, tg, tab->gm, p, p0i);
+	e8_ntt(logn, tF, tab->gm, p, p0i);
+	e8_ntt(logn, tG, tab->gm, p, p0i);
+
+	/*
+	 * NTT(adj(a))[u] = NTT(a)[n - 1 - u]. Per pair (u, v = n - 1 - u):
+	 * (sx, sy) = S_n (x, y) at both indices, then
+	 *   q00 = adj(f) sf + adj(g) sg
+	 *   q01 = adj(f) sF + adj(g) sG
+	 *   q11 = adj(F) sF + adj(G) sG
+	 * q00 and q11 are auto-adjoint (equal NTT values at u and v).
+	 * Montgomery products divide by R; the final R2 product restores
+	 * plain values.
+	 */
+	for (size_t u = 0; u < hn; u ++) {
+		size_t v = n - 1 - u;
+		uint32_t fu = tf[u], fv = tf[v], gu = tg[u], gv = tg[v];
+		uint32_t Fu = tF[u], Fv = tF[v], Gu = tG[u], Gv = tG[v];
+		uint32_t g8u = e8_mp_add(gu, gu, p);
+		uint32_t G8u = e8_mp_add(Gu, Gu, p), G8v = e8_mp_add(Gv, Gv, p);
+
+		g8u = e8_mp_add(g8u, g8u, p);
+		g8u = e8_mp_add(g8u, g8u, p);
+		G8u = e8_mp_add(G8u, G8u, p);
+		G8u = e8_mp_add(G8u, G8u, p);
+		G8v = e8_mp_add(G8v, G8v, p);
+		G8v = e8_mp_add(G8v, G8v, p);
+
+		uint32_t sfu = e8_mp_add(e8_mp_montymul(s00[u], fu, p, p0i),
+			e8_mp_montymul(s01[u], gu, p, p0i), p);
+		uint32_t sgu = e8_mp_sub(g8u,
+			e8_mp_montymul(s01[u], fu, p, p0i), p);
+		uint32_t sFu = e8_mp_add(e8_mp_montymul(s00[u], Fu, p, p0i),
+			e8_mp_montymul(s01[u], Gu, p, p0i), p);
+		uint32_t sFv = e8_mp_add(e8_mp_montymul(s00[v], Fv, p, p0i),
+			e8_mp_montymul(s01[v], Gv, p, p0i), p);
+		uint32_t sGu = e8_mp_sub(G8u,
+			e8_mp_montymul(s01[u], Fu, p, p0i), p);
+		uint32_t sGv = e8_mp_sub(G8v,
+			e8_mp_montymul(s01[v], Fv, p, p0i), p);
+
+		uint32_t x00 = e8_mp_montymul(R2, e8_mp_add(
+			e8_mp_montymul(fv, sfu, p, p0i),
+			e8_mp_montymul(gv, sgu, p, p0i), p), p, p0i);
+		uint32_t x11 = e8_mp_montymul(R2, e8_mp_add(
+			e8_mp_montymul(Fv, sFu, p, p0i),
+			e8_mp_montymul(Gv, sGu, p, p0i), p), p, p0i);
+		t00[u] = t00[v] = x00;
+		t11[u] = t11[v] = x11;
+		t01[u] = e8_mp_montymul(R2, e8_mp_add(
+			e8_mp_montymul(fv, sFu, p, p0i),
+			e8_mp_montymul(gv, sGu, p, p0i), p), p, p0i);
+		t01[v] = e8_mp_montymul(R2, e8_mp_add(
+			e8_mp_montymul(fu, sFv, p, p0i),
+			e8_mp_montymul(gu, sGv, p, p0i), p), p, p0i);
+	}
+
+	/*
+	 * Back to coefficients: the inverse NTT returns n times the
+	 * polynomial; the product with ni = R/n mod p divides by n. Values
+	 * are then normalised to (-p/2, p/2).
+	 */
+	e8_intt(logn, t00, tab->igm, p, p0i);
+	e8_intt(logn, t01, tab->igm, p, p0i);
+	e8_intt(logn, t11, tab->igm, p, p0i);
+	for (size_t u = 0; u < n; u ++) {
+		uint32_t x00 = e8_mp_montymul(t00[u], ni, p, p0i);
+		uint32_t x01 = e8_mp_montymul(t01[u], ni, p, p0i);
+		uint32_t x11 = e8_mp_montymul(t11[u], ni, p, p0i);
+
+		q00[u] = (int32_t)(x00 - (p & tbmask((p >> 1) - x00)));
+		q01[u] = (int32_t)(x01 - (p & tbmask((p >> 1) - x01)));
+		q11[u] = (int32_t)(x11 - (p & tbmask((p >> 1) - x11)));
+	}
 }
 
 #endif

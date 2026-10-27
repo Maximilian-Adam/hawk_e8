@@ -1,69 +1,77 @@
-# Comparison harness (plan.md Step 7)
+# Comparison harness
 
 One harness times every sampler variant of both schemes under identical
 conditions, records the environment, and turns the per-signature CSVs into
-the statistics and tables of Step 10.  The accounting (what each timed call
+the statistics and comparison tables.  The accounting (what each timed call
 contains) and the per-signature CSV schema are defined in
 [`perf_comparison_final.md`](perf_comparison_final.md).  This document
 covers the harness, its builds, the run layout and the analysis.
 
 | piece | file | role |
 | --- | --- | --- |
-| harness | `compare/bench_compare.c` | every (scheme, variant, threads, logn) configuration, interleaved; latency and throughput modes; pinning |
-| signing core | `compare/bench_sign_core.{c,h}` | keygen, preparation, the timed `sign_finish` of every variant, verification, seeds, messages, row fields; shared with `e8_sign_bench` |
+| harness | `compare/bench_compare.c` | every (scheme, variant, threads, logn) configuration, interleaved; latency and throughput modes; pinning; keyverify mode (key generation and verification); `--sizes` |
+| signing core | `compare/bench_sign_core.{c,h}` | keygen, preparation, the timed `sign_finish` of every variant, verification, seeds, messages, row fields; the paired keygen stream, `keygen_core`, public-key decoding and timed verification of keyverify mode; shared with `e8_sign_bench` |
 | pool affinity | `common/cmn_pool.{c,h}` | `cmn_pool_set_affinity()`, `cmn_pin_current_thread()` (both schemes alike) |
 | environment | `compare/env_capture.sh` | `env.txt` beside every run's CSVs |
-| preflight | `compare/preflight.sh` | machine-state checks before every run (Step 8) |
-| CPU lists | `compare/ccd_cpus.sh` | Step 9's pinned CPU lists from the L3 topology (Step 8) |
+| preflight | `compare/preflight.sh` | machine-state checks before every run |
+| CPU lists | `compare/ccd_cpus.sh` | the run sets' pinned CPU lists from the L3 topology |
 | driver | `compare/run_compare.sh` | run sets; one run directory per run and flag set, then the analysis |
 | analysis | `compare/analysis/analyze.py`, `compare_data.py`, `compare_tables.py` | statistics, ratios with bootstrap CIs, joins, acceptance checks, LaTeX and Markdown tables |
-| sampler only | `compare/e8_sampler_bench.c --variant-matrix` | Step 10 table 3 |
-| stages | `e8_sign_profile_bench`, `hawk_sign_profile_bench` (`--stage-csv`) | Step 10 table 6 |
+| sampler only | `compare/e8_sampler_bench.c --variant-matrix` | table 3 |
+| stages | `e8_sign_profile_bench`, `hawk_sign_profile_bench` (`--stage-csv`) | table 6 |
 
 ## Running
 
 ```sh
-make bench-compare-smoke   # Step 8: every configuration of both flag sets at
+make bench-compare-smoke   # every configuration of both flag sets at
                            # small counts, the analysis self-test, the analysis
-make bench-compare         # one run at Step 9's volume (10 keys x 1,000
+make bench-compare         # one run at full volume (10 keys x 1,000
                            # signatures per configuration), flag set O2
 ```
 
 Both forward to `e8/` and call `compare/run_compare.sh`; make variables
 `COMPARE_FLAGSETS` (default `O2`), `COMPARE_RUNS` (default 1) and
-`COMPARE_ARGS` (passed to the driver) select more.  Step 9's two run sets
+`COMPARE_ARGS` (passed to the driver) select more.  The two bare-metal run sets
 (the exact commands, machine setup and checks: the run book,
-[`step9_runbook.md`](step9_runbook.md)):
+[`measurement_runbook.md`](measurement_runbook.md)):
 
 ```sh
 make bench-compare COMPARE_FLAGSETS="O2 O3native" COMPARE_RUNS=5 \
-  COMPARE_ARGS="--run-set headline --cpus $(sh e8/compare/ccd_cpus.sh headline) --name step9-headline"
+  COMPARE_ARGS="--run-set headline --cpus $(sh e8/compare/ccd_cpus.sh headline) --name headline"
 make bench-compare COMPARE_FLAGSETS="O2 O3native" COMPARE_RUNS=5 \
-  COMPARE_ARGS="--run-set cross-ccd --cpus $(sh e8/compare/ccd_cpus.sh cross-ccd) --name step9-cross-ccd"
+  COMPARE_ARGS="--run-set cross-ccd --cpus $(sh e8/compare/ccd_cpus.sh cross-ccd) --name cross-ccd"
 ```
 
 Driver options: `--smoke`, `--run-set all|headline|cross-ccd` (below),
 `--flagsets`, `--runs R` (runs and flag sets alternate: r1/O2,
 r1/O3native, r2/O2, ...), `--keys`, `--sigs-per-key`, `--procs`, `--cpus`,
 `--threads`, `--logn`, `--warmup`, `--sampler-trials`, `--stage-trials`,
-`--bootstrap`, `--name` (the analysis directory; default the first run's
-`run_id`, prefixed `RUNSET-` for the Step 9 run sets), `--no-analysis`,
+`--keygen-keys N` (timed key generations per scheme and degree in the
+`keyverify` steps), `--bootstrap`, `--name` (the analysis directory;
+default the first run's
+`run_id`, prefixed `RUNSET-` for the `headline` and `cross-ccd` run sets), `--no-analysis`,
 `--force` (run despite a failed preflight; recorded), `--freq-tolerance
 PCT` (the preflight's frequency check, default 1).  Defaults: smoke 2 keys
-x 4 signatures, `P = 4`, 50 sampler trials, 20 stage trials, 200 bootstrap
-resamples; full 10 x 1,000, `P = 4`, 2,000, 1,000, 2,000.
+x 4 signatures, 20 keygen keys, `P = 4`, 50 sampler trials, 20 stage
+trials, 200 bootstrap resamples; full 10 x 1,000, 1,000 keygen keys,
+`P = 4`, 2,000, 1,000, 2,000.  The keyverify steps use `--keys` and
+`--sigs-per-key` for their verification inputs (10 keys x 1,000
+signatures at full volume).
 
 Run sets (`--run-set`; written as `run_set` to `env.txt` and
 `commands.txt`):
 
 | run set | steps | `T` (default) | `P` (default) | `--cpus` |
 | --- | --- | --- | --- | --- |
-| `all` (default) | all six | 1, 2, 4, 8, 16 | 4 | optional |
-| `headline` | all six | 1, 2, 4, 8 | `\|--cpus\|` | required (not for `--smoke`) |
+| `all` (default) | all eight | 1, 2, 4, 8, 16 | 4 | optional |
+| `headline` | all eight | 1, 2, 4, 8 | `\|--cpus\|` | required (not for `--smoke`) |
 | `cross-ccd` | latency only | 1, 2, 4, 8, 16 | none | required (not for `--smoke`) |
 
+The eight steps, in order: `keyverify`, `keyverify_avx2` (before
+`latency`), `latency`, `throughput`, `latency_avx2`, `sampler`,
+`stages_hawk`, `stages_e8`; every run also writes `sizes.csv`.
 `all` is the smoke run's and any ad hoc run's; `headline` and `cross-ccd`
-are Step 9's (plan.md, decided before Step 8).  `--threads` and `--procs`
+are the bare-metal measurement's.  `--threads` and `--procs`
 override the defaults.  Before any step the driver refuses (exit 2) a
 `--cpus` list that is not a comma-separated list of CPU numbers, repeats a
 CPU, or has fewer CPUs than the largest `T` (latency) or than `P`
@@ -94,12 +102,15 @@ with its exit status, and `commands.txt` records every step's command,
 start, duration and exit status); 2 on a usage or configuration error; 3
 if the preflight refused a run.
 
-`bench_compare` itself: `--mode latency|throughput`, `--keys K`,
+`bench_compare` itself: `--mode latency|throughput|keyverify`,
+`--keygen-keys N` (keyverify), `--sizes` (the sizes CSV), `--keys K`,
 `--sigs-per-key M`, `--warmup W`, `--logn LIST`, `--threads LIST` (default
 1,2,4,8,16), `--variant NAME`..., `--scheme hawk|e8`..., `--procs P`,
 `--cpus LIST`, `--run-id ID`, `--out FILE`, `--list` (the configurations in
-schedule order), `--build-info` (flag set, flags, compiler, core-cycle
-counter).  Exit status 1 on any signing or verification failure.
+schedule order; keyverify: the expected row counts), `--build-info` (flag
+set, flags, compiler, core-cycle counter).  Exit status 1 on any signing or
+verification failure (keyverify: also a failed key generation, key check
+or decoding, or an accepted tampered signature).
 
 ## Schedule
 
@@ -139,6 +150,9 @@ counter).  Exit status 1 on any signing or verification failure.
   `T - 1` pool workers).  `T` in `--threads` (default 1, 2, 4, 8, 16);
   upstream HAWK `ref` only at `T = 1`.  93 configurations with the
   defaults (3 degrees x (HAWK: ref + 3 x 5, E8: 3 x 5)).
+- **keyverify**: key generation and verification, single thread, pinned
+  to `LIST[0]`, no pool; schedule in "Key generation and verification"
+  below.
 - **throughput**: `P` (`--procs`, default 2; driver default 4) independent
   single-thread signer processes, forked after key generation (they share
   the keys), each running the same `T = 1` schedule (21 configurations),
@@ -226,7 +240,7 @@ instead and has no `bp_muladd_64`; its signatures verify at every flag
 set.  Cost of the flag: at O3native, E8 `ref` +1.2 to +1.5%, E8 `hot64` /
 `hot32` within 0.6%; at O2 (where both builds work), both schemes within
 +-1.5% (`ref` pair +0.3 to +0.6% on both sides).  It applies to every
-object of the flag set, both schemes alike.  Recheck on the Step 9
+object of the flag set, both schemes alike.  Recheck on the measurement
 machine's compiler.  The harness verifies every signature, so a broken
 build cannot produce a timing silently.
 
@@ -245,6 +259,11 @@ e8/results/compare/
     commands.txt            run parameters (run_set, steps, threads, ...),
                             the preflight, every command, start time,
                             duration, exit status
+    sizes.csv/.txt          bench_compare-FS --sizes
+    keyverify.csv/.txt      bench_compare-FS --mode keyverify
+    keyverify_list.csv      the same with --list: expected row counts
+    keyverify_avx2.csv/.txt, keyverify_avx2_list.csv
+                            bench_compare_avx2-FS --mode keyverify (context)
     latency.csv/.txt        bench_compare-FS --mode latency (CSV / summary)
     throughput.csv/.txt     bench_compare-FS --mode throughput
     latency_avx2.csv/.txt   bench_compare_avx2-FS (context)
@@ -253,6 +272,7 @@ e8/results/compare/
     stages_e8.csv/.txt      e8_sign_profile_bench-FS --variant ref --threads 1 --stage-csv
   analysis/NAME/            analyze.py over one or more run directories
     summary.csv runs.csv ratios.csv acceptance.txt tables.md tables.tex
+    keyverify_summary.csv keyverify_ratios.csv
 ```
 
 The sampler and stage CSVs carry no `run_id`; the directory does.  Copy
@@ -274,7 +294,7 @@ pinned CPU: which CCD and whether it has the V-cache), `perf_event_paranoid`,
 `march_native` (what `-march=native` resolves to), `binary`, `git_commit`,
 `git_dirty` (tracked files only), `loadavg`.  Anything it cannot read is
 `unavailable`; it never fails.  The driver appends `run_set`, `preflight`
-and the `preflight_NAME` lines (Step 8).  On WSL: governor, scaling driver, frequency
+and the `preflight_NAME` lines.  On WSL: governor, scaling driver, frequency
 and boost are unavailable, microcode reads `0xffffffff`, SMT is on.
 
 ## Analysis
@@ -283,7 +303,7 @@ and boost are unavailable, microcode reads `0xffffffff`, SMT is on.
 [--seed S] [--run-tolerance F] [--core-tsc-tolerance F] [--precision CSV]
 [--validation CSV] [--no-fail] PATH...` (standard library, no bytecode
 written).  `PATH`: run directories, or single CSVs in the schema (an
-`e8_sign_bench` output works; missing Step 7 columns default to `mode =
+`e8_sign_bench` output works; missing harness columns default to `mode =
 latency`); `NAME.csv.gz` is read like `NAME.csv`.  `--self-test` checks
 the bootstrap against brute-force resampling, determinism, and that the
 checks pass on good synthetic runs and fail on a verification failure, a
@@ -296,16 +316,15 @@ more than one run set, no signature rows).
 - **Keys** of the statistics: (flags, mode, scheme, variant, threads,
   logn, accounting); runs are combined, flag sets never.
 - **Run sets**: every input must belong to one run set (`run_set` in
-  `env.txt` or `commands.txt`; runs written before Step 8 have none and
+  `env.txt` or `commands.txt`; older runs have none and
   count as `all`); mixed inputs are refused, so the headline and
   cross-CCD runs never share a key or a table.  The run set is named in
   the header and the table titles.
 - **Memory**: per run and key, the timing columns are kept as sorted
   compact arrays (4 bytes per value, 8 if a value needs it) and attempts
   and `rng_bytes` as sums (all the statistics use), read with
-  `csv.reader`; see "Step 8" for the measurements.  The statistics are
-  those of Step 7 (identical `summary.csv`, `runs.csv`, `ratios.csv` on
-  the same inputs and seed).
+  `csv.reader` (under 1 GB and about 2 minutes for 5 full runs x 2 flag
+  sets).
 - **Per key and timing column** (`core_cycles`, primary; `tsc_cycles`,
   `wall_ns`, `cpu_ns_all_threads`): per-run median; the estimate is the
   mean of the per-run medians; the run spread is (max - min) / estimate;
@@ -329,7 +348,7 @@ more than one run set, no signature rows).
   `sig_rd513_m1_log2`, `cond6_ok`, `a_opt`, `loss_opt`) and
   `docs/validation_summary.csv` (`signatures`, `sign_failures`,
   `verify_failures`, `attempts_per_sig`).
-- **Acceptance checks** (Step 9; any FAIL makes the exit status 1):
+- **Acceptance checks** (any FAIL makes the exit status 1):
   - `verify`: zero signing or verification failures, warm-ups included;
   - `complete`: per CSV part (file, mode, process): every configuration of
     the grid (every variant at every thread count and degree seen;
@@ -341,7 +360,7 @@ more than one run set, no signature rows).
     header-only, unreadable or with malformed rows (a wrong column count
     or an unreadable number, as a killed process leaves);
   - `attempts`: per key, the excess attempts within 5 sigma (geometric
-    variance) of Step 6's `attempts_per_sig` (HAWK n = 256 about 1.1796,
+    variance) of the validation's `attempts_per_sig` (HAWK n = 256 about 1.1796,
     the rest about 1.0000), plus 2 attempts of slack for rare retries;
   - `run_spread`: per key with at least 2 runs, per-run medians (primary
     metric; throughput) within `--run-tolerance` (default 3%); SKIP with
@@ -370,265 +389,125 @@ more than one run set, no signature rows).
   per call, HAWK's 2n).
 - **Other outputs**: `summary.csv` (every key with statistics and joins),
   `runs.csv` (per key and run), `ratios.csv` (every ratio and CI),
-  `acceptance.txt`.
+  `acceptance.txt`; `keyverify_summary.csv` and `keyverify_ratios.csv`
+  (below).
+- **Key generation and verification**: rows of mode
+  `keyverify` are kept apart from the signing keys. Their statistics,
+  checks (`keyverify_complete`, `verify_failures`, `verify_reject`,
+  `run_spread` on the verification medians) and Tables 8-10 are described
+  in "Key generation and verification" below.
 
-## Decisions (Step 7)
+## Key generation and verification
 
-- **Threaded and serial configurations**: interleaved within groups of
-  equal `T`; between groups the pool is joined and resized and every
-  configuration re-warmed outside timed regions (the handoff's default).
-  The alternative, a pool that parks idle workers, would change the shared
-  pool's dispatch path for both schemes; it was not needed: no serial row
-  runs beside spinning workers, and the remaining idle spinning inside a
-  threaded group is identical for both schemes and reported per group.
-- **CSV schema**: `mode`, `proc`, `flags`, `batch` appended (existing
-  columns and order unchanged) and a `warmup` kind; `cmn_csv.h`, its test
-  and `perf_comparison_final.md` updated.  `e8_sign_bench` switched to the
-  new schema (`mode = latency`, its build's `flags`, `proc` and `batch`
-  empty, no warm-up rows), so one reader handles both.
-- **`bench_compare` vs `e8_sign_bench`**: the shared signing, keygen,
-  verification, seed, message and row code moved to
-  `compare/bench_sign_core.{c,h}`, used by both; `e8_sign_bench` and `make
-  sign-bench` keep working (same seeds and schedule; its profile build now
-  records every E8 block and writes `--stage-csv`); `bench_compare` is the
-  harness of record.  `e8_correctness.c` was left as it is.
-- **Sampler-only and stage tables**: separate binaries
-  (`e8_sampler_bench`, the profile benches) built with the same flag sets
-  and run by the driver into the same run directory (whose `env.txt`
-  carries the `run_id`); the analysis reads their CSVs.
-- **O3native**: `-O3 -march=native -fno-strict-aliasing` for every object
-  of the flag set, both schemes alike (decided by the user after the root
-  cause was found; see "Builds").  Rejected: patching `hawk_sign.c` (the
-  timed HAWK would no longer be upstream), `-fno-tree-slp-vectorize` (hides
-  the bug instead of tolerating it), dropping `-march=native` (changes
-  what Step 9 measures).
+`bench_compare --mode keyverify` times key generation and verification for
+Tables 8-10 in the same session, build, machine state and pinning as
+signing. The accounting is in `perf_comparison_final.md` ("Key generation
+and verification"); the E8 verifier and the key generation limits in
+`HAWK_E8_VARIANT.md`; why E8 verifies with 3 primes and HAWK with 2 in
+`verifier_range.md`.
 
-## Findings for Steps 8 and 9
+### Mode
 
-See plan.md, Step 7 status, for the smoke-run figures.
+`bench_compare --mode keyverify [--keygen-keys N] [--keys K]
+[--sigs-per-key M] [--warmup W] [--logn LIST] [--cpus LIST]` runs one
+thread pinned to `LIST[0]`, with no pool (the E8 sampler at `T = 1`). The
+accounting is in `perf_comparison_final.md`, "Key generation and
+verification". Per degree, in `--logn` order, the key generation phase
+runs first for every degree and then the verification phase:
 
-- **Run time** here (WSL, 32 CPUs, O2): latency 4.8 s per 100 signatures
-  per configuration (93 configurations x 2 accounting modes; only about a
-  quarter of it is timed signing, the rest is verification, messages and
-  keys), throughput (P = 4) 1.1 s, AVX2 0.03 s, sampler matrix (2,000
-  trials) 2.4 s, stages (1,000 trials; the HAWK profile bench generates a
-  key per trial) 41 s.  At Step 9's volume (10 x 1,000) one run of one flag
-  set is about 8 + 2 + 1 min, so 5 runs x 2 flag sets about 1.75 h.
-- **T = 16 and one CCD**: the 9950X3D has 8 cores per CCD.  With SMT off
-  (Step 9's setup) one CCD has 8 CPUs, so the harness (which requires
-  `|--cpus| >= T`) runs `T` up to 8 there; `T = 16` needs both CCDs or SMT
-  siblings, and either changes the conditions (cross-CCD L3, shared
-  cores).  Suggested: `--threads 1,2,4,8` on the V-cache CCD, and `T = 16`
-  as a separately labelled run if wanted.
-- **Counters on WSL**: perf core cycles are available
-  (`perf_event_paranoid` 2 suffices for user-space counting of the own
-  thread); governor, boost and frequency are not readable, so
-  `core_vs_tsc` is skipped, and core cycles run about 1.3x TSC (boost).
-- **Pinning on WSL** works (`sched_setaffinity` succeeds, the test passes);
-  thread siblings are (2k, 2k + 1), so use even CPUs for distinct cores.
-- **O3native** needs `-fno-strict-aliasing` (above): without it upstream
-  `hawk_sign.c` is miscompiled at `-O3 -march=native` (undefined
-  behaviour in upstream); the flag costs at most 1.5% here.  In the smoke
-  run O3native made E8 `hot64` / `hot32` slower than O2 (n = 256, all-in:
-  253k vs 207k core cycles; not the flag, which leaves E8 `hot*`
-  unchanged) while HAWK got faster, so the hot pairs' ratios moved from
-  about 1.6-1.7 (O2) to 2.1-2.4; recheck on bare metal before reading
-  anything into it.
-- **Interleaving cost**: against `e8_sign_bench` (same signatures),
-  `bench_compare` medians differ by 0.6% (median) and up to 2.4%, the
-  larger values for small E8 `hot*` signatures, consistent with colder
-  caches after another configuration's batch; this is the intended
-  condition and applies to both schemes.
-- **Pool idle CPU** inside threaded groups grows with `T` (spinning during
-  verification and between batches): about 0.2 / 0.7 / 1.7 / 4.4 ms per
-  signature for `T` = 2 / 4 / 8 / 16 in the smoke run; it is excluded from
-  every row and reported per group.
+- **Key generation phase**: W warm-up calls per unit (`warmup_keygen`
+  rows, stream `BSC_STREAM_KEYGEN_WARMUP` = 25). Then, for key index
+  `i = 0 .. N-1`, the units HAWK `keygen`, E8 `keygen` and `keygen_core`
+  (`Hawk_keygen()` alone, scheme `hawk_core`), all from the paired stream
+  `BSC_STREAM_KEYGEN_PAIRED` = 24 with index i, in an order rotated by i.
+  `attempts` = RNG calls (one per (f, g) draw), `rng_bytes` = bytes drawn.
+  Every HAWK and E8 key then signs one message with the ref signer and
+  must verify (untimed). The signing keys of the other modes (streams
+  `1 + scheme`) are unchanged.
+- **Verification phase**: keys `0 .. K-1` of the paired stream (untimed);
+  `pub_decode` rows, one per key and scheme, in rotated order; `K x M`
+  signatures per scheme by its `ref` signer, `all_in`, `T = 1`, with the
+  harness's messages `i = k M + m` and signing stream `16 + all_in`
+  (untimed). Then:
+  - **Tampered** (untimed, `verify_reject` rows): the first signature of
+    each key with one bit flipped in the salt (byte 0, bit 0), in `s1`
+    (HAWK: the first byte of the encoded `s1`, bit 0; E8: bit 14 of
+    `s1[0]`) and, for E8, in `s0` (bit 14 of `s0[0]`), checked by every
+    verifier unit. `verify_ok` = 1 if accepted.
+  - **Warm-up**: W verifications per unit (`warmup_verify` rows).
+  - **Timed schedule**: per signature `j = k M + m`, the units {HAWK
+    `upstream`, E8 `fast`, E8 `ref`} x {`all_in`, `prepared`}, in an
+    order rotated by j, one `verify` row each (`batch` = j's position).
 
-## Step 8: the dress rehearsal (WSL)
+The AVX2 context binary (`bench_compare_avx2-FS`) runs the same mode for
+HAWK alone (variant `ref-avx2`; its `keygen_core` is the AVX2 build's
+NTRU core). `--list` prints the expected row count per (degree, kind,
+scheme, variant, verifier, accounting); the driver writes it as
+`keyverify_list.csv` beside `keyverify.csv`. `--sizes` prints the sizes
+CSV (`sizes.csv` in every run directory).
 
-Everything Step 9 runs was run here (WSL, 32 CPUs, SMT siblings (2k,
-2k + 1), so the pinned lists use even CPUs), from a clean build, at small
-and at full volume, with every failure path exercised.  No number here
-goes into the paper; the timings only check the machinery and estimate
-Step 9's run time.  The run book for Step 9 is
-[`step9_runbook.md`](step9_runbook.md).
+Driver: steps `keyverify` and `keyverify_avx2` in the `all` and
+`headline` run sets (not `cross-ccd`), before `latency`; `--keygen-keys`
+(smoke 20, full 1,000); the verification inputs use `--keys` and
+`--sigs-per-key` (smoke 2 x 4, full 10 x 1,000). The preflight and the
+`--cpus` checks are unchanged.
 
-### What was run
+### Analysis
 
-- **Clean build**: `make -C e8 clean`, `make`: no warnings, all twelve
-  `bin/*-O2` / `bin/*-O3native` binaries, `check-upstream` passes (the
-  regenerated AVX2 sources are gitignored).
-- **Smoke** (`make bench-compare-smoke`, 4.3 s): 0 failures, every check
-  PASS or SKIP; rows counted by hand from `--list` (sign = configurations
-  x K x M x 2 (x P), warm-up = configurations x W x 2 (x P), `keygen` /
-  `prepare` = K per scheme and degree, 24 columns): every CSV matches.
-- **Step-9-shaped**, both flag sets, 2 runs each, 2 x 20 signatures:
-  headline (`--run-set headline --cpus 0,2,...,14`: T 1, 2, 4, 8, P = 8;
-  55 s) and cross-CCD (`--run-set cross-ccd --cpus 0,2,...,30`: T 1, 2,
-  4, 8, 16, latency only; 21 s).  Pinning checked by sampling every
-  thread's `Cpus_allowed_list` and last CPU (`/proc/PID/task/*/stat`)
-  every 50 ms: every latency thread, throughput signer, sampler and stage
-  bench ran only on its own listed CPU (the throughput parent, which only
-  generates the keys before forking and then waits, is not pinned).
-  Hand counts match; `ratios.csv` CIs come from both runs (`runs` = 2);
-  `run_spread` reports (FAIL at 40 signatures on WSL, see below); the two
-  flag sets stay apart in every table; all 14 tables (7 per flag set) are
-  non-empty, the cross-CCD analysis gives Table 4b alone.
-- **Tables**: `tables.tex` compiles in a minimal `article` with `booktabs`
-  and `graphicx` (`latexmk -pdf`, out of tree) with no error, overfull box
-  or float warning.  Before the fix: 12 overfull boxes (Tables 1, 2, 4,
-  5, 7 up to 258 pt too wide) and 4 floats too tall (Tables 4 and 6, 72
-  and 66 rows).
-- **Failure paths** (copies of real run directories in a scratch
-  directory; a real driver run for the kill): `verify_ok` 0 -> `verify`
-  FAIL, exit 1; `bench_compare` killed with `SIGKILL` mid-run -> the
-  driver reports `latency failed (exit 137 (signal 9))` and the failed
-  steps, exits 1, and `complete` FAILs (exit status, malformed last row,
-  unequal counts); missing `latency.csv`, an empty or header-only CSV ->
-  `complete` FAIL; a missing run directory, an empty CSV given directly,
-  mixed run sets -> exit 2 with a message; two copies of the full run ->
-  `run_spread` PASS, one with its timing columns x 1.1 -> FAIL (the 150
-  latency keys); `boost: off` with real WSL data -> `core_vs_tsc` PASS,
-  with core = 1.25 TSC everywhere -> PASS, with E8's core cycles x 1.1 ->
-  FAIL; a forced or refused preflight (below).
-- **Full volume** (10 x 1,000, O2, headline, pinned): see "Measurements".
+- **Verification**: per (flags, scheme, variant, verifier, logn,
+  accounting), the signing estimator: per-run median, estimate = mean of
+  the per-run medians, and the E8 / HAWK ratio with the hierarchical
+  bootstrap CI (runs, then signatures). The pairs are E8 `fast` / HAWK
+  `upstream` (fair), E8 `ref` / HAWK (the submission's verifier) and E8
+  `fast` / HAWK AVX2 (context).
+- **Key generation**: restarts make it heavy-tailed, and its cost to a
+  user is its expectation. So the estimate is the mean of the per-run means
+  over key indices, with the mean of the per-run medians beside it. The E8
+  / HAWK ratio is a ratio of means, with a paired bootstrap CI (runs, then
+  key indices within each run, the same indices for both schemes, which
+  drew from the same seeds). Each scheme's tail is its mean minus the
+  core's on the same indices. `diverged` is the share of indices where the
+  schemes made different numbers of RNG calls (one restarted after the
+  core). Key generation run spread is reported (`keyverify_summary.csv`),
+  not checked.
+- **Checks**: `keyverify_complete` (every keyverify CSV's row counts equal
+  its `--list` file), `verify_failures` (every timed verification
+  accepted; every keygen, `keygen_core`, `pub_decode` and warm-up row ok),
+  `verify_reject` (every tampered signature rejected), and `run_spread`
+  extended to the verification medians at the signing tolerance (3%). All
+  three new checks SKIP without keyverify rows (the cross-CCD run set,
+  older runs).
+- **Tables**: 8 key generation (mean and median per key, ratio with
+  paired CI, tail, diverged, draws, key bytes; HAWK AVX2 context rows),
+  9 verification (median cycles for both accountings and both E8
+  verifiers, ratios with CIs, prime counts, `pub_decode`, signature and
+  public key bytes; HAWK AVX2 context rows), 10 sizes (every key,
+  signature and `tmp` object, once per analysis).
+- **Outputs**: `keyverify_summary.csv` (per unit: runs, count, estimate,
+  median, quartiles, run spread, RNG calls per key, failures, warm-ups)
+  and `keyverify_ratios.csv`.
+- **Self-test**: synthetic keyverify runs; the checks pass on good runs
+  and fail on an accepted tampered signature, a verification failure, a
+  truncated `keyverify.csv` and a 20% slower run; the ratios lie inside
+  their CIs and the bootstrap is deterministic.
 
-### Fixes
+### Reading Tables 8-10
 
-1. **Sampler matrix oversubscription** (known issue 1): the driver runs
-   `e8_sampler_bench --variant-matrix --threads 1` pinned to the list's
-   first CPU (Table 3 uses `T = 1` only).  Full trials (2,000) under an
-   8-CPU `taskset`: 5.7 s before (T = 16 rows on 8 CPUs), 1.5 s after.
-2. **`--cpus` without a matching `--threads`** (known issue 2): run sets
-   (`--run-set`, "Running") set the thread list and `P`; the driver
-   checks the list (comma-separated numbers, no repeats, at least max T
-   and P CPUs) before any step and exits 2 with a message.
-3. **Analysis memory** (known issue 3): compact sorted arrays for the
-   timing columns, sums for attempts and `rng_bytes`, `csv.reader`; the
-   default output directory no longer loads the first run twice.  Same
-   statistics (below).
-4. **Preflight** (known issue 4): `compare/preflight.sh` ("Running").
-   Tested on WSL: refusing (exit 3, no run directory created: SMT on,
-   dirty tree, boost / governor / frequency unavailable), `--force` (runs,
-   records `preflight: failed (forced: --force)` and every condition in
-   `env.txt` and `commands.txt`), smoke (reported, not enforced), and
-   every condition's `ok` and `FAIL` branch through `--capture` with
-   synthetic captures (boost on, `powersave`, SMT on, siblings pinned
-   together, paranoid 3, a 16% frequency spread, a dirty tree).
-5. **`attempts` check counted copies as independent** (found in Step 8):
-   every run and every throughput process signs the same messages with the
-   same seeds, so their attempts are identical copies (checked: all 8
-   processes of the full run, every key).  The check summed them as
-   independent, which shrinks its 5 sigma tolerance by sqrt(R P): at Step
-   9's 5 runs x 8 processes to about 0.8 sigma, so it would have failed
-   HAWK n = 256 keys by chance (the old code fails 5 of 198 keys on 10
-   copies of one run).  It now requires the copies to agree (n, attempts
-   and `rng_bytes` sums per run and process; a disagreement means
-   non-deterministic signing and FAILs) and tests one copy against Step 6.
-6. **Step failures reported into the step's own log** (found in Step 8):
-   `run_step`'s "failed" message was inside the caller's `2> STEP.txt`
-   redirection, so it went to `latency.txt` instead of the console.  The
-   driver now writes it to its own stderr and lists the failed steps at the
-   end.
-7. **Silent or crashing inputs** (found in Step 8): a missing run directory
-   crashed the analysis (`FileNotFoundError`); an empty CSV, a missing step
-   CSV and a header-only CSV were ignored (their keys simply absent, so
-   `complete` could PASS); a truncated last row could crash `int()`.  Now:
-   a clear error and exit 2, or a `complete` FAIL naming the problem;
-   `commands.txt` step exit statuses are checked too.
-8. **LaTeX**: wide tables shrink to the line width (`\resizebox`, only
-   when wider), tables over 40 rows continue in further floats with the
-   same number ("continued").  Table notes now define all-in / prepared,
-   sig B (HAWK compressed, E8 uncompressed), attempts and rng B, and say
-   that the throughput processes sign the same signatures.
-
-Left as they are: the throughput parent is not pinned (it only generates
-keys, untimed, then waits); LaTeX numbers the second flag set's tables 8-14
-(the Markdown and the labels say which is which; Step 10 chooses the
-paper's layout); Tables 1 and 2 are shrunk to about 60% in an `article`
-column (15 columns), so Step 10 should split or rotate them.
-
-### Decisions (Step 8)
-
-- **Run sets**: a driver option, `--run-set all|headline|cross-ccd`, with
-  the thread list, `P`, steps and `--cpus` requirement of the decided
-  Step 9 runs; `all` keeps the former behaviour for the smoke run.  The
-  analysis keeps run sets apart by refusing mixed inputs (exit 2) rather
-  than adding a key column: the run sets never share a table, each has its
-  own analysis directory (`--name`), and the statistics of a single run
-  set are unchanged.
-- **Analysis storage**: compact in-memory columns (the default), not a
-  streaming pass with per-key sorted files: at Step 9's volume the
-  analysis then needs under 1 GB and 2 minutes, so the extra complexity
-  buys nothing.
-- **CSV compression**: plain CSV (the default).  A headline run writes 672
-  MB of CSV (latency 201 MB, throughput 463 MB, AVX2 8 MB); gzip (level 6)
-  makes it 78 MB (8.6x) in 5.4 s per run, and the analysis reads
-  `NAME.csv.gz` like `NAME.csv` in 10% more time (13.6 s against 12.4 s,
-  identical outputs).  Step 9 needs about 10 GB of disk for both run sets,
-  which is no constraint; compressing inside the run would add a step
-  that can fail; the copy back is compressed anyway (run book).
-- **Failure messages**: the driver's exit status distinguishes a failed
-  step or check (1), a usage or configuration error (2) and a refused
-  preflight (3).
-- **CPU lists**: `compare/ccd_cpus.sh` derives both Step 9 lists from the
-  L3 topology (one CPU per core, the larger-L3 CCD first), so the run book
-  needs no hand-typed list (tested on synthetic sysfs trees with SMT on
-  and off and the V-cache on either CCD; on WSL it refuses: one L3
-  domain).
-
-### Measurements (WSL, not for the paper)
-
-| what | value |
-| --- | --- |
-| clean `make -j16` | 4.2 s |
-| smoke (both flag sets) | 4.3 s |
-| Step-9-shaped headline, 2 x 20, 2 runs x 2 flag sets | 55 s |
-| Step-9-shaped cross-CCD, 2 x 20, 2 runs x 2 flag sets | 21 s |
-| full volume headline run (10 x 1,000, O2, T 1-8, P = 8) | 8 min 49 s: latency 373 s, throughput 111 s, AVX2 2 s, sampler 2 s, stages 11 + 29 s |
-| full volume cross-CCD run (O2, T 1-16, 16 CPUs, latency only) | 7 min 53 s (latency 472 s) |
-| CSV per headline run | latency 201 MB (1.50 M rows), throughput 463 MB (3.36 M rows), AVX2 8 MB |
-| CSV per cross-CCD run | latency 250 MB (1.86 M rows; gzip 31 MB) |
-| analysis, 1 full cross-CCD run | 6.1 s, 53 MB |
-| analysis, 1 full run: before / after | 25 s, 1.04 GB / 12.4 s, 109 MB |
-| analysis, 10 copies (Step 9's 5 runs x 2 flag sets): before / after | 4 min 26 s, 10.2 GB / 1 min 59 s, 865 MB |
-
-Statistics unchanged: the new analysis writes byte-identical
-`summary.csv`, `runs.csv` and `ratios.csv` (same seed) on the smoke
-output, the full run and 10 copies of it; `tables.md` and `tables.tex`
-differ only in the header (run set), the table titles and notes and the
-new `preflight` line.
-
-### Findings for Step 9
-
-- **Run time**: per run and flag set here, headline 8.8 min (latency 6.2,
-  throughput 1.9, the rest 0.7) and cross-CCD 7.9 min; most of it is
-  verification, messages and keys, not timed signing.  Step 9 (5 runs x 2
-  flag sets per run set) at this speed: 88 + 79 min, about 2.8 h.  On bare
-  metal with boost off the cores run at the base clock instead of WSL's
-  boosted one (core / TSC about 1.3 here), so expect about 1.3x: headline
-  about 1.9 h, cross-CCD about 1.7 h, 3.6 h in all, plus the smoke run and
-  the analyses (minutes); plan for 4 h.  (Step 7's estimate, 1.75 h for
-  one run set at T up to 16 and P = 4 at WSL speed, becomes 1.5 h for the
-  headline at T up to 8.)  Disk: 6.7 GB of CSV for the headline run set,
-  2.5 GB for the cross-CCD one (0.8 and 0.3 GB gzipped).
-- **Determinism**: every run and every throughput process signs the same
-  signatures (fixed seeds); the analysis now relies on it (`attempts`).
-  Repeated runs therefore vary only in timing, which is what `run_spread`
-  and the bootstrap over runs measure.
-- **Run spread on WSL**: at 2 x 20 signatures, 124 of 396 headline keys
-  and 133 of 372 cross-CCD keys exceeded 3%, the worst threaded ones
-  (HAWK `ref-T` T = 4, E8 `ref` T = 4: 30-34%); at full volume one run
-  only was taken.  Bare metal with boost off, pinned cores and no desktop
-  should be far quieter; if threaded keys still fail, look at the pool's
-  spinning workers and interrupts on the listed CPUs before anything else.
-- **`core_vs_tsc`** passes on real WSL data with `boost: off` forced into
-  `env.txt` (the serial ratios agree within 2% even with boost), so on
-  bare metal it is a meaningful check only together with the preflight.
-- **Do not touch the repository during a run**: the driver is a shell
-  script that `dash` reads as it goes, so editing or checking out
-  `run_compare.sh` mid-run can corrupt the rest of the run (noticed here
-  while editing during a run, and reverted before the script read the
-  changed part).  The preflight checks a clean
-  tree only at the start of each run.
-- **`make clean` deletes `e8/results/`**, the runs included.
+- **Verification pairs**: E8 `fast` / HAWK `upstream` is the fair pair
+  (HAWK's verifier techniques on both sides; each scheme with the minimum
+  number of primes its own range argument proves sound, HAWK 2 and E8 3).
+  E8 `ref` is the verifier behind the submission's 6.0-6.5x figure, a
+  context row; so is HAWK AVX2.
+- **all-in minus prepared** is the public-key decoding and hashing inside
+  the timed call; `pub dec` times the decoding alone.
+- **Key generation restarts**: HAWK's `hawk_keygen()` restarts the whole
+  key generation, shared NTRU core included, when its compressed
+  public-key encoding fails. E8's uncompressed public key always encodes,
+  and its key generation limits reject no key in practice. The
+  `diverged` column is the share of key indices where this made the two
+  schemes' draws differ (about 0.5% / 8.5% / 1.6% of keys at n = 256 /
+  512 / 1024 in trial runs), and each such key costs HAWK roughly twice
+  as much. The ratio of means therefore includes a format effect, which
+  can put it below 1. The `tail` column (scheme mean minus core mean)
+  separates each scheme's own work after the core: E8's public form,
+  limits and 3-prime invertibility check against HAWK's encoding.

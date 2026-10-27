@@ -675,7 +675,7 @@ collect_one_key_stats(const run_param *param, unsigned key_index,
 		}
 		reconstruct_w(w0, w1, logn, hpub, salt, salt_len,
 			&sc_data, s0, s1);
-		have_qnorm = e8_qnorm_completion(&qnorm,
+		have_qnorm = e8_qnorm_completion_ref(&qnorm,
 			q00, q01, w0, w1, logn);
 		if (!have_qnorm || pnorm != pnorm_check
 			|| pnorm_check != qnorm)

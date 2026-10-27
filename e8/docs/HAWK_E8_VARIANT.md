@@ -83,7 +83,13 @@ Core experimental sources:
   `e8/src/e8_sign_legacy.c` (the caller-supplied-salt, double-sigma
   `e8_sign_sampler_*` entry points of tests and tools).
 - `e8/src/e8_codec.c`: uncompressed signature codec.
-- `e8/src/e8_vrfy.c`: sign symmetry break and E8 completion-norm verifier.
+- `e8/src/e8_vrfy.c`: sign symmetry break and the E8 completion-norm
+  verifier with HAWK's techniques (3 primes, integer-only).
+- `e8/src/e8_vrfy_ref.c`: the reference verifier (the submission's: 4
+  primes, double bound), kept for differential tests and context timings.
+- `e8/src/e8_ntt.c`: NTT arithmetic, the generated twiddle, `Delta` and
+  `S_n` tables (`tables/e8_tables_ntt.h`) and the key generation form
+  `e8_compute_keygen_qform()`.
 - `e8/tables/`: the offline table generator `gen_tables.py` and the
   generated integer tables of every sampler variant of both schemes.
 
@@ -231,7 +237,7 @@ the `ref` variant uses constant-time full scans (see "Sampler Variants").
 
 ## Sampler Variants
 
-Step 4 of the fair-comparison plan gives HAWK and E8 the same sampler
+The fair comparison gives HAWK and E8 the same sampler
 variants, so that every headline row pair differs only in the lattice.  All
 variants of both schemes are linked into one binary and listed by
 `e8_sign_bench --list`:
@@ -403,7 +409,7 @@ implemented distribution of every draw and its statistical distance and
 Renyi divergence `R_a(P_impl || P_ideal)` (orders and criteria of
 hawk-spec.pdf, section 6.5) per draw, per coordinate or block, and per
 signature.  Method, results and findings: `docs/precision_audit.md`;
-per-variant summary (joined onto timing rows in Step 7):
+per-variant summary (joined onto the harness timing rows):
 `docs/precision_summary.csv`.  In short, the SD at equal width is within
 about 2 bits between the schemes (78 bits: about 2^-66 per signature), and
 HAWK `ref` reproduces the spec's figures.  With HAWK's rounding rule the
@@ -485,6 +491,49 @@ e = w0 + q01 d
 
 Tests compare this completion norm with the expanded direct `Q_E8` norm.
 
+### Verifier
+
+`e8_verify_finish()` evaluates the completion norm as HAWK's verifier
+(`src/hawk_vrfy.c`) evaluates its own. Per prime it takes the NTT of `w1`
+and the auto-adjoint NTT of `q00` (first `n/2` values), inverts the latter
+in one batch (Montgomery's trick: one inversion, by Fermat in the
+Montgomery domain, and `3(n/2 - 1)` products), forms `d = w1/q00`, the NTT
+of `q01` and `e = w0 + q01 d`, then the half-trace. Twiddles, Montgomery
+constants and the NTT of `Delta` are constants generated offline
+(`tables/e8_tables_ntt.h`, by `tables/gen_tables.py`; `make tables` checks
+them). The bound is the integer `e8_norm_bound_default()`. After the first
+prime, a residue above `(n/2) bound` rejects at once. As in HAWK, `q00`'s
+NTT is taken again after the inversion. E8 differs from HAWK only where the
+lattice does: the `Delta` factor (HAWK's determinant is 1), `w0` comes from
+the signature instead of being reconstructed, and it uses 3 primes instead
+of 2.
+
+**Primes.** The residues must agree modulo `E8_VRFY_PRIMES = 3` primes of
+`E8_NTT_PRIMES`. With the key generation limits below, the half-trace
+`V = (n/2) ||w||^2_Q` is below their product (2^93) for every int16 `s0`,
+`s1` (at most 2^73.3 / 2^78.2 / 2^84.1). Two primes (2^62) cannot be sound
+for E8. The proof and the numbers are in `e8/docs/verifier_range.md`.
+
+**Decoded public key.** `e8_decode_public_key(logn, pub_decoded, pub,
+pub_len)` writes `q00`, `q01` (int32) and `hpub`
+(`E8_PUBKEY_DECODED_SIZE(logn)` = 2,064 / 4,128 / 8,256 bytes, 32-bit
+aligned). `e8_verify_finish()` accepts it with `pub_len == (size_t)-1`, as
+`hawk_verify_finish()` accepts HAWK's. Decoding, in either path, rejects a
+public key whose `q00` or `q01` is outside the key generation limits or
+whose `q00` is not auto-adjoint, as HAWK's `decode_public_key` checks its
+limits.
+
+**Reference verifier.** The previous verifier is kept as
+`e8_verify_finish_ref()` / `e8_verify_uncompressed_ref()`
+(`e8_vrfy_ref.c`). It uses 4 primes, twiddles and `Delta`'s NTT rebuilt
+per call, one Fermat inversion per coefficient and the bound from
+`sigma_verify` in `double`. It is the verifier the submission's figures
+measured. For keys within the limits, its verdict equals the new
+verifier's on every input. `tools/e8_verify_diff.c` checks this on
+honest, boundary, bit-flipped and random signatures (`make test-e8`,
+`validate-quick`, `validate`), and `e8_correctness` checks every validation
+signature with both verifiers and both public key forms.
+
 ## Public API And Key Formats
 
 `e8/src/hawk_e8.h` gives the experimental scheme the same API boundary as
@@ -498,7 +547,8 @@ calls.  With the default `HAWK_PREFIX`, the public names are `hawk_e8_*`.
 | `hawk_sign_finish` (encoded key) | `e8_sign_finish` (encoded key) |
 | `hawk_decode_private_key` | `e8_prepare_private_key` |
 | `hawk_shim_sign_finish_decoded` (decoded key) | `e8_sign_finish_prepared` (prepared key) |
-| `hawk_verify_finish` | `e8_verify_finish` |
+| `hawk_decode_public_key` | `e8_decode_public_key` |
+| `hawk_verify_finish` (encoded or decoded public key) | `e8_verify_finish` (encoded or decoded public key) |
 
 `hawk_shim_sign_finish_decoded()` (`e8/compare/hawk_shim.c`) exposes HAWK's
 static `sign_finish_inner()` with the normal SHAKE sampler and a decoded
@@ -514,27 +564,52 @@ encoded private key   kgseed (seed_len) || F (n x int8) || G (n x int8)
                       || hpub (hpub_len)
 public key            q00 (n x int32) || q01 (n x int32)
 hpub                  SHAKE256(public key), first hpub_len bytes
+decoded public key    q00 (n x int32) || q01 (n x int32) || hpub
+                      (e8_decode_public_key(), 32-bit aligned)
 prepared private key  f, g, F, G, hpub, NTT basis, F2 basis
                       (implementation-defined layout, aligned internally)
 signature             salt || s0 (n x int16) || s1 (n x int16)
 ```
 
-| n | private key | prepared key | public key | signature |
-| ---: | ---: | ---: | ---: | ---: |
-| 256 | 544 | 40,960 | 2,048 | 1,038 |
-| 512 | 1,080 | 40,960 | 4,096 | 2,072 |
-| 1024 | 2,152 | 40,960 | 8,192 | 4,136 |
+| n | private key | prepared key | public key | decoded public key | signature |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 544 | 40,960 | 2,048 | 2,064 | 1,038 |
+| 512 | 1,080 | 40,960 | 4,096 | 4,128 | 2,072 |
+| 1024 | 2,152 | 40,960 | 8,192 | 8,256 | 4,136 |
 
 The signer needs the full `F` and `G` (not only `F mod 2` and `G mod 2`, as in
 HAWK) for `w = B^-1 z`.  `f` and `g` are regenerated from `kgseed` with HAWK's
 `Hawk_regen_fg()`.  `e8_keygen()` calls HAWK's internal `Hawk_keygen()`, so
 `(f, g, F, G)` follow HAWK's key distribution exactly; the NTRU solver only
 accepts `F` and `G` with coefficients in `[-127, +127]`, which keygen asserts.
-Keygen additionally discards a basis whose `qtilde00` has a zero NTT
-coefficient modulo one of the verifier's primes (such a key could never
-verify; this has probability about `n/2^31` per prime).  The public key
-stores the two entries the completion-norm verifier uses; `qtilde10` is the
-adjoint of `qtilde01` and `qtilde11` is not needed.
+After `Hawk_keygen()`, keygen computes `qtilde00`, `qtilde01` and
+`qtilde11` with `e8_compute_keygen_qform()`. That is HAWK's `make_q001()`
+technique: an NTT modulo the first verifier prime, exact for int8 keys.
+`qtilde10 = adj(qtilde01)` is not computed. The four-entry schoolbook
+`e8_compute_qform()` remains for the direct-norm tests, and `test_e8_public`
+checks that both agree. Keygen discards and regenerates a basis in two
+cases:
+
+- **Key generation limits.** A coefficient is outside the limits on the
+  form, as HAWK's `bits_lim00` / `bits_lim01` / `lim11`, with the constant
+  terms limited apart. The bits are:
+
+  | n | q00[0] | q00[u>0] | q01 | q11[0] | q11[u>0] |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 256 | 14 | 12 | 15 | 19 | 18 |
+  | 512 | 16 | 14 | 16 | 21 | 20 |
+  | 1024 | 18 | 16 | 18 | 24 | 23 |
+
+  They are one bit above the maxima over 10^4 keys per degree, and none of
+  10^5 keys per degree is rejected (`tools/e8_keygen_limits.c`,
+  `e8/docs/verifier_range.md`).
+- **Invertibility.** `qtilde00` has a zero NTT coefficient modulo one of
+  the 3 verifier primes. Such a key could never verify; this happens with
+  probability about `n/2^31` per prime, and in none of 10^5 keys per degree.
+
+The public key stores the two entries the verifier
+uses; `qtilde10` is the adjoint of `qtilde01` and `qtilde11` is not
+needed.
 
 The prepared key holds the per-key NTT and F2 basis tables, whose fixed
 maximum-size layout makes it 40,960 bytes for every degree; it is valid only at
@@ -848,5 +923,8 @@ statistical proof of sampler distribution.
 - No full qROM-style unforgeability proof or complete HAWK security reduction for the modified public-form class.
 - Only the HAWK-style publicly computable isometry/orbit structure is analysed; a complete automorphism-aware cryptanalysis of the E8 preconditioned public-form class remains to be done.
 - The E8 verifier uses the completion-of-squares norm; tests compare it with
-  the expanded direct norm.  Compact public-key reconstruction from compressed
-  E8 public data is not implemented.
+  the expanded direct norm and with the reference verifier.  Compact
+  public-key reconstruction from compressed E8 public data is not
+  implemented.
+- The E8 verifier uses 3 NTT primes where HAWK uses 2, because the E8-CM
+  public form's coefficients are larger (`e8/docs/verifier_range.md`).

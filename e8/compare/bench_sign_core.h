@@ -14,7 +14,7 @@
  * bench_compare): key generation, key preparation, one timed sign_finish
  * call and verification for every sampler variant of both schemes, the
  * per-index seeds and messages, and the common fields of a CSV row.
- * e8_sign_bench.c and plan.md Step 2 describe the accounting:
+ * e8_sign_bench.c and docs/perf_comparison_final.md describe the accounting:
  *
  *   all_in    the encoded private key is passed to sign_finish:
  *               HAWK ref     hawk_sign_finish()
@@ -41,6 +41,27 @@
  * With BSC_HAWK_ONLY = 1 (the HAWK AVX2 context build) only upstream HAWK
  * ref exists, under the variant name ref-avx2; the binary then links the
  * AVX2 objects and no E8 or HAWK-variant code.
+ *
+ * Key generation and verification timing (bench_compare --mode
+ * keyverify):
+ *
+ *   keygen       each scheme's public keygen call (hawk_keygen(),
+ *                e8_keygen()), RNG to encoded private and public key,
+ *                retries included; both schemes from the paired stream
+ *                BSC_STREAM_KEYGEN_PAIRED, index = key index, so they run
+ *                HAWK's NTRU core on the same draws unless one restarts.
+ *   keygen_core  Hawk_keygen() alone (the shared NTRU core, as
+ *                e8_keygen() calls it) on the same seed.
+ *   pub_decode   hawk_decode_public_key() / e8_decode_public_key().
+ *   verify       all_in: verify_finish with the encoded signature and
+ *                public key (HAWK with HAWK_TMPSIZE_VERIFY_FAST, E8 with
+ *                E8_TMPSIZE_VERIFY); prepared: the decoded public key
+ *                (pub_len = (size_t)-1), the signature still encoded.
+ *                Verifiers: upstream (hawk_verify_finish()), fast
+ *                (e8_verify_finish()) and ref (e8_verify_finish_ref()).
+ *
+ * attempts of a keygen row = RNG calls (one per (f, g) draw), rng_bytes =
+ * bytes drawn.
  */
 
 #ifndef BSC_HAWK_ONLY
@@ -62,32 +83,44 @@
 #define BSC_ACCT_PREPARED  1
 #define BSC_ACCT_COUNT     2
 
-#define BSC_STREAM_KEYGEN   1     /* + scheme */
-#define BSC_STREAM_WARMUP   9
-#define BSC_STREAM_SIGN     16    /* + accounting */
+#define BSC_STREAM_KEYGEN          1     /* + scheme */
+#define BSC_STREAM_WARMUP          9
+#define BSC_STREAM_SIGN            16    /* + accounting */
+#define BSC_STREAM_KEYGEN_PAIRED   24    /* keyverify: both schemes */
+#define BSC_STREAM_KEYGEN_WARMUP   25    /* keyverify warm-up keys */
+
+#define BSC_VERIFIER_UPSTREAM   0     /* HAWK hawk_verify_finish() */
+#define BSC_VERIFIER_FAST       1     /* E8 e8_verify_finish() */
+#define BSC_VERIFIER_REF        2     /* E8 e8_verify_finish_ref() */
+#define BSC_VERIFIER_COUNT      3
 
 extern const char *const bsc_scheme_name[BSC_SCHEME_COUNT];
 extern const char *const bsc_acct_name[BSC_ACCT_COUNT];
+extern const char *const bsc_verifier_name[BSC_VERIFIER_COUNT];
 
 #if BSC_HAWK_ONLY
 #define BSC_PRIV_SIZE       HAWK_PRIVKEY_SIZE(10)
 #define BSC_PUB_SIZE        HAWK_PUBKEY_SIZE(10)
 #define BSC_PREPARED_SIZE   HAWK_PRIVKEY_DECODED_SIZE(10)
 #define BSC_SIG_SIZE        HAWK_SIG_SIZE(10)
+#define BSC_PUB_DECODED_SIZE   (2 * HAWK_DECODED_PUB_LENGTH(10))
 #else
 #define BSC_PRIV_SIZE       E8_PRIVKEY_SIZE(10)
 #define BSC_PUB_SIZE        E8_PUBKEY_SIZE(10)
 #define BSC_PREPARED_SIZE   E8_PRIVKEY_PREPARED_SIZE(10)
 #define BSC_SIG_SIZE        E8_SIG_SIZE(10)
+#define BSC_PUB_DECODED_SIZE   E8_PUBKEY_DECODED_SIZE(10)
 #endif
 
 /*
- * One key of either scheme in both forms.
+ * One key of either scheme in both forms (the decoded public key is
+ * filled by bsc_decode_pub() only).
  */
 typedef struct {
 	uint8_t priv[BSC_PRIV_SIZE];
 	uint8_t pub[BSC_PUB_SIZE];
 	uint8_t prepared[BSC_PREPARED_SIZE];
+	int32_t pub_decoded[(BSC_PUB_DECODED_SIZE + 3) / 4];
 } bsc_key;
 
 /*
@@ -157,6 +190,51 @@ void bsc_deselect(void);
  */
 int bsc_keygen(unsigned scheme, unsigned logn, unsigned key_index,
 	bsc_key *key, cmn_measure *m);
+
+/*
+ * Key index of scheme at logn from signing-RNG stream stream_id, timed
+ * into *m; *rng_calls and *rng_bytes receive the RNG's calls and bytes.
+ * bsc_keygen() is stream BSC_STREAM_KEYGEN + scheme.
+ */
+int bsc_keygen_stream(unsigned scheme, unsigned logn, unsigned stream_id,
+	unsigned index, bsc_key *key, cmn_measure *m,
+	uint64_t *rng_calls, uint64_t *rng_bytes);
+
+/*
+ * HAWK's NTRU core Hawk_keygen() alone, as e8_keygen() calls it, from
+ * stream stream_id and index, timed into *m (keygen_core rows).
+ */
+int bsc_keygen_core(unsigned logn, unsigned stream_id, unsigned index,
+	cmn_measure *m, uint64_t *rng_calls, uint64_t *rng_bytes);
+
+/*
+ * Decode key->pub into key->pub_decoded (hawk_decode_public_key() /
+ * e8_decode_public_key()), timed into *m.
+ */
+int bsc_decode_pub(unsigned scheme, unsigned logn, bsc_key *key,
+	cmn_measure *m);
+
+/*
+ * One timed verification of sig (encoded) against sc_data with verifier
+ * (BSC_VERIFIER_*) under acct (all_in: encoded public key; prepared:
+ * key->pub_decoded); returns the verdict (1 = accepted). m may be NULL.
+ */
+int bsc_verify_timed(unsigned scheme, unsigned verifier, unsigned acct,
+	unsigned logn, const bsc_key *key, const uint8_t *sig,
+	const shake_context *sc_data, cmn_measure *m);
+
+/*
+ * Sizes (bytes) of every key, signature and tmp object of the schemes at
+ * logn, from the size macros (bench_compare --sizes): fills up to max
+ * entries of scheme name, object name and size; returns the count.
+ */
+typedef struct {
+	const char *scheme;
+	const char *object;
+	unsigned long bytes;
+} bsc_size;
+
+size_t bsc_sizes(unsigned logn, bsc_size *out, size_t max);
 
 /*
  * The prepared form of key (HAWK hawk_decode_private_key(), E8

@@ -1,5 +1,5 @@
 """
-The tables of plan.md Step 10 from the comparison harness's runs, as
+The comparison tables from the comparison harness's runs, as
 LaTeX (booktabs, graphicx) and Markdown.  Python standard library only; imported by
 analyze.py.  One set of tables per flag set:
 
@@ -13,6 +13,11 @@ analyze.py.  One set of tables per flag set:
   6  stage breakdown at the headline variant (profile benches; their
      timings include the profile timers)
   7  context: HAWK AVX2 (not a fair pair: E8 has no AVX2 path)
+  8  key generation: mean and median per key, paired E8 / HAWK ratio,
+     shared-core decomposition, key sizes
+  9  verification: all-in and prepared public key, E8 fast and ref
+     verifiers, ratios, prime counts, sizes
+ 10  sizes of every key, signature and tmp object
 
 Cycle columns are the primary metric, core cycles (TSC when the counter
 is unavailable, as the notes then say); TSC and time are secondary.
@@ -299,12 +304,203 @@ def table_avx2(keys, ratios, flags):
     return t
 
 
-def build_tables(runs, keys, ratios, precision):
+def _sizes(runs):
+    """(scheme, object, logn) -> bytes from the first run's sizes.csv."""
+    for run in runs:
+        if run.sizes:
+            return {(r['scheme'], r['object'], int(r['logn'])):
+                    int(r['bytes']) for r in run.sizes}
+    return {}
+
+
+def _kv_ratio(kv_ratios, what, flags, logn, acct, verifier, hawk_variant):
+    for r in kv_ratios:
+        if (r['what'], r['flags'], r['logn'], r['accounting'],
+                r['e8_verifier'], r['hawk_variant']) == (
+                    what, flags, logn, acct, verifier, hawk_variant):
+            return r
+    return None
+
+
+KEYGEN_NOTE = (
+    'Each scheme\'s public keygen call (RNG to encoded private and public'
+    ' key, retries included), one thread, pinned, interleaved per key index'
+    ' in rotated order after warm-up. HAWK, E8 and the core (Hawk_keygen()'
+    ' alone: HAWK\'s NTRU core, which both call) draw from the same paired'
+    ' seed per key index. mean: mean of the per-run means over key indices'
+    ' (key generation restarts, so its expected cost is the mean); median:'
+    ' mean of the per-run medians. E8/HAWK: ratio of means, 95% CI from a'
+    ' paired bootstrap (runs, then key indices). tail: the scheme\'s mean'
+    ' minus the core\'s on the same key indices (HAWK: public-key'
+    ' encoding; E8: its public form, key generation limits and'
+    ' invertibility check over 3 primes; HAWK\'s own form and range check'
+    ' run inside the core for both). diverged: share of key indices where'
+    ' HAWK and E8 made different numbers of RNG calls (one restarted after'
+    ' the core). draws: (f, g) draws (RNG calls) per key. Key bytes from'
+    ' sizes.csv. HAWK AVX2 rows (ref-avx2): context, not a fair pair (E8'
+    ' / HAWK AVX2 in its ratio column).')
+
+VERIFY_NOTE = (
+    'One thread, pinned, interleaved per signature in rotated order after'
+    ' warm-up; inputs: the paired-stream keys, each scheme\'s ref signer,'
+    ' all-in, T = 1 (verification cost does not depend on the sampler).'
+    ' all-in: encoded signature and public key (decoding and hashing inside'
+    ' the timed call; HAWK with HAWK_TMPSIZE_VERIFY_FAST, E8 with'
+    ' E8_TMPSIZE_VERIFY); prepared: the public key decoded once per key'
+    ' outside the timed call (decode only, for both; timed as pub dec), the'
+    ' signature still encoded. Estimate: median per run, mean over runs;'
+    ' E8/HAWK with its bootstrap 95% CI. primes: NTT primes of the norm'
+    ' check, each scheme the minimum its own HAWK-style range argument'
+    ' proves sound: HAWK 2, E8 3, because the E8-CM public form (paper'
+    ' Sec. 4.5) has coefficients 2^3 to 2^7 times larger than HAWK\'s'
+    ' (e8/docs/verifier_range.md); a cost of the lattice. E8 fast has'
+    ' HAWK\'s verifier techniques (precomputed twiddles, constant NTT of'
+    ' Delta, batch inversion, integer bound, early reject). E8 ref (4'
+    ' primes, twiddles and Delta rebuilt per call, one Fermat inversion per'
+    ' coefficient, double bound) is the verifier the submission measured,'
+    ' as context. HAWK reconstructs s0 from s1 (its compressed signature'
+    ' carries s1 only); E8\'s uncompressed signature carries s0 (about 4'
+    ' times larger), so E8 does not. ref-avx2: HAWK AVX2 context (E8 fast'
+    ' / HAWK AVX2 in its ratio column).')
+
+
+def table_keygen(kv, runs, flags):
+    verify, keygen, decode, kv_ratios = kv
+    sizes = _sizes(runs)
+    t = Table(8, 'Key generation: cycles per key', [
+        'n', 'scheme', 'variant', 'mean', 'median', 'E8/HAWK [95% CI]',
+        'tail', 'diverged', 'draws', 'pub B', 'priv B', 'runs x keys'],
+        'rllrrlrrrrrr', KEYGEN_NOTE)
+    for logn in (8, 9, 10):
+        for hv in ('ref', 'ref-avx2'):
+            core = keygen.get((flags, logn, 'hawk_core', hv))
+            for scheme in ('hawk', 'e8', 'hawk_core'):
+                if scheme == 'e8' and hv != 'ref':
+                    continue
+                per = keygen.get((flags, logn, scheme, hv))
+                if per is None:
+                    continue
+                mi = cd.kg_metric(per)
+                est, med, nr, nk = cd.kg_stats(per, mi)
+                r = None
+                if scheme == 'e8':
+                    r = _kv_ratio(kv_ratios, 'keygen', flags, logn, '', '',
+                                  'ref')
+                elif scheme == 'hawk' and hv == 'ref-avx2':
+                    r = _kv_ratio(kv_ratios, 'keygen', flags, logn, '', '',
+                                  'ref-avx2')
+                tail = div = None
+                if core is not None and scheme != 'hawk_core':
+                    idx = cd.kg_common(per, core)
+                    if idx:
+                        tail = cd.kg_stats(per, mi, idx)[0] \
+                            - cd.kg_stats(core, mi, idx)[0]
+                if scheme == 'e8':
+                    h = keygen.get((flags, logn, 'hawk', 'ref'))
+                    if h is not None:
+                        div = cd.kg_diverged(per, h, cd.kg_common(per, h))
+                n = sum(len(d) for d in per.values())
+                draws = sum(t3[3] for d in per.values()
+                            for t3 in d.values()) / n if n else None
+                sz = 'e8' if scheme == 'e8' else 'hawk'
+                t.rows.append([
+                    str(n_of(logn)), {'hawk': 'HAWK', 'e8': 'E8',
+                                      'hawk_core': 'core'}[scheme], hv,
+                    f_int(est), f_int(med), f_ratio(r),
+                    f_int(tail), '' if div is None else '%.1f%%'
+                    % (100 * div), f_float(draws, 1),
+                    '' if scheme == 'hawk_core' else
+                    f_int(sizes.get((sz, 'pubkey', logn))),
+                    '' if scheme == 'hawk_core' else
+                    f_int(sizes.get((sz, 'privkey', logn))),
+                    '%d x %d' % (nr, nk)])
+    return t
+
+
+def table_verify(kv, runs, flags):
+    verify, keygen, decode, kv_ratios = kv
+    sizes = _sizes(runs)
+    t = Table(9, 'Verification: cycles per signature', [
+        'n', 'acct', 'scheme', 'variant', 'verifier', 'primes', 'cycles',
+        'TSC', 'E8/HAWK [95% CI]', 'pub dec', 'sig B', 'pub B'],
+        'rllllrrrlrrr', VERIFY_NOTE)
+    rows = (('hawk', 'ref', 'upstream'), ('e8', 'ref', 'fast'),
+            ('e8', 'ref', 'ref'), ('hawk', 'ref-avx2', 'upstream'))
+    for logn in (8, 9, 10):
+        for acct in ('all_in', 'prepared'):
+            for scheme, var, vf in rows:
+                a = verify.get((flags, scheme, var, vf, logn, acct))
+                if a is None:
+                    continue
+                m = a.primary()
+                r = None
+                if scheme == 'e8':
+                    r = _kv_ratio(kv_ratios, 'verify', flags, logn, acct, vf,
+                                  'ref')
+                elif var == 'ref-avx2':
+                    r = _kv_ratio(kv_ratios, 'verify', flags, logn, acct,
+                                  'fast', 'ref-avx2')
+                dec = decode.get((flags, logn, scheme, var))
+                dv = None
+                if dec:
+                    mi = 0 if m == 'core_cycles' else 1
+                    vals = [x[mi] for v in dec.values() for x in v
+                            if x[mi] is not None]
+                    dv = statistics.fmean(vals) if vals else None
+                t.rows.append([
+                    str(n_of(logn)), acct.replace('_', '-'),
+                    'HAWK' if scheme == 'hawk' else 'E8', var, vf,
+                    str(cd.VERIFIER_PRIMES[vf]), f_int(a.estimate(m)),
+                    f_int(a.estimate('tsc_cycles')), f_ratio(r), f_int(dv),
+                    f_int(sizes.get((scheme, 'sig', logn))),
+                    f_int(sizes.get((scheme, 'pubkey', logn)))])
+    return t
+
+
+SIZE_OBJECTS = (('privkey', 'private key (encoded)'),
+                ('privkey_prepared', 'private key (prepared / decoded)'),
+                ('pubkey', 'public key (encoded)'),
+                ('pubkey_decoded', 'public key (decoded)'),
+                ('sig', 'signature (encoded)'),
+                ('sig_decoded', 'signature (decoded)'),
+                ('tmp_keygen', 'tmp: key generation'),
+                ('tmp_sign', 'tmp: signing (encoded key)'),
+                ('tmp_verify', 'tmp: verification'),
+                ('tmp_verify_fast', 'tmp: verification, fastest'))
+
+
+def table_sizes(runs):
+    sizes = _sizes(runs)
+    t = Table(10, 'Sizes in bytes', [
+        'object', 'HAWK 256', 'E8 256', 'HAWK 512', 'E8 512', 'HAWK 1024',
+        'E8 1024'], 'lrrrrrr',
+        'From the size macros of hawk.h and hawk_e8.h (sizes.csv). E8\'s'
+        ' prepared private key holds the per-key NTT and F2 basis tables of'
+        ' the signer in a fixed 40,960-byte layout; its decoded public key'
+        ' holds q00 and q01 as int32 (no precomputed NTT, as HAWK\'s). The'
+        ' E8 functions also use stack buffers beyond tmp (not counted).'
+        ' Empty: the object does not exist for the scheme.')
+    if not sizes:
+        return t
+    for obj, label in SIZE_OBJECTS:
+        row = [label]
+        for logn in (8, 9, 10):
+            for scheme in ('hawk', 'e8'):
+                row.append(f_int(sizes.get((scheme, obj, logn))))
+        t.rows.append(row)
+    return t
+
+
+def build_tables(runs, keys, ratios, precision, kv=None):
     """The tables of each flag set.  A cross-CCD run set (latency only)
-    gives Table 4b alone; any other run set tables 1-7."""
+    gives Table 4b alone; any other run set tables 1-9 per flag set and
+    Table 10 (sizes) once."""
     out = []
     run_set = runs[0].run_set if runs else 'all'
-    for flags in sorted({k[0] for k in keys}):
+    flagsets = {k[0] for k in keys}
+    if kv is not None:
+        flagsets |= {k[0] for k in kv[0]} | {k[0] for k in kv[1]}
+    for flags in sorted(flagsets):
         if run_set == 'cross-ccd':
             t = table_parallel(keys, ratios, flags, '4b',
                                'Parallel latency across both CCDs',
@@ -340,11 +536,18 @@ def build_tables(runs, keys, ratios, precision):
             table_stages(runs, flags),
             table_avx2(keys, ratios, flags),
         ]
+        if kv is not None:
+            tabs += [table_keygen(kv, runs, flags),
+                     table_verify(kv, runs, flags)]
         for t in tabs:
             t.title += ' (flags %s%s)' % (
                 flags, '' if run_set == 'all' else ', run set ' + run_set)
             t.label = 'tab:cmp%s-%s' % (t.number, flags.lower())
         out.extend(tabs)
+    if run_set != 'cross-ccd' and kv is not None:
+        t = table_sizes(runs)
+        t.label = 'tab:cmp10'
+        out.append(t)
     return out
 
 

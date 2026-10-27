@@ -49,10 +49,13 @@
  *   salt (salt_len) || s0 (n x int16, little-endian)
  *                   || s1 (n x int16, little-endian)
  *
- *   degree (n)   private key   prepared key   public key   signature
- *       256          544           40960          2048        1038
- *       512         1080           40960          4096        2072
- *      1024         2152           40960          8192        4136
+ * Decoded public key (E8_PUBKEY_DECODED_SIZE(logn) bytes): q00, q01
+ * (n x int32 each) and hpub; see e8_decode_public_key().
+ *
+ *   degree (n)   private key   prepared key   public key   decoded   signature
+ *       256          544           40960          2048       2064       1038
+ *       512         1080           40960          4096       4128       2072
+ *      1024         2152           40960          8192       8256       4136
  */
 
 /*
@@ -107,20 +110,31 @@
  */
 #define E8_TMPSIZE_VERIFY(logn)    ((8u << (logn)) + 7)
 
+/*
+ * Decoded public key length (in bytes): q00 (n x int32), q01
+ * (n x int32), hpub (n/16 bytes); see e8_decode_public_key().
+ */
+#define E8_PUBKEY_DECODED_SIZE(logn) \
+	((8u << (logn)) + (1u << ((logn) - 4)))
+
 #define e8_keygen                Zh(e8_keygen)
 #define e8_sign_start            Zh(e8_sign_start)
 #define e8_sign_finish           Zh(e8_sign_finish)
 #define e8_prepare_private_key   Zh(e8_prepare_private_key)
 #define e8_sign_finish_prepared  Zh(e8_sign_finish_prepared)
 #define e8_verify_finish         Zh(e8_verify_finish)
+#define e8_decode_public_key     Zh(e8_decode_public_key)
 
 /*
  * Generate a new public/private key pair.
  *
  * The secret basis (f, g, F, G) is produced by HAWK's key generator
  * (Hawk_keygen(), keeping its seed), so f and g follow HAWK's
- * distribution exactly. Candidates whose E8 form q00 is not invertible
- * modulo every verifier NTT prime are discarded and generation restarts.
+ * distribution exactly. Candidates whose E8 form is outside the key
+ * generation limits (a bound on every coefficient of q00, q01 and q11,
+ * as HAWK's make_q001(); never hit in 10^5 keys per degree), or whose
+ * q00 is not invertible modulo every verifier NTT prime, are discarded
+ * and generation restarts.
  *
  * The private key is written into 'priv' (E8_PRIVKEY_SIZE(logn) bytes)
  * and the public key into 'pub' (E8_PUBKEY_SIZE(logn) bytes); both must
@@ -210,18 +224,46 @@ int e8_sign_finish_prepared(unsigned logn,
 	const void *priv_prepared, void *tmp, size_t tmp_len);
 
 /*
+ * Decode a public key. The encoded public key is provided in pub, with
+ * size pub_len; if the length is not exactly E8_PUBKEY_SIZE(logn) bytes,
+ * an error is reported.
+ *
+ * The decoded key, E8_PUBKEY_DECODED_SIZE(logn) bytes, is written into
+ * pub_decoded, which must be 32-bit aligned: q00 (n x int32_t), q01
+ * (n x int32_t), then hpub = SHAKE256(pub) truncated to n/16 bytes.
+ * It holds no precomputed NTT (as HAWK's decoded public key).
+ *
+ * As hawk_decode_public_key(), this checks that every coefficient of q00
+ * and q01 is within the key generation limits (and that q00 is
+ * auto-adjoint), and rejects the key otherwise.
+ *
+ * Returned value is 1 on success, 0 on error.
+ */
+int e8_decode_public_key(unsigned logn,
+	void *pub_decoded, const void *pub, size_t pub_len);
+
+/*
  * Verify an E8 signature.
  *    logn          log of degree (8 to 10, for n = 256 to 1024)
  *    sig           signature (encoded)
  *    sig_len       signature length (must be E8_SIG_SIZE(logn))
  *    sc_data       SHAKE256 context with message injected (_not_ flipped)
- *    pub           public key (encoded)
- *    pub_len       public key length (must be E8_PUBKEY_SIZE(logn))
+ *    pub           public key (encoded or decoded)
+ *    pub_len       public key length, or (size_t)-1 for a decoded key
  *    tmp           temporary buffer
  *    tmp_len       temporary buffer length (in bytes)
  *
- * hpub is recomputed from pub, and the signature is checked with the
- * completion-of-squares norm against the default verification bound.
+ * If pub_len is equal to -1 (cast to size_t), then pub should point at
+ * the decoded public key, as obtained from e8_decode_public_key().
+ * Otherwise, pub should contain the encoded public key, of length exactly
+ * E8_PUBKEY_SIZE(logn) bytes; it is decoded (with the same checks) and
+ * hashed on every call.
+ *
+ * The signature is checked with the completion-of-squares norm against
+ * the default verification bound, with HAWK's verifier techniques:
+ * E8_VRFY_PRIMES (3) NTT primes with precomputed twiddles, the constant
+ * NTT of Delta, one batch inversion of q00 per prime, an integer bound
+ * and an early reject after the first prime.
  *
  * Returned value is 1 on success (signature matches the provided public key
  * and hashed message), 0 on failure.

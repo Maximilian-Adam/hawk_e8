@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Analysis of the HAWK vs E8 comparison harness (plan.md Steps 7-10), Python
+Analysis of the HAWK vs E8 comparison harness, Python
 standard library only.  Run with python3 -I; it writes no bytecode.
 
 usage: analyze.py [--out-dir DIR] [--bootstrap B] [--seed S]
@@ -13,7 +13,7 @@ PATH: run directories of compare/run_compare.sh
 (results/compare/<flag set>/<run_id>/) or single CSV files in the
 per-signature schema (e8/common/cmn_csv.h; for example e8_sign_bench
 output; NAME.csv.gz is read like NAME.csv).  Repeated runs of one
-configuration (Step 9: at least 5 process restarts per flag set) are
+configuration (at least 5 process restarts per flag set) are
 combined; different flag sets stay apart; inputs of more than one run set
 (run_set in env.txt: all, headline, cross-ccd) are refused.
 
@@ -29,8 +29,17 @@ Writes to DIR (default results/compare/analysis/<first run_id>):
                   (validation_summary.csv) columns
   runs.csv        per key and run: signatures and medians
   ratios.csv      E8 / HAWK for matched pairs, bootstrap 95% CIs
-  acceptance.txt  the run-acceptance checks of Step 9
-  tables.md       the Step 10 tables for review
+  keyverify_summary.csv
+                  key generation (per scheme, variant and degree: runs,
+                  keys, mean and median cycles, RNG calls per key) and
+                  verification (per scheme, variant, verifier, degree
+                  and accounting: runs, verifications, estimate and
+                  pooled quartiles, run spread) and pub_decode
+  keyverify_ratios.csv
+                  E8 / HAWK key generation (ratio of means, paired
+                  bootstrap) and verification (bootstrap) ratios
+  acceptance.txt  the run-acceptance checks
+  tables.md       the comparison tables for review
   tables.tex      the same tables in LaTeX (booktabs, graphicx)
 
 Exit status 1 if an acceptance check fails (unless --no-fail); 2 if the
@@ -142,15 +151,74 @@ def write_ratios(path, ratios):
                         else fmt(r[c]) for c in cols])
 
 
-def acceptance(runs, keys, precision, validation, args):
+def write_kv_summary(path, verify, keygen, decode):
+    cols = ['flags', 'what', 'scheme', 'variant', 'verifier', 'logn',
+            'accounting', 'runs', 'count', 'metric', 'estimate',
+            'median', 'q1', 'q3', 'run_spread', 'rng_calls_per_key',
+            'failures', 'warmups']
+    rows = []
+    for (flags, logn, scheme, variant), per in keygen.items():
+        mi = cd.kg_metric(per)
+        est, med, nr, _ = cd.kg_stats(per, mi)
+        n = sum(len(d) for d in per.values())
+        calls = sum(t[3] for d in per.values() for t in d.values())
+        rows.append([flags, 'keygen', scheme, variant, '', logn, '', nr, n,
+                     ('core_cycles', 'tsc_cycles')[mi], fmt(est),
+                     fmt(med), '', '', '', fmt(calls / n if n else None, 3),
+                     '', ''])
+    for (flags, logn, scheme, variant), per in decode.items():
+        mi = 1 if any(t[0] is None for v in per.values() for t in v) else 0
+        vals = [t[mi] for v in per.values() for t in v]
+        d = cd.describe(vals) if vals else None
+        rows.append([flags, 'pub_decode', scheme, variant, '', logn,
+                     'prepared', len(per), len(vals),
+                     ('core_cycles', 'tsc_cycles')[mi],
+                     fmt(d['mean']) if d else '', fmt(d['median']) if d
+                     else '', fmt(d['q1']) if d else '',
+                     fmt(d['q3']) if d else '', '', '', '', ''])
+    for k, a in verify.items():
+        m = a.primary()
+        p = a.pooled(m)
+        sp = a.spread(m)
+        rows.append([a.flags, 'verify', a.scheme, a.variant, a.verifier,
+                     a.logn, a.accounting, len(a.cells), a.signatures(), m,
+                     fmt(a.estimate(m)), fmt(p['median']) if p else '',
+                     fmt(p['q1']) if p else '', fmt(p['q3']) if p else '',
+                     fmt(sp, 5) if sp is not None else '', '',
+                     a.failures(), a.warmups()])
+    rows.sort(key=lambda r: [str(x) for x in r[:7]])
+    with open(path, 'w', newline='') as f:
+        w = csv.writer(f, lineterminator='\n')
+        w.writerow(cols)
+        w.writerows(rows)
+
+
+def write_kv_ratios(path, ratios):
+    cols = ['flags', 'what', 'pair', 'logn', 'accounting', 'e8_variant',
+            'e8_verifier', 'hawk_variant', 'metric', 'runs', 'e8', 'hawk',
+            'ratio', 'ci_lo', 'ci_hi']
+    with open(path, 'w', newline='') as f:
+        w = csv.writer(f, lineterminator='\n')
+        w.writerow(cols)
+        for r in ratios:
+            w.writerow([fmt(r[c], 4) if c in ('ratio', 'ci_lo', 'ci_hi')
+                        else fmt(r[c]) for c in cols])
+
+
+def acceptance(runs, keys, precision, validation, args, kv_verify=None):
+    if kv_verify is None:
+        kv_verify = cd.kv_aggregate(runs)[0]
     return [
         cd.check_failures(keys),
         cd.check_complete(runs),
         cd.check_attempts(keys, validation),
-        cd.check_spread(keys, args.run_tolerance),
+        cd.check_spread(keys, args.run_tolerance, kv_verify),
         cd.check_core_tsc(runs, keys, args.core_tsc_tolerance),
         cd.check_joins(keys, precision, validation),
         cd.check_preflight(runs),
+        cd.check_kv_complete(runs),
+        cd.check_verify_failures(runs, kv_verify),
+        cd.check_verify_reject(runs),
     ]
 
 
@@ -169,19 +237,25 @@ def analyse(paths, out_dir, args):
               file=sys.stderr)
         return 2
     keys = cd.aggregate(runs)
-    if not keys:
+    kv_verify, kv_keygen, kv_decode = cd.kv_aggregate(runs)
+    if not keys and not kv_verify and not kv_keygen:
         print('analyze.py: no signature rows in %s' % ' '.join(paths),
               file=sys.stderr)
         return 2
     precision = cd.read_summary(args.precision, cd.PRECISION_COLUMNS)
     validation = cd.read_summary(args.validation, cd.VALIDATION_COLUMNS)
     ratios = cd.ratio_rows(keys, args.bootstrap, args.seed)
-    checks = acceptance(runs, keys, precision, validation, args)
+    kv_ratios = cd.kv_ratio_rows(kv_verify, kv_keygen, args.bootstrap,
+                                 args.seed)
+    checks = acceptance(runs, keys, precision, validation, args, kv_verify)
     os.makedirs(out_dir, exist_ok=True)
     write_summary(os.path.join(out_dir, 'summary.csv'), keys, precision,
                   validation)
     write_runs(os.path.join(out_dir, 'runs.csv'), keys)
     write_ratios(os.path.join(out_dir, 'ratios.csv'), ratios)
+    write_kv_summary(os.path.join(out_dir, 'keyverify_summary.csv'),
+                     kv_verify, kv_keygen, kv_decode)
+    write_kv_ratios(os.path.join(out_dir, 'keyverify_ratios.csv'), kv_ratios)
 
     header = ('HAWK vs E8 comparison, run set %s: %d run(s): %s' % (
         run_sets[0], len(runs),
@@ -199,19 +273,20 @@ def analyse(paths, out_dir, args):
                     e.get('core_cycles', '?'),
                     e.get('git_commit', '?')[:10],
                     ' (dirty)' if e.get('git_dirty', 'no') != 'no' else ''))
-    acc_lines = ['%-12s %-4s %s' % (c.name, c.status, c.detail)
+    acc_lines = ['%-18s %-4s %s' % (c.name, c.status, c.detail)
                  for c in checks]
     with open(os.path.join(out_dir, 'acceptance.txt'), 'w') as f:
         f.write(header + '\n\n' + '\n'.join(acc_lines) + '\n')
         if env_notes:
             f.write('\n' + '\n'.join(env_notes) + '\n')
 
-    tables = ct.build_tables(runs, keys, ratios, precision)
+    tables = ct.build_tables(runs, keys, ratios, precision,
+                             (kv_verify, kv_keygen, kv_decode, kv_ratios))
     md_header = '# ' + header + '\n\n' + '\n'.join(
         '- ' + n for n in env_notes) + '\n\nAcceptance:\n\n' + '\n'.join(
         '    ' + l for l in acc_lines)
     if any(r.env.get('wsl') == 'yes' for r in runs):
-        md_header += ('\n\nWSL run: smoke test only (plan.md Step 8); no'
+        md_header += ('\n\nWSL run: smoke test only; no'
                       ' number here goes into the paper.')
     with open(os.path.join(out_dir, 'tables.md'), 'w') as f:
         f.write(ct.render_markdown(tables, md_header) + '\n')
@@ -220,8 +295,9 @@ def analyse(paths, out_dir, args):
 
     print(header)
     print('\n'.join(acc_lines))
-    print('wrote summary.csv runs.csv ratios.csv acceptance.txt tables.md'
-          ' tables.tex in %s' % out_dir)
+    print('wrote summary.csv runs.csv ratios.csv keyverify_summary.csv'
+          ' keyverify_ratios.csv acceptance.txt tables.md tables.tex in %s'
+          % out_dir)
     failed = [c.name for c in checks if c.status == 'FAIL']
     if failed:
         print('analyze.py: acceptance checks failed: %s' % ', '.join(failed),
@@ -302,6 +378,84 @@ def _synthetic_run(dirpath, run_id, flags='O2', verify_fail=False,
             f.write(data[:-40])
 
 
+def _synthetic_kv(dirpath, run_id, tamper_accept=False, verify_fail=False,
+                  truncate=False, scale=1.0):
+    """A small keyverify run (n = 256): keyverify.csv, its --list file,
+    sizes.csv and env.txt; 4 timed key generations per unit, 2 keys x 3
+    signatures per verifier unit."""
+    os.makedirs(dirpath, exist_ok=True)
+    with open(os.path.join(dirpath, 'env.txt'), 'w') as f:
+        f.write('run_id: %s\nflags: O2\nboost: off\n' % run_id)
+    cols = ['kind', 'run_id', 'scheme', 'variant', 'threshold_bits',
+            'technique', 'threads', 'logn', 'key_index', 'msg_index',
+            'attempts', 'sig_bytes', 'rng_bytes', 'tsc_cycles', 'core_cycles',
+            'wall_ns', 'cpu_ns_all_threads', 'accounting',
+            'encoding_included', 'verify_ok', 'mode', 'proc', 'flags', 'batch',
+            'verifier']
+    rows, listed = [], {}
+
+    def row(kind, scheme, key=0, cyc=None, ok=1, verifier='', acct='',
+            attempts=''):
+        r = dict.fromkeys(cols, '')
+        r.update(kind=kind, run_id=run_id, scheme=scheme, variant='ref',
+                 threads=1, logn=8, key_index=key, verify_ok=ok,
+                 mode='keyverify', flags='O2', verifier=verifier,
+                 accounting=acct, attempts=attempts,
+                 rng_bytes=16 * attempts if attempts != '' else '')
+        if cyc is not None:
+            c = int(cyc * scale)
+            r.update(tsc_cycles=c, core_cycles=int(c * 1.25), wall_ns=c // 4,
+                     cpu_ns_all_threads=c // 4)
+        rows.append({k: str(v) for k, v in r.items()})
+        lk = (8, kind, scheme, 'ref', verifier, acct)
+        listed[lk] = listed.get(lk, 0) + 1
+
+    base = {'hawk': 2500000, 'e8': 2600000, 'hawk_core': 2480000}
+    for scheme in ('hawk', 'e8', 'hawk_core'):
+        row('warmup_keygen', scheme, 0, base[scheme], attempts=50)
+    for i in range(4):
+        for scheme in ('hawk', 'e8', 'hawk_core'):
+            row('keygen_core' if scheme == 'hawk_core' else 'keygen',
+                scheme, i, base[scheme] + 1000 * i, attempts=50 + i)
+    units = (('hawk', 'upstream', 100000), ('e8', 'fast', 140000),
+             ('e8', 'ref', 700000))
+    for k in range(2):
+        for scheme in ('hawk', 'e8'):
+            row('pub_decode', scheme, k, 10000, acct='prepared')
+    for scheme, vf, cyc in units:
+        for acct in ('all_in', 'prepared'):
+            for k in range(2):
+                for flip in range(2 if scheme == 'hawk' else 3):
+                    row('verify_reject', scheme, k, None, 0, vf, acct)
+            row('warmup_verify', scheme, 0, cyc, 1, vf, acct)
+            for j in range(6):
+                row('verify', scheme, j // 3, cyc + 17 * j, 1, vf, acct)
+    if tamper_accept:
+        for r in rows:
+            if r['kind'] == 'verify_reject':
+                r['verify_ok'] = '1'
+                break
+    if verify_fail:
+        rows[-1]['verify_ok'] = '0'
+    with open(os.path.join(dirpath, 'keyverify.csv'), 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=cols, lineterminator='\n')
+        w.writeheader()
+        w.writerows(rows)
+    if truncate:
+        p = os.path.join(dirpath, 'keyverify.csv')
+        with open(p, 'rb') as f:
+            data = f.read()
+        with open(p, 'wb') as f:
+            f.write(data[:-30])
+    with open(os.path.join(dirpath, 'keyverify_list.csv'), 'w') as f:
+        f.write('mode,logn,kind,scheme,variant,verifier,accounting,rows\n')
+        for k, n in listed.items():
+            f.write('keyverify,%d,%s,%s,%s,%s,%s,%d\n' % (k + (n,)))
+    with open(os.path.join(dirpath, 'sizes.csv'), 'w') as f:
+        f.write('scheme,object,logn,bytes\nhawk,pubkey,8,450\n'
+                'e8,pubkey,8,2048\nhawk,sig,8,249\ne8,sig,8,1038\n')
+
+
 def self_test():
     import random
     import statistics
@@ -377,7 +531,7 @@ def self_test():
         expect(cd.check_spread(cd.aggregate(rs), 0.03).status == 'FAIL',
                'a 20% slower run fails the run-spread check')
 
-        # Step 8: copies, inputs, run sets and the preflight record.
+        # Copies, inputs, run sets and the preflight record.
         copies = [cd.load_run(good[0])]
         for i in range(1, 40):      # 5 runs x 8 processes, identical
             copies.append(cd.load_run(good[0]))
@@ -409,6 +563,56 @@ def self_test():
         expect(cd.check_preflight([cd.load_run(forced)]).status == 'FAIL'
                and cd.check_preflight([cd.load_run(passed)]).status
                == 'PASS', 'a forced preflight fails, a passed one passes')
+
+        # Key generation and verification.
+        kvg = [os.path.join(tmp, 'kv%d' % i) for i in range(2)]
+        for i, d in enumerate(kvg):
+            _synthetic_kv(d, 'kv%d' % i, scale=1.0 + 0.003 * i)
+        kruns = [cd.load_run(p) for p in kvg]
+        kver, kkg, _kdec = cd.kv_aggregate(kruns)
+        checks = {c.name: c.status for c in acceptance(
+            kruns, cd.aggregate(kruns), {}, {}, A, kver)}
+        expect(checks['keyverify_complete'] == 'PASS'
+               and checks['verify_failures'] == 'PASS'
+               and checks['verify_reject'] == 'PASS'
+               and checks['run_spread'] == 'PASS',
+               'keyverify checks pass on good runs (%s)' % checks)
+        kr = cd.kv_ratio_rows(kver, kkg, 300, 7)
+        fast = [r for r in kr if r['what'] == 'verify'
+                and r['e8_verifier'] == 'fast'
+                and r['accounting'] == 'all_in']
+        kg = [r for r in kr if r['what'] == 'keygen']
+        expect(len(fast) == 1 and abs(fast[0]['ratio'] - 1.4) < 0.01
+               and fast[0]['ci_lo'] <= fast[0]['ratio'] <= fast[0]['ci_hi']
+               and len(kg) == 1 and kg[0]['ci_lo'] <= kg[0]['ratio']
+               <= kg[0]['ci_hi'] and abs(kg[0]['ratio'] - 2601500.0
+                                          / 2501500.0) < 1e-6,
+               'keyverify ratios (verification 1.4, keygen ratio of means)'
+               ' inside their CIs')
+        expect(cd.kv_ratio_rows(kver, kkg, 300, 7) == kr,
+               'keyverify bootstrap CIs are deterministic')
+        expect(analyse(kvg, os.path.join(tmp, 'out_kv'), A) == 0,
+               'analysis of good keyverify runs exits 0')
+        for what, kw, check in (
+                ('an accepted tampered signature', dict(tamper_accept=True),
+                 'verify_reject'),
+                ('a verification failure', dict(verify_fail=True),
+                 'verify_failures'),
+                ('a truncated keyverify.csv', dict(truncate=True),
+                 'keyverify_complete')):
+            d = os.path.join(tmp, 'kvbad_' + check)
+            _synthetic_kv(d, 'kvbad', **kw)
+            r = [cd.load_run(d)]
+            st = {c.name: c.status for c in acceptance(
+                r, cd.aggregate(r), {}, {}, A)}
+            expect(st[check] == 'FAIL' and analyse(
+                [d], os.path.join(tmp, 'out_' + check), A) == 1,
+                '%s fails %s and the analysis' % (what, check))
+        slow = os.path.join(tmp, 'kvslow')
+        _synthetic_kv(slow, 'kvslow', scale=1.2)
+        rs = [cd.load_run(kvg[0]), cd.load_run(slow)]
+        expect(cd.check_spread({}, 0.03, cd.kv_aggregate(rs)[0]).status
+               == 'FAIL', 'a 20% slower keyverify run fails run_spread')
     return 0 if ok else 1
 
 
@@ -417,7 +621,7 @@ def main():
     ap.add_argument('paths', nargs='*')
     ap.add_argument('--out-dir')
     ap.add_argument('--bootstrap', type=int, default=2000)
-    ap.add_argument('--seed', default='hawk-e8-step7')
+    ap.add_argument('--seed', default='hawk-e8')
     ap.add_argument('--run-tolerance', type=float, default=0.03)
     ap.add_argument('--core-tsc-tolerance', type=float, default=0.02)
     ap.add_argument('--precision',

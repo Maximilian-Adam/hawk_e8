@@ -1060,7 +1060,7 @@ run_selected_configs(const char *self_path, unsigned trials, unsigned warmups)
 }
 
 /*
- * Variant matrix (Step 4): every sampler variant of both schemes, one
+ * Variant matrix: every sampler variant of both schemes, one
  * full-dimension sampler call per trial, through the same entry points
  * the signers use, with bound streams: a fixed prefix
  * hm || K || enc32le(1) (K of encoded-key length), the 40-byte seed from

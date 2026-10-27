@@ -1,9 +1,9 @@
 # HAWK and Experimental E8 Signing Comparison
 
-The comparison harness of record is `e8/compare/bench_compare.c` (plan.md
-Step 7): interleaved schedule, latency and throughput modes, pinning,
+The comparison harness of record is `e8/compare/bench_compare.c`:
+interleaved schedule, latency and throughput modes, pinning,
 per-flag-set builds, the HAWK AVX2 context, the environment capture and the
-analysis into the Step 10 tables.  It is documented in
+analysis into the comparison tables.  It is documented in
 [`harness.md`](harness.md); this document defines the accounting and the
 per-signature schema it shares with `e8_sign_bench`.
 
@@ -72,7 +72,7 @@ byte-identical to upstream's (`test_hawk_variants`).
 - In-path instrumentation is off in the timed build: the E8 sampler's
   per-stage profile (`HAWK_E8_PROFILE_SAMPLER`) and signing profile
   (`HAWK_E8_PROFILE_SIGN`) both default to 0, and `e8_sign_sampler_core()`
-  takes no sampler timestamps without a trace.  (Before Step 3 the sampler
+  takes no sampler timestamps without a trace.  (Before the shared modules were introduced the sampler
   profile defaulted to 1; on WSL it added about 18% to serial E8 signing.)
 
 The benchmarks (`e8/compare/bench_compare.c` and `e8_sign_bench.c`, both
@@ -84,15 +84,19 @@ kind,run_id,scheme,variant,threshold_bits,technique,threads,logn,
 key_index,msg_index,attempts,sig_bytes,rng_bytes,
 tsc_cycles,core_cycles,wall_ns,cpu_ns_all_threads,
 accounting,encoding_included,verify_ok,
-mode,proc,flags,batch
+mode,proc,flags,batch,verifier
 ```
 
-The last four columns were added in Step 7 (after the existing ones, whose
-order is unchanged).
+Schema version 2 (`CMN_CSV_SIGN_SCHEMA_VERSION` in `cmn_csv.h`). Version 1
+added the columns `mode`, `proc`, `flags` and `batch`; version 2 appends
+`verifier` and the key generation and verification kinds of
+`bench_compare --mode keyverify`. Each version appends after the
+existing columns, whose order is unchanged, and the analysis reads both
+versions (a missing column is empty).
 
 | column | definition |
 | --- | --- |
-| `kind` | `sign`, `sign_failed`, `warmup` (a warm-up signature: measured and verified, never in a result), or `keygen` / `prepare` for the separately timed setup |
+| `kind` | `sign`, `sign_failed`, `warmup` (a warm-up signature: measured and verified, never in a result), or `keygen` / `prepare` for the separately timed setup. Mode `keyverify` (below) writes `keygen` (a scheme's public `keygen` call), `keygen_core` (HAWK's NTRU core `Hawk_keygen()` alone, scheme `hawk_core`), `pub_decode`, `verify`, `verify_reject` (a tampered signature checked untimed) and the warm-up kinds `warmup_keygen` and `warmup_verify` |
 | `run_id` | UTC start time and a random 32-bit suffix, also printed in the summary |
 | `scheme` | `hawk` or `e8` |
 | `variant` | sampler variant: `ref`, `hot64`, `hot32` for both schemes, and HAWK's `ref-T` (upstream table and scan on the bound worker streams; HAWK `ref` is upstream `sig_gauss()`, serial) |
@@ -113,9 +117,10 @@ order is unchanged).
 | `mode` | `latency` (one signer, `T` sampler threads) or `throughput` (`P` single-thread signer processes); `e8_sign_bench` writes `latency` |
 | `proc` | signer process index in throughput mode; empty in latency mode and for the parent's `keygen` / `prepare` rows |
 | `flags` | the build's flag set (`O2`, `O3native`; `default` for the default, debug-check build), from `bench_build_info.h` |
-| `batch` | position of the row's batch in the process's interleaved schedule (`bench_compare`); empty for warm-up and setup rows and in `e8_sign_bench` |
+| `batch` | position of the row's batch in the process's interleaved schedule (`bench_compare`); empty for warm-up and setup rows and in `e8_sign_bench`; in keyverify mode, the signature's position on `verify` rows |
+| `verifier` | `verify`, `verify_reject` and `warmup_verify` rows: `upstream` (`hawk_verify_finish()`), `fast` (`e8_verify_finish()`) or `ref` (`e8_verify_finish_ref()`, the submission's verifier); empty elsewhere |
 
-Precision columns (Step 7): every timing row is joined with
+Precision columns: every timing row is joined with
 `e8/docs/precision_summary.csv` on `(scheme, variant, logn)` (HAWK `ref-T`
 has the `ref` values; thread count does not change the distribution).  The
 headline precision columns are `threshold_bits`, `sig_sd_bound_log2` (union
@@ -186,7 +191,7 @@ on) and is not for timing.  The former recipe (`make -C e8 clean`, then
 alternative.  The in-path profiles are off unless a `profile-*` build
 enables them.  The profile bench's timings include its per-stage timers and
 are not headline figures; it records E8's stage trace for every E8 block
-(before Step 7: threaded `hot64` only), and `--stage-csv FILE` writes it as
+(formerly threaded `hot64` only), and `--stage-csv FILE` writes it as
 CSV (`hawk_sign_profile_bench --stage-csv` writes HAWK's in the same
 columns).
 
@@ -197,7 +202,7 @@ flags and the compiler.  `--logn L` restricts the run to one degree,
 the given thread counts; `--list` prints every variant of both schemes.
 
 Results under this accounting are to be measured on bare-metal Linux
-(`plan.md`, Step 9); WSL runs are smoke tests only.
+(`measurement_runbook.md`); WSL runs are smoke tests only.
 
 ## Submission accounting (paper-v1-submission)
 
@@ -330,3 +335,44 @@ data dependent, and non-constant time.
 
 Format caveat: E8 emits an uncompressed `salt || s0 || s1` signature, while
 ordinary HAWK pays for compressed encoding and its encod rejection loop.
+
+## Key generation and verification
+
+`bench_compare --mode keyverify` times key generation and verification with
+the same accounting rules as signing (definitions in
+`e8/compare/bench_sign_core.h`; schedule and how to read Tables 8-10 in
+`e8/docs/harness.md`, "Key generation and verification").
+
+- **Key generation** (`keygen` rows): each scheme's public `keygen` call,
+  from the RNG to the encoded private and public key, retries included
+  (`hawk_keygen()`, `e8_keygen()`). Both schemes draw from one paired stream
+  (`BSC_STREAM_KEYGEN_PAIRED`, index = key index), so they run HAWK's NTRU
+  core on the same draws unless one restarts after it. `keygen_core` rows
+  time `Hawk_keygen()` alone on the same seed, so `keygen - keygen_core` is
+  each scheme's own tail. `attempts` = RNG calls (one per (f, g) draw) and
+  `rng_bytes` = bytes drawn. `verify_ok` = 1 if the call succeeded.
+- **Verification** (`verify` rows), `accounting`:
+  - `all_in`: `verify_finish` with the encoded signature and encoded public
+    key (decoding and hashing inside the timed call). HAWK uses
+    `HAWK_TMPSIZE_VERIFY_FAST(logn)` (its documented fastest buffer), E8
+    `E8_TMPSIZE_VERIFY(logn)`.
+  - `prepared`: the public key is decoded once per key outside the timed
+    call (`hawk_decode_public_key()`, `e8_decode_public_key()`; decode
+    only, no precomputed NTT, since HAWK's decoded key has none). The
+    decoding is timed separately as `pub_decode` rows (as `prepare` is for
+    signing), and the signature is still encoded.
+
+  `verifier` names the verifier (`upstream`, `fast`, `ref`).
+  `encoding_included` = 1: decoding the signature is inside every timed
+  call. `verify_ok` = 1 if accepted.
+- **Inputs**: signatures by each scheme's `ref` signer, `all_in`, `T = 1`,
+  with the harness's messages and signing streams. Verification cost does
+  not depend on the sampler variant.
+- **Negative checks** (`verify_reject` rows, untimed): per key, the first
+  signature with one bit flipped in the salt, in `s1` and, for E8, in `s0`,
+  checked by every verifier in both modes. `verify_ok` is 1 if the tampered
+  signature was accepted (it must be 0).
+- `bench_compare --sizes` prints `scheme,object,logn,bytes` for every key,
+  signature and `tmp` object of both schemes from the size macros
+  (`sizes.csv` in every run directory).
+

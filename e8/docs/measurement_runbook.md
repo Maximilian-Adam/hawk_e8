@@ -1,13 +1,13 @@
-# Step 9 run book: the measurements on bare metal
+# Run book: the measurements on bare metal
 
-How to run plan.md Step 9 on the AMD Ryzen 9 9950X3D (Arch Linux): machine
+How to run the timing measurements on the AMD Ryzen 9 9950X3D (Arch Linux): machine
 setup, the CPU lists, the preflight, the two run sets, the acceptance
 checks, what to copy back and what to do when a check fails.  The harness
 itself is described in [`harness.md`](harness.md); the accounting and the
 CSV schema in [`perf_comparison_final.md`](perf_comparison_final.md).
-Everything below was rehearsed on WSL in Step 8 (`harness.md`, "Step 8"),
-except what WSL cannot show (boost, governor, frequency, SMT control, the
-two CCDs).
+Everything below was rehearsed at small and full volume; the key
+generation and verification steps also on this machine, where
+`ccd_cpus.sh` found the V-cache CCD at cores 0-7.
 
 ## 1. Machine setup
 
@@ -87,7 +87,7 @@ sh compare/preflight.sh --cpus "$(sh compare/ccd_cpus.sh cross-ccd)" \
 
 `--force` (driver) overrides; the override and every failed condition are
 recorded in the run's `commands.txt` and `env.txt`, and the analysis's
-`preflight` check then FAILs.  Do not force a Step 9 run; fix the machine
+`preflight` check then FAILs.  Do not force a measurement run; fix the machine
 state instead.  If `freq` fails although boost is off and the governor is
 `performance`, compare `cpupower monitor` on the listed CPUs: an idle-state
 artefact passes on a second try, a real clock difference between the CCDs
@@ -96,20 +96,23 @@ does not.
 ## 4. The commands
 
 Smoke first (every configuration of both flag sets at small counts,
-unpinned; not a Step 9 run set; the preflight is reported, not enforced):
+unpinned; not a measurement run set; the preflight is reported, not enforced):
 
 ```sh
 make bench-compare-smoke
 ```
 
-Then the two run sets, from the repository root.  Headline (Step 10 tables
-1-7): T in 1, 2, 4, 8 and throughput with P = 8 on the V-cache CCD; both
-flag sets; 5 runs each (runs and flag sets alternate: r1/O2, r1/O3native,
+Then the two run sets, from the repository root.  Headline (tables
+1-10): key generation and verification (`keyverify`, `keyverify_avx2`:
+one thread pinned to the first CPU of the list, 1,000 timed key
+generations per scheme and degree, 10 x 1,000 verified signatures), then T
+in 1, 2, 4, 8 and throughput with P = 8 on the V-cache CCD; both flag
+sets; 5 runs each (runs and flag sets alternate: r1/O2, r1/O3native,
 r2/O2, ...):
 
 ```sh
 make bench-compare COMPARE_FLAGSETS="O2 O3native" COMPARE_RUNS=5 \
-  COMPARE_ARGS="--run-set headline --cpus $(sh e8/compare/ccd_cpus.sh headline) --name step9-headline"
+  COMPARE_ARGS="--run-set headline --cpus $(sh e8/compare/ccd_cpus.sh headline) --name headline"
 ```
 
 Cross-CCD (secondary, Table 4b): latency only, T in 1, 2, 4, 8, 16 on both
@@ -117,7 +120,7 @@ CCDs, the V-cache CCD first:
 
 ```sh
 make bench-compare COMPARE_FLAGSETS="O2 O3native" COMPARE_RUNS=5 \
-  COMPARE_ARGS="--run-set cross-ccd --cpus $(sh e8/compare/ccd_cpus.sh cross-ccd) --name step9-cross-ccd"
+  COMPARE_ARGS="--run-set cross-ccd --cpus $(sh e8/compare/ccd_cpus.sh cross-ccd) --name cross-ccd"
 ```
 
 The run sets set the thread list (`1,2,4,8` / `1,2,4,8,16`) and `--procs`
@@ -131,31 +134,35 @@ elsewhere):
 
 ```sh
 cd e8
-python3 -I compare/analysis/analyze.py --out-dir results/compare/analysis/step9-headline \
+python3 -I compare/analysis/analyze.py --out-dir results/compare/analysis/headline \
   results/compare/O2/RUN_ID ... results/compare/O3native/RUN_ID ...
 ```
 
 ## 5. Expected run time
 
-Measured on WSL in Step 8 (one full-volume run of each run set, O2,
-pinned; `harness.md`, "Step 8"): per run and flag set, headline 8.8 min
-(latency 6.2, throughput 1.9, AVX2, sampler and stages 0.7) and cross-CCD
-7.9 min.  WSL's cores ran boosted (core / TSC about 1.3), Step 9's run at
-the base clock, so expect about 1.3x:
+Measured on WSL (one full-volume run of each run set, O2, pinned): per run
+and flag set, headline 8.8 min (latency 6.2, throughput 1.9, AVX2, sampler
+and stages 0.7) and cross-CCD 7.9 min.  WSL's cores ran boosted (core /
+TSC about 1.3), the measurement runs at the base clock, so expect about
+1.3x.  The key generation and verification steps took 67 + 16 s per run
+and flag set on this machine with boost on, so about 1.8 min with boost
+off:
 
 | run set | runs x flag sets | per run (expected) | total (expected) |
 | --- | --- | --- | --- |
 | smoke | 1 x 2 | seconds | under a minute |
-| headline | 5 x 2 | about 11.5 min | about 1.9 h |
+| headline | 5 x 2 | about 13.3 min | about 2.2 h |
 | cross-CCD | 5 x 2 | about 10.3 min | about 1.7 h |
 
-Plan for 4 hours.  The analysis of each run set takes about 2 minutes and
+Plan for 4.5 hours.  The analysis of each run set takes about 2 minutes and
 under 1 GB of memory.  Start the runs inside `tmux` or `screen` (or with
 `nohup`), so that a dropped session does not stop them, and do not touch
 the repository while they run: the driver is a shell script read as it
 runs, and the preflight checks a clean tree only at the start of each
 run.  The first run of each flag set finishes after about 12 minutes:
 check its `commands.txt` (every step `exit 0`) before leaving it.
+Its first steps, `keyverify` and `keyverify_avx2`, finish after about
+2 minutes.
 
 ## 6. Acceptance
 
@@ -166,15 +173,26 @@ passed; `acceptance.txt` (and the top of `tables.md`) lists them:
 | --- | --- |
 | `verify` | PASS: 0 signing or verification failures, warm-ups included |
 | `complete` | PASS: every step ran and exited 0, every CSV present, complete and well-formed |
-| `attempts` | PASS: attempts per signature as in Step 6 (HAWK n = 256 about 1.1796, the rest about 1.0000) |
+| `attempts` | PASS: attempts per signature as in the validation (HAWK n = 256 about 1.1796, the rest about 1.0000) |
 | `run_spread` | PASS: per-run medians within 3% (`--run-tolerance`) for every key |
 | `core_vs_tsc` | PASS: with boost off, the serial core / TSC ratio constant within 2% in each run |
 | `joins` | PASS: precision and validation rows for every key |
 | `preflight` | PASS: every run passed the preflight |
+| `keyverify_complete` | PASS: every `keyverify*.csv` has the row counts of its `--list` file |
+| `verify_failures` | PASS: every timed verification accepted; every key generation, `pub_decode` and warm-up row ok |
+| `verify_reject` | PASS: every tampered signature rejected by every verifier in both accounting modes |
+
+`run_spread` covers the verification medians as well (same 3%); key
+generation's per-run means are reported in `keyverify_summary.csv`, not
+checked (they are heavy-tailed).
 
 Then read `tables.md` as a reviewer would: the ratio CIs (`ratios.csv`,
 `runs` = 5), the two flag sets apart, the HAWK AVX2 context row labelled,
 and the cross-CCD Table 4b against the headline Table 4 at `T <= 8`.
+For Tables 8-10 (`keyverify_ratios.csv`, `keyverify_summary.csv`), check
+the `diverged` column and the O3native E8 `fast` all-in rows (all-in
+minus prepared was twice O2's at n = 1024 in a trial run); `harness.md`,
+"Key generation and verification", explains both.
 
 ## 7. What to copy back
 
@@ -183,17 +201,18 @@ that the analysis can be re-run here:
 
 ```sh
 cd e8/results/compare
-tar czf step9-RUNSET.tar.gz analysis/step9-RUNSET \
+tar czf RUNSET.tar.gz analysis/RUNSET \
   $(grep -l '^run_set: RUNSET' */*/env.txt | xargs -n1 dirname)
 ```
 
-The tarball holds the run directories with every CSV (672 MB per
-headline run and 250 MB per cross-CCD run, about 8.6x smaller gzipped:
+The tarball holds the run directories with every CSV (700 MB per
+headline run, 28 MB of it keyverify, and 250 MB per cross-CCD run, about 8.6x smaller gzipped:
 about 0.8 and 0.3 GB for the two run sets) and the analysis.  The analysis reads
 `NAME.csv.gz` like `NAME.csv`, so the CSVs may also be kept gzipped
-(`gzip */*/*.csv`).  Commit only what Step 10 needs (the final
-`tables.md` / `tables.tex`, `summary.csv`, `ratios.csv`, `acceptance.txt`
-and the `env.txt` files) under `e8/docs/`, as decided then.
+(`gzip */*/*.csv`).  Commit only what the comparison tables need
+(the final `tables.md` / `tables.tex`, `summary.csv`, `ratios.csv`,
+`keyverify_summary.csv`, `keyverify_ratios.csv`, `acceptance.txt` and the
+`env.txt` files) under `e8/docs/`.
 
 ## 8. When a check fails
 
@@ -214,10 +233,16 @@ and the `env.txt` files) under `e8/docs/`, as decided then.
 - `core_vs_tsc` FAIL: core cycles and TSC are not proportional, so the clock
   moved (boost, a governor change, a power limit).  Check `env.txt`
   (`boost`, `governor`, `cur_freq_khz`) and repeat the run.
-- `attempts` FAIL: the signers do not reject as in Step 6; stop and
+- `attempts` FAIL: the signers do not reject as in the validation; stop and
   investigate (a sampler or table difference, not noise).
 - `joins` FAIL: `e8/docs/precision_summary.csv` or `validation_summary.csv`
   lacks a row (a new variant or a changed name).
 - `preflight` FAIL: a run was forced; repeat it with the machine set up.
+- `verify_failures` or `verify_reject` FAIL: a broken build or a real
+  bug, as for `verify`; do not use the run. `keyverify.txt` names any
+  tampered signature that was accepted; `make test-e8` and `make
+  validate-quick` run the verifier's differential tests.
+- `keyverify_complete` FAIL: the keyverify step was killed or failed
+  (`commands.txt`, `keyverify.txt`); repeat that run as for `complete`.
 - Driver exit 2: a usage or configuration error (the message says which);
   exit 3: the preflight refused the run (each failed condition printed).

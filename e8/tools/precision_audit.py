@@ -800,7 +800,7 @@ def block_rows(cfg, orders):
 
 
 def dist_rows(cfg):
-    """Exact implemented distributions, for Step 6's goodness-of-fit tests."""
+    """Exact implemented distributions, for the validation's goodness-of-fit tests."""
     out = []
     for kind, ident, pr in cfg.draws():
         for x in sorted(set(pr.impl_all) | set(pr.ideal)):

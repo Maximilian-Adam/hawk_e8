@@ -730,6 +730,7 @@ test_timing(void)
 	for (unsigned u = 0; u < 1000000; u ++) {
 		spin += u;
 	}
+	(void)spin;
 	cmn_measure_stop(&m, &s);
 	check(m.tsc_cycles > 1 && m.wall_ns > 1 && m.cpu_ns_all_threads > 1,
 		"timing measure");
@@ -788,8 +789,8 @@ test_csv(void)
 		"technique,threads,logn,key_index,msg_index,attempts,"
 		"sig_bytes,rng_bytes,tsc_cycles,core_cycles,wall_ns,"
 		"cpu_ns_all_threads,accounting,encoding_included,verify_ok,"
-		"mode,proc,flags,batch\n"
-		"sign,,,,,,,8,,,,,,,,,,,,,latency,,O2,3\n") == 0,
+		"mode,proc,flags,batch,verifier\n"
+		"sign,,,,,,,8,,,,,,,,,,,,,latency,,O2,3,\n") == 0,
 		"csv sign schema");
 	fclose(fp);
 	free(buf);

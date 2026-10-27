@@ -23,6 +23,9 @@ e8/
                 e8_tables_geom.h              E8 geometry (all variants)
                 e8_tables_{ref,hot64,hot32}.h E8 variant tables, per logn
                 hawk_tables_{ref,hot64,hot32}.h  HAWK variant tables
+                e8_tables_ntt.h               NTT twiddles, Delta and S_n
+                                              constants of the E8
+                                              verifier and key generation
   common/     shared measurement modules, used identically for HAWK and E8:
                 cmn_rng     SHAKE256 streams (128-byte buffer, byte
                             counters, prefixed streams) and the benchmark
@@ -37,15 +40,19 @@ e8/
               test_cmn_common.c
   tools/      diagnostics: histograms, rejection summary, validation summary;
               precision_audit.py (SD and Renyi divergence of every sampler
-              variant from the committed tables); Step 6 validation:
+              variant from the committed tables); the validation:
               e8_correctness.c (sign and verify with real keys),
               e8_distribution_sample.c (sampler histograms),
               distribution_tests.py (goodness of fit against the exact
-              implemented distributions) and validate.py (the driver)
+              implemented distributions) and validate.py (the driver);
+              e8_keygen_limits.c (coefficient ranges of the
+              public form over many keys) and e8_verify_diff.c (the
+              verifier against the reference verifier)
   compare/    HAWK vs E8 benchmarks
-    bench_compare.c          the comparison harness (Step 7, docs/harness.md):
+    bench_compare.c          the comparison harness (docs/harness.md):
                              every configuration interleaved, latency and
-                             throughput modes, pinning
+                             throughput modes, pinning; keyverify mode
+                             (key generation and verification)
     bench_sign_core.c/.h     signing core shared by bench_compare and
                              e8_sign_bench (keys, timed sign_finish, verify)
     run_compare.sh           run driver: run sets (all, headline,
@@ -54,10 +61,10 @@ e8/
     env_capture.sh           environment record (env.txt) of a run
     preflight.sh             machine-state checks before a run (boost,
                              governor, SMT, perf, frequencies, clean tree)
-    ccd_cpus.sh              Step 9's CPU lists from the L3 topology
+    ccd_cpus.sh              the run sets' CPU lists from the L3 topology
     analysis/                analyze.py (+ compare_data.py,
                              compare_tables.py): statistics, bootstrap
-                             ratios, acceptance checks, Step 10 tables
+                             ratios, acceptance checks, comparison tables
     e8_sign_bench.c          HAWK vs E8 signing, every sampler variant,
                              all_in and prepared accounting, one block at a
                              time
@@ -74,9 +81,11 @@ e8/
   results/    generated outputs (gitignored), see "Usage"
   docs/       design notes, recorded performance results and accounting
               (perf_comparison_final.md), the harness (harness.md), the
-              Step 9 run book (step9_runbook.md), the precision audit
+              measurement run book (measurement_runbook.md), the precision audit
               (precision_audit.md, precision_summary.csv), the validation
-              (validation.md, validation_summary.csv)
+              (validation.md, validation_summary.csv), the verifier's
+              3-prime range argument (verifier_range.md), the key
+              generation and verification data (keygen_verify_data.md)
 ```
 
 Dependencies run one way: `src/` may use `common/` and `tables/`;
@@ -93,24 +102,30 @@ make e8                  # build all E8 tests, tools and benchmarks
 make test-e8             # run the E8 test suite
 make check-upstream      # confirm upstream HAWK files are unchanged
 make tables              # regenerate the sampler tables; fail if they differ
-make check-integer-only  # the signing paths contain no floating point
+make check-integer-only  # the signing and verification paths contain no
+                         # floating point
 make precision-audit     # SD / Renyi audit of every variant (docs/precision_audit.md);
                          # fail if docs/precision_summary.csv differs
-make validate-quick      # Step 6 validation at small counts (about 1-2 minutes)
+make validate-quick      # the validation at small counts (about 1-2 minutes)
 make validate            # the full validation (docs/validation.md; about half an
                          # hour on 32 CPUs); fail if docs/validation_summary.csv
                          # differs
 make bench-builds        # the timed binaries of every flag set (part of make)
-make bench-compare-smoke # Step 8: the harness on every configuration of both
+make bench-compare-smoke # the harness on every configuration of both
                          # flag sets at small counts, plus the analysis
-make bench-compare       # one harness run at Step 9's volume (flag set O2;
+make bench-compare       # one harness run at full volume (flag set O2;
                          # COMPARE_FLAGSETS, COMPARE_RUNS, COMPARE_ARGS;
                          # --run-set headline|cross-ccd, --cpus, --force)
 ```
 
-Step 9 (bare metal): machine setup, CPU lists, preflight, the exact
+Bare-metal measurements: machine setup, CPU lists, preflight, the exact
 commands of both run sets, run time, acceptance and what to copy back are
-in [`docs/step9_runbook.md`](docs/step9_runbook.md).
+in [`docs/measurement_runbook.md`](docs/measurement_runbook.md). Key generation and
+verification timing: [`docs/harness.md`](docs/harness.md), "Key
+generation and verification"; the verifier's range argument:
+[`docs/verifier_range.md`](docs/verifier_range.md); the data the key
+generation and verification tables rely on (limits, primes, correctness,
+sizes): [`docs/keygen_verify_data.md`](docs/keygen_verify_data.md).
 
 The validation builds `bin/e8_correctness_nodebug` from its own E8 objects
 in `build/nodebug/` (`HAWK_E8_DEBUG_CHECKS=0`, the timed build's setting)
@@ -133,7 +148,7 @@ results/
   diagnostics/        e8-histograms, e8-rejection-summary,
                       e8-validation-summary, the sigma sweeps
   precision/          precision-audit
-  validation/         validate (Step 6)
+  validation/         validate
   validation-quick/   validate-quick
   distribution-tests/ tools/distribution_tests.py run on its own
   compare/            the comparison harness (docs/harness.md):

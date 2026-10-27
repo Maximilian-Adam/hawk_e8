@@ -11,8 +11,8 @@
 #include "hawk_variants.h"
 
 /*
- * Signature correctness of one sampler variant (Step 6 of the
- * fair-comparison plan, e8/docs/validation.md): signs with real keys and
+ * Signature correctness of one sampler variant (the validation,
+ * e8/docs/validation.md): signs with real keys and
  * verifies every signature with the scheme's verifier.
  *
  *   e8_correctness --scheme hawk|e8 --variant NAME --logn 8|9|10
@@ -26,9 +26,13 @@
  * encoded key) and the decoded / prepared key if j is odd
  * (hawk_shim_sign_finish_decoded(), hawkv_sign_finish_decoded(),
  * e8_sign_finish_inner() with a prepared key). Every signature is checked
- * with hawk_verify_finish() / e8_verify_finish(); the first signature of
+ * with hawk_verify_finish() / e8_verify_finish(), with the encoded and
+ * with the decoded public key (hawk_decode_public_key() /
+ * e8_decode_public_key()), and for E8 also with the reference verifier
+ * e8_verify_finish_ref(); the verdicts must agree (verifier_mismatches
+ * counts those that do not). The first signature of
  * each key is also checked against a different message, which must be
- * rejected (a control that the verifier can fail).
+ * rejected by every verifier (a control that the verifier can fail).
  *
  * Determinism: every input is derived from the seed with the shared
  * signing RNG (cmn_sign_rng, seeded with a label and little-endian
@@ -64,6 +68,7 @@ static const char *const SCHEME_NAME[] = { "hawk", "e8" };
 static uint8_t key_priv[E8_PRIVKEY_SIZE(10)];
 static uint8_t key_pub[E8_PUBKEY_SIZE(10)];
 static uint8_t key_prepared[E8_PRIVKEY_PREPARED_SIZE(10)];
+static int32_t key_decoded[(E8_PUBKEY_DECODED_SIZE(10) + 3) / 4];
 static uint8_t tmp_keygen[E8_TMPSIZE_KEYGEN(10)];
 static uint8_t tmp_sign[E8_TMPSIZE_SIGN(10)];
 static uint8_t tmp_verify[E8_TMPSIZE_VERIFY(10) + HAWK_TMPSIZE_VERIFY(10)];
@@ -73,6 +78,7 @@ typedef char correctness_hawk_buffers_check[
 	(sizeof key_priv >= HAWK_PRIVKEY_SIZE(10)
 	&& sizeof key_pub >= HAWK_PUBKEY_SIZE(10)
 	&& sizeof key_prepared >= HAWK_PRIVKEY_DECODED_SIZE(10)
+	&& sizeof key_decoded >= 2 * HAWK_DECODED_PUB_LENGTH(10)
 	&& sizeof tmp_keygen >= HAWK_TMPSIZE_KEYGEN(10)
 	&& sizeof tmp_sign >= HAWK_TMPSIZE_SIGN(10)
 	&& sizeof tmp_verify >= HAWK_TMPSIZE_VERIFY(10)
@@ -101,6 +107,7 @@ typedef struct {
 	uint64_t attempt_mismatches;
 	uint64_t controls;
 	uint64_t control_accepts;
+	uint64_t verifier_mismatches;
 	uint64_t keygen_failures;
 } correctness_counts;
 
@@ -178,11 +185,14 @@ keygen(const correctness_options *o, uint32_t key)
 			return 0;
 		}
 		hawk_decode_private_key(o->logn, key_prepared, key_priv);
-		return 1;
+		return hawk_decode_public_key(o->logn, (int16_t *)key_decoded,
+			key_pub, HAWK_PUBKEY_SIZE(o->logn));
 	}
 	return e8_keygen(o->logn, key_priv, key_pub, cmn_sign_rng_hawk, &rng,
 		tmp_keygen, sizeof tmp_keygen)
-		&& e8_prepare_private_key(o->logn, key_prepared, key_priv);
+		&& e8_prepare_private_key(o->logn, key_prepared, key_priv)
+		&& e8_decode_public_key(o->logn, key_decoded, key_pub,
+			E8_PUBKEY_SIZE(o->logn));
 }
 
 static int
@@ -224,19 +234,40 @@ sign_one(const correctness_options *o, const hawk_sampler_variant *hv,
 		sig_buf, sc_data, key_prepared, tmp_sign, sizeof tmp_sign);
 }
 
+/*
+ * Verify sig_buf with the encoded and the decoded public key (and for E8
+ * the reference verifier); returns 1 only if every verifier accepts and
+ * counts a verifier mismatch if they disagree.
+ */
 static int
-verify_one(const correctness_options *o, const shake_context *sc_data)
+verify_one(const correctness_options *o, const shake_context *sc_data,
+	correctness_counts *c)
 {
 	unsigned logn = o->logn;
+	int enc, dec, ref;
 
 	if (o->scheme == SCHEME_HAWK) {
-		return hawk_verify_finish(logn, sig_buf, HAWK_SIG_SIZE(logn),
+		enc = hawk_verify_finish(logn, sig_buf, HAWK_SIG_SIZE(logn),
 			sc_data, key_pub, HAWK_PUBKEY_SIZE(logn),
 			tmp_verify, sizeof tmp_verify);
+		dec = hawk_verify_finish(logn, sig_buf, HAWK_SIG_SIZE(logn),
+			sc_data, key_decoded, (size_t)-1,
+			tmp_verify, sizeof tmp_verify);
+		ref = enc;
+	} else {
+		enc = e8_verify_finish(logn, sig_buf, E8_SIG_SIZE(logn),
+			sc_data, key_pub, E8_PUBKEY_SIZE(logn),
+			tmp_verify, sizeof tmp_verify);
+		dec = e8_verify_finish(logn, sig_buf, E8_SIG_SIZE(logn),
+			sc_data, key_decoded, (size_t)-1, NULL, 0);
+		ref = e8_verify_finish_ref(logn, sig_buf, E8_SIG_SIZE(logn),
+			sc_data, key_pub, E8_PUBKEY_SIZE(logn),
+			tmp_verify, sizeof tmp_verify);
 	}
-	return e8_verify_finish(logn, sig_buf, E8_SIG_SIZE(logn),
-		sc_data, key_pub, E8_PUBKEY_SIZE(logn),
-		tmp_verify, sizeof tmp_verify);
+	if (enc != dec || enc != ref) {
+		c->verifier_mismatches ++;
+	}
+	return enc && dec && ref;
 }
 
 static int
@@ -292,14 +323,14 @@ run(const correctness_options *o, const hawk_sampler_variant *hv,
 				c->attempt_mismatches ++;
 			}
 			shake_inject(&dsc, sig_buf, sig_len);
-			if (!verify_one(o, &sc_data)) {
+			if (!verify_one(o, &sc_data, c)) {
 				c->verify_failures ++;
 			}
 			if (j == 0) {
 				make_message(&sc_data, o->seed, o->logn,
 					key, o->sigs_per_key);
 				c->controls ++;
-				if (verify_one(o, &sc_data)) {
+				if (verify_one(o, &sc_data, c)) {
 					c->control_accepts ++;
 				}
 			}
@@ -458,10 +489,10 @@ main(int argc, char **argv)
 			"encoded,prepared,sign_failures,verify_failures,"
 			"keygen_failures,attempts,attempts_max,"
 			"attempt_mismatches,controls,control_accepts,"
-			"sig_digest,seconds\n");
+			"verifier_mismatches,sig_digest,seconds\n");
 	}
 	printf("%s,%s,%u,%s,%u,%u,%u,%d,%llu,%u,%u,%u,%llu,%llu,%llu,%llu,"
-		"%llu,%llu,%llu,%llu,%llu,%llu,%llu,",
+		"%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,",
 		SCHEME_NAME[o.scheme], o.variant,
 		hv != NULL ? hv->threshold_bits : ev->threshold_bits,
 		hv != NULL ? hv->technique : ev->technique,
@@ -477,12 +508,13 @@ main(int argc, char **argv)
 		(unsigned long long)c.attempts_max,
 		(unsigned long long)c.attempt_mismatches,
 		(unsigned long long)c.controls,
-		(unsigned long long)c.control_accepts);
+		(unsigned long long)c.control_accepts,
+		(unsigned long long)c.verifier_mismatches);
 	for (unsigned u = 0; u < sizeof digest; u ++) {
 		printf("%02x", digest[u]);
 	}
 	printf(",%.3f\n", (double)(t1 - t0) * 1e-9);
 	return ok && c.sign_failures == 0 && c.verify_failures == 0
 		&& c.keygen_failures == 0 && c.attempt_mismatches == 0
-		&& c.control_accepts == 0 ? 0 : 1;
+		&& c.control_accepts == 0 && c.verifier_mismatches == 0 ? 0 : 1;
 }

@@ -1,6 +1,6 @@
 #!/bin/sh
-# The pinned CPU lists of Step 9's two run sets (plan.md Step 9,
-# docs/step9_runbook.md), from the L3 topology in sysfs: one CPU per core
+# The pinned CPU lists of the two bare-metal run sets
+# (docs/measurement_runbook.md), from the L3 topology in sysfs: one CPU per core
 # (the core's lowest-numbered online thread), grouped by L3 domain (CCD);
 # the V-cache CCD is the one with the larger L3.
 #

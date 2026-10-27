@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Step 6 validation driver (e8/docs/validation.md; Python standard library
+Validation driver (e8/docs/validation.md; Python standard library
 only): signature correctness of every sampler variant of both schemes,
 the E8 debug-build run, the sampler histograms and the distribution tests.
 
@@ -25,11 +25,22 @@ slots in use, default os.cpu_count()):
                   parity, E8 per class, every variant), E8 blocks for all
                   256 taus, and signature norms for one fixed target.
   4. tests        tools/distribution_tests.py on the merged histograms.
+  5. verifier     bin/e8_verify_diff: the E8 verifier
+                  (encoded and decoded public key) against the reference
+                  verifier on honest, boundary, bit-flipped and random
+                  signatures, VERIFY_SHARDS shards of 4 keys x 50
+                  signatures per degree (18 candidates per signature,
+                  11 of them tampered or random: about 10^5 per degree in
+                  both runs); every verdict must agree. Part 1 also
+                  checks every signature with the encoded and decoded
+                  public key and, for E8, the reference verifier
+                  (verifier_mismatches in correctness.csv must be 0).
 
 Outputs in --out-dir (default e8/results/validation, or
 e8/results/validation-quick with --quick): correctness.csv (one row per
 shard and build), hist.csv (merged histograms), tests.csv, controls.csv,
-ideal.csv, signorm.csv, and summary.csv (one row per scheme, variant,
+ideal.csv, signorm.csv, verifier.csv (one row per part 5 shard), and
+summary.csv (one row per scheme, variant,
 logn; no timings, so equal seeds give an identical file). With --check FILE the summary must equal
 FILE. Exit status 0 if every signature verified, every debug check and
 digest matched, every distribution test passed and every eligible
@@ -63,6 +74,10 @@ QUICK = dict(sigs=2000, keys=2, sigs_per_key=100, thread_every=5,
              threads=4, draws_1d=1000000, part_1d=1000000,
              blocks=10000, taus_per_job=64, signorm=10000,
              part_signorm=10000)
+VERIFY_SHARDS = 46
+VERIFY_KEYS = 4
+VERIFY_SIGS_PER_KEY = 50
+COST_VERIFY_SHARD = {8: 4.6, 9: 8.3, 10: 18.0}
 
 # Rough single-process costs on the development machine (Ryzen 9 9950X3D,
 # WSL), seconds, for the duration estimate only.
@@ -198,6 +213,16 @@ def sampling_jobs(cfg, bindir, seed):
     return jobs
 
 
+def verifier_jobs(bindir, seed):
+    exe = os.path.join(bindir, "e8_verify_diff")
+    return [Job("verifier", [exe, "--logn", str(logn),
+                             "--keys", str(VERIFY_KEYS),
+                             "--sigs-per-key", str(VERIFY_SIGS_PER_KEY),
+                             "--seed", str(seed), "--shard", str(shard),
+                             "--header"], cost=COST_VERIFY_SHARD[logn])
+            for logn in LOGNS for shard in range(VERIFY_SHARDS)]
+
+
 def parse_rows(text):
     return list(csv.DictReader(io.StringIO(text)))
 
@@ -221,7 +246,9 @@ def main():
 
     cjobs = correctness_jobs(cfg, args.bin_dir, args.seed)
     sjobs = sampling_jobs(cfg, args.bin_dir, args.seed)
-    est = sum(j.cost for j in cjobs + sjobs) / max(1, args.jobs) * 1.6
+    vjobs = verifier_jobs(args.bin_dir, args.seed)
+    est = sum(j.cost for j in cjobs + sjobs + vjobs) / max(1, args.jobs) \
+        * 1.6
     print("validate: %s run, %d correctness/debug shards and %d sampling"
           " jobs on %d CPU slots; expected duration about %.0f minutes"
           " (plus about 1 minute of analysis)"
@@ -230,10 +257,12 @@ def main():
 
     ok = True
     t0 = time.time()
-    run_jobs(cjobs, args.jobs)
+    run_jobs(cjobs + vjobs, args.jobs)
     t1 = time.time()
-    print("validate: correctness and debug runs done in %.0f s" % (t1 - t0),
-          flush=True)
+    print("validate: correctness, debug and verifier runs done in %.0f s"
+          % (t1 - t0), flush=True)
+    if any(j.rc != 0 for j in vjobs):
+        ok = False
     run_jobs(sjobs, args.jobs)
     t2 = time.time()
     print("validate: sampling done in %.0f s" % (t2 - t1), flush=True)
@@ -359,6 +388,20 @@ def main():
         for r in rows:
             w.writerow(r)
 
+    # Verifier differential rows (part 5) and the part 1 verifier checks.
+    vrow = [r for j in vjobs for r in parse_rows(j.out or "")]
+    if vrow:
+        with open(prefix + "verifier.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, list(vrow[0].keys()), lineterminator="\n")
+            w.writeheader()
+            for r in vrow:
+                w.writerow(r)
+    vbad = ("mismatches", "norm_mismatches", "honest_failures",
+            "boundary_failures", "key_reject_failures", "sign_failures")
+    vfail = sum(int(r[f]) for r in vrow for f in vbad) \
+        + (len(vjobs) - len(vrow))
+    cmism = sum(int(r.get("verifier_mismatches") or 0) for r in crow)
+
     sigs = sum(r["signatures"] for r in rows)
     fails = sum(r["sign_failures"] + r["verify_failures"]
                 + r["control_accepts"] + r["attempt_mismatches"]
@@ -380,10 +423,29 @@ def main():
           % (len(controls), sum(r["eligible"] for r in controls),
              sum(r["rejected"] for r in controls), missed,
              sum(r["rejected"] for r in ideal), len(ideal)))
+    for logn in LOGNS:
+        mine = [r for r in vrow if int(r["logn"]) == logn]
+
+        def vt(f):
+            return sum(int(r[f]) for r in mine)
+        print("validate: verifier n=%d: %d signatures, %d candidates (%d"
+              " tampered or random, %d accepted), %d accepted in all,"
+              " %d mismatches, %d norm mismatches, %d bad keys rejected"
+              " of %d" % (1 << logn, vt("signatures"), vt("candidates"),
+                          vt("tampered") + vt("random"),
+                          vt("tamper_accepts") + vt("random_accepts"),
+                          vt("accepts"), vt("mismatches"),
+                          vt("norm_mismatches"),
+                          vt("key_rejects") - vt("key_reject_failures"),
+                          vt("key_rejects")))
+    print("validate: verifier failures %d; correctness verifier mismatches"
+          " (encoded / decoded public key, E8 reference verifier) %d"
+          % (vfail, cmism))
     print("validate: wrote {correctness,hist,tests,controls,ideal,"
-          "signorm,summary}.csv in %s; total %.0f s"
+          "signorm,verifier,summary}.csv in %s; total %.0f s"
           % (os.path.relpath(out_dir), time.time() - t0))
-    if fails or dfail or digest_mismatch or rej or missed:
+    if fails or dfail or digest_mismatch or rej or missed or vfail \
+            or cmism:
         ok = False
     if args.check is not None and not os.path.exists(args.check):
         print("validate: %s does not exist (copy the fresh summary there)"

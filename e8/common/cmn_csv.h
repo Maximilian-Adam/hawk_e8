@@ -42,11 +42,16 @@ void cmn_csv_empty(cmn_csv *csv);
 void cmn_csv_end_row(cmn_csv *csv);
 
 /*
- * The per-signature schema (plan.md, Step 7), one row per signature or
+ * The per-signature schema, one row per signature or
  * setup operation:
  *
  *   kind               sign, sign_failed, keygen, prepare, or warmup (an
- *                      untimed-for-the-results warm-up signature)
+ *                      untimed-for-the-results warm-up signature);
+ *                      keyverify mode adds keygen_core (HAWK's
+ *                      NTRU core alone, scheme hawk_core), pub_decode,
+ *                      verify, verify_reject (a tampered signature,
+ *                      verify_ok = 1 if it was accepted) and
+ *                      warmup_keygen / warmup_verify
  *   run_id             identifier of the benchmark run
  *   scheme             hawk or e8
  *   variant            sampler variant (ref, hot64, ...)
@@ -75,11 +80,19 @@ void cmn_csv_end_row(cmn_csv *csv);
  *   flags              name of the build's flag set (O2, O3native, ...)
  *   batch              position of the row's batch in the run's
  *                      interleaved schedule (empty if not interleaved)
+ *   verifier           verify rows: upstream (HAWK), fast or ref (E8);
+ *                      empty elsewhere
  *
  * Numeric fields set to CMN_UNAVAILABLE and string fields set to NULL are
  * written empty.
  */
-#define CMN_CSV_SIGN_COLUMN_COUNT   24
+#define CMN_CSV_SIGN_COLUMN_COUNT   25
+
+/*
+ * Schema version: 1 (the first 24 columns), 2 (the verifier column
+ * appended and the keyverify kinds). Readers accept both.
+ */
+#define CMN_CSV_SIGN_SCHEMA_VERSION   2
 
 extern const char *const cmn_csv_sign_columns[CMN_CSV_SIGN_COLUMN_COUNT];
 
@@ -108,6 +121,7 @@ typedef struct {
 	uint64_t proc;
 	const char *flags;
 	uint64_t batch;
+	const char *verifier;
 } cmn_sign_row;
 
 /*

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Comparison run driver (plan.md Steps 7-9), run from e8/ (make
+# Comparison run driver, run from e8/ (make
 # bench-compare, bench-compare-smoke). For each run r = 1..R and each flag
 # set FS (runs interleaved: r1/FS1, r1/FS2, r2/FS1, ...), it writes one
 # self-describing run directory
@@ -7,6 +7,14 @@
 #   results/compare/FS/RUN_ID/
 #     env.txt             env_capture.sh (kernel, CPU, flags, boost, ...)
 #     commands.txt        every command of the run, its times and status
+#     sizes.csv           bin/bench_compare-FS --sizes (key, signature and
+#                         tmp sizes of both schemes)
+#     keyverify.csv/.txt  bin/bench_compare-FS --mode keyverify (key
+#                         generation and verification)
+#     keyverify_avx2.csv/.txt  the same, HAWK AVX2 context
+#     keyverify_list.csv, keyverify_avx2_list.csv
+#                         the same commands with --list: the expected row
+#                         counts (the analysis's keyverify_complete check)
 #     latency.csv/.txt    bin/bench_compare-FS --mode latency
 #     throughput.csv/.txt bin/bench_compare-FS --mode throughput
 #     latency_avx2.csv/.txt  bin/bench_compare_avx2-FS (HAWK AVX2 context)
@@ -21,11 +29,12 @@
 # and kept apart by the analysis):
 #
 #   all        every configuration (T 1, 2, 4, 8, 16) and every step; the
-#              default, used by the smoke run; not a Step 9 run set
-#   headline   Step 9's headline (Step 10 tables 1-5): T 1, 2, 4, 8 and
-#              throughput with P = |--cpus| on the V-cache CCD's cores;
-#              every step; --cpus required (except with --smoke)
-#   cross-ccd  Step 9's secondary run: latency only, T 1, 2, 4, 8, 16 on
+#              default, used by the smoke run; not a measurement run set
+#   headline   the measurement's headline (tables 1-5 and 8-10): T 1, 2, 4,
+#              8 and throughput with P = |--cpus| on the V-cache CCD's
+#              cores; every step (keyverify first, pinned to the first
+#              CPU); --cpus required (except with --smoke)
+#   cross-ccd  the measurement's secondary run: latency only, T 1, 2, 4, 8, 16 on
 #              both CCDs' cores (V-cache CCD first); --cpus required
 #              (except with --smoke)
 #
@@ -46,8 +55,8 @@
 #
 # usage: compare/run_compare.sh [--smoke] [--run-set all|headline|cross-ccd]
 #          [--flagsets "O2 O3native"] [--runs R] [--keys K]
-#          [--sigs-per-key M] [--procs P] [--cpus LIST] [--threads LIST]
-#          [--logn LIST] [--warmup W] [--sampler-trials N]
+#          [--sigs-per-key M] [--keygen-keys N] [--procs P] [--cpus LIST]
+#          [--threads LIST] [--logn LIST] [--warmup W] [--sampler-trials N]
 #          [--stage-trials N] [--bootstrap B] [--name NAME] [--no-analysis]
 #          [--force] [--freq-tolerance PCT]
 
@@ -59,6 +68,7 @@ flagsets=O2
 runs=1
 keys=
 sigs=
+keygen_keys=
 procs=
 cpus=
 threads=
@@ -80,6 +90,7 @@ while [ $# -gt 0 ]; do
 	--runs) runs=$2; shift 2 ;;
 	--keys) keys=$2; shift 2 ;;
 	--sigs-per-key) sigs=$2; shift 2 ;;
+	--keygen-keys) keygen_keys=$2; shift 2 ;;
 	--procs) procs=$2; shift 2 ;;
 	--cpus) cpus=$2; shift 2 ;;
 	--threads) threads=$2; shift 2 ;;
@@ -113,7 +124,7 @@ for v in "cpus:$cpus" "threads:$threads"; do
 done
 
 # Run sets: steps and defaults.
-all_steps="latency throughput latency_avx2 sampler stages_hawk stages_e8"
+all_steps="keyverify keyverify_avx2 latency throughput latency_avx2 sampler stages_hawk stages_e8"
 case "$run_set" in
 all) steps=$all_steps; check_threads=${threads:-1,2,4,8,16} ;;
 headline)
@@ -130,13 +141,14 @@ if [ "$run_set" != all ] && [ -z "$cpus" ] && [ "$smoke" != 1 ]; then
 	die "--run-set $run_set needs --cpus (the pinned CPU list)"
 fi
 
-# Defaults: the smoke run (Step 8: every configuration, small counts) and
-# the full run (Step 9's volume per run: 10 keys x 1,000 signatures).
+# Defaults: the smoke run (every configuration, small counts) and
+# the full run (the measurement's volume per run: 10 keys x 1,000 signatures, and
+# 1,000 timed key generations per scheme and degree).
 if [ "$smoke" = 1 ]; then
-	: "${keys:=2}" "${sigs:=4}" "${procs:=4}"
+	: "${keys:=2}" "${sigs:=4}" "${procs:=4}" "${keygen_keys:=20}"
 	: "${sampler_trials:=50}" "${stage_trials:=20}" "${bootstrap:=200}"
 else
-	: "${keys:=10}" "${sigs:=1000}" "${procs:=4}"
+	: "${keys:=10}" "${sigs:=1000}" "${procs:=4}" "${keygen_keys:=1000}"
 	: "${sampler_trials:=2000}" "${stage_trials:=1000}"
 	: "${bootstrap:=2000}"
 fi
@@ -239,7 +251,7 @@ while [ "$r" -le "$runs" ]; do
 			echo "$pre" >&2
 			echo "run_compare.sh: preflight refused run $r/$runs" \
 				"(flags $fs): every condition above must be ok" \
-				"for a non-smoke run (e8/docs/step9_runbook.md);" \
+				"for a non-smoke run (e8/docs/measurement_runbook.md);" \
 				"--force overrides and is recorded" >&2
 			exit 3
 		fi
@@ -278,6 +290,7 @@ while [ "$r" -le "$runs" ]; do
 			echo "flags: $fs"
 			echo "keys: $keys"
 			echo "sigs_per_key: $sigs"
+			echo "keygen_keys: $keygen_keys"
 			echo "procs: $procs"
 			echo "cpus: ${cpus:-none}"
 			echo "threads: ${threads:-default}"
@@ -286,6 +299,31 @@ while [ "$r" -le "$runs" ]; do
 			record
 		} > "$dir/commands.txt"
 
+		# Sizes of every key, signature and tmp object (macros only).
+		run_step "$dir" sizes "bin/bench_compare-$fs" --sizes \
+			> "$dir/sizes.csv" 2> "$dir/sizes.txt"
+		# Key generation and verification (single thread, pinned to
+		# the first CPU of --cpus, before the signing steps).
+		# shellcheck disable=SC2086
+		has_step keyverify && "bin/bench_compare-$fs" --mode keyverify \
+			--keygen-keys "$keygen_keys" $common --list \
+			> "$dir/keyverify_list.csv" 2>> "$dir/keyverify.txt"
+		# shellcheck disable=SC2086
+		has_step keyverify_avx2 && "bin/bench_compare_avx2-$fs" \
+			--mode keyverify --keygen-keys "$keygen_keys" $common \
+			--list > "$dir/keyverify_avx2_list.csv" \
+			2>> "$dir/keyverify_avx2.txt"
+		# shellcheck disable=SC2086
+		has_step keyverify && run_step "$dir" keyverify \
+			"bin/bench_compare-$fs" --mode keyverify \
+			--keygen-keys "$keygen_keys" $common \
+			--out "$dir/keyverify.csv" 2> "$dir/keyverify.txt"
+		# shellcheck disable=SC2086
+		has_step keyverify_avx2 && run_step "$dir" keyverify_avx2 \
+			"bin/bench_compare_avx2-$fs" --mode keyverify \
+			--keygen-keys "$keygen_keys" $common \
+			--out "$dir/keyverify_avx2.csv" \
+			2> "$dir/keyverify_avx2.txt"
 		# shellcheck disable=SC2086
 		has_step latency && run_step "$dir" latency \
 			"bin/bench_compare-$fs" --mode latency \

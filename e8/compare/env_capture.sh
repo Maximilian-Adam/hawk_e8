@@ -1,6 +1,6 @@
 #!/bin/sh
-# Record the measurement environment of a comparison run (plan.md Steps 7
-# and 9) as "key: value" lines. Written beside every harness CSV by
+# Record the measurement environment of a comparison run as "key:
+# value" lines. Written beside every harness CSV by
 # run_compare.sh; read by analysis/analyze.py (boost, run_id, flags).
 #
 # usage: env_capture.sh --out FILE [--run-id ID] [--cpus LIST]

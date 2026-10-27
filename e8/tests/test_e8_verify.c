@@ -192,7 +192,7 @@ find_valid_synthetic_sig(unsigned logn, uint8_t *sig, size_t sig_len,
 		}
 
 		make_message_context(&sc_data, logn);
-		if (e8_verify_uncompressed(logn, sig, sig_len, &sc_data,
+		if (e8_verify_uncompressed_ref(logn, sig, sig_len, &sc_data,
 			hpub, hpub_len, q00, q01, q10, q11))
 		{
 			return 1;
@@ -363,7 +363,7 @@ check_completion_norm(unsigned logn,
 {
 	int64_t norm;
 
-	if (!e8_qnorm_completion(&norm, q00, q01, w0, w1, logn)
+	if (!e8_qnorm_completion_ref(&norm, q00, q01, w0, w1, logn)
 		|| norm != expected)
 	{
 		fprintf(stderr,
@@ -470,7 +470,7 @@ test_verify_logn(unsigned logn)
 
 	shake_context sc_data;
 	make_message_context(&sc_data, logn);
-	if (!e8_verify_uncompressed(logn, sig, sig_len, &sc_data,
+	if (!e8_verify_uncompressed_ref(logn, sig, sig_len, &sc_data,
 		hpub, hpub_len, q00, q01, q10, q11))
 	{
 		fprintf(stderr, "ERR: valid synthetic E8 signature rejected\n");
@@ -478,7 +478,7 @@ test_verify_logn(unsigned logn)
 	}
 
 	make_message_context(&sc_data, logn);
-	if (e8_verify_uncompressed(logn, sig, sig_len - 1, &sc_data,
+	if (e8_verify_uncompressed_ref(logn, sig, sig_len - 1, &sc_data,
 		hpub, hpub_len, q00, q01, q10, q11))
 	{
 		fprintf(stderr, "ERR: malformed E8 signature accepted\n");
@@ -490,7 +490,7 @@ test_verify_logn(unsigned logn)
 	bad[salt_len + 0] = 0xFF;
 	bad[salt_len + 1] = 0x7F;
 	make_message_context(&sc_data, logn);
-	if (e8_verify_uncompressed(logn, bad, sig_len, &sc_data,
+	if (e8_verify_uncompressed_ref(logn, bad, sig_len, &sc_data,
 		hpub, hpub_len, q00, q01, q10, q11))
 	{
 		fprintf(stderr, "ERR: tampered s0 E8 signature accepted\n");
@@ -501,7 +501,7 @@ test_verify_logn(unsigned logn)
 	bad[salt_len + 0] = 0x00;
 	bad[salt_len + 1] = 0x80;
 	make_message_context(&sc_data, logn);
-	if (e8_verify_uncompressed(logn, bad, sig_len, &sc_data,
+	if (e8_verify_uncompressed_ref(logn, bad, sig_len, &sc_data,
 		hpub, hpub_len, q00, q01, q10, q11))
 	{
 		fprintf(stderr,
@@ -513,7 +513,7 @@ test_verify_logn(unsigned logn)
 	bad[salt_len + (2 << logn) + 0] = 0xFF;
 	bad[salt_len + (2 << logn) + 1] = 0x7F;
 	make_message_context(&sc_data, logn);
-	if (e8_verify_uncompressed(logn, bad, sig_len, &sc_data,
+	if (e8_verify_uncompressed_ref(logn, bad, sig_len, &sc_data,
 		hpub, hpub_len, q00, q01, q10, q11))
 	{
 		fprintf(stderr, "ERR: tampered s1 E8 signature accepted\n");
@@ -524,7 +524,7 @@ test_verify_logn(unsigned logn)
 	bad[salt_len + (2 << logn) + 0] = 0x00;
 	bad[salt_len + (2 << logn) + 1] = 0x80;
 	make_message_context(&sc_data, logn);
-	if (e8_verify_uncompressed(logn, bad, sig_len, &sc_data,
+	if (e8_verify_uncompressed_ref(logn, bad, sig_len, &sc_data,
 		hpub, hpub_len, q00, q01, q10, q11))
 	{
 		fprintf(stderr,
@@ -533,7 +533,7 @@ test_verify_logn(unsigned logn)
 	}
 
 	make_message_context(&sc_data, logn);
-	if (e8_verify_uncompressed(logn, sig, sig_len, &sc_data,
+	if (e8_verify_uncompressed_ref(logn, sig, sig_len, &sc_data,
 		hpub, hpub_len - 1, q00, q01, q10, q11))
 	{
 		fprintf(stderr, "ERR: short hpub length accepted\n");
@@ -541,7 +541,7 @@ test_verify_logn(unsigned logn)
 	}
 
 	make_message_context(&sc_data, logn);
-	if (e8_verify_uncompressed(logn, sig, sig_len, &sc_data,
+	if (e8_verify_uncompressed_ref(logn, sig, sig_len, &sc_data,
 		hpub, hpub_len + 1, q00, q01, q10, q11))
 	{
 		fprintf(stderr, "ERR: long hpub length accepted\n");

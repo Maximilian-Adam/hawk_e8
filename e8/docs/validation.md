@@ -1,6 +1,6 @@
 # Correctness and distribution validation of the sampler variants
 
-Step 6 of the fair-comparison plan: every sampler variant of both schemes
+For the fair comparison: every sampler variant of both schemes
 signs correctly, and samples exactly the distribution its tables define.
 One method, one set of tools and the same sample sizes per draw for HAWK
 and HAWK-E8-CM.
@@ -24,6 +24,7 @@ takes 4), and writes, in `e8/results/validation/` (`make validate`) or
 | `controls.csv` | every negative control, with its noncentrality and eligibility |
 | `ideal.csv` | the same samples against the ideal Gaussians (information only) |
 | `signorm.csv` | signature norms: sample and exact mean and variance, z-scores, continuous approximation |
+| `verifier.csv` | one row per verifier differential shard (candidates, accepts, mismatches, tampered and random signatures, bad keys) |
 | `summary.csv` | one row per (scheme, variant, logn), no timings |
 
 `make validate` fails unless every signature verified, every debug check
@@ -39,7 +40,7 @@ The references are the **exact implemented** distributions of the
 committed tables (`precision_audit.load()`, Fractions with power-of-two
 denominators; the generator's rounding rule is HAWK's, see
 `precision_audit.md`), not the ideal Gaussians.  Their distance from the
-ideal is Step 5's result: at most 2^-29 in statistical distance per draw
+ideal is the precision audit's result (`precision_audit.md`): at most 2^-29 in statistical distance per draw
 (32-bit tables), far below what any feasible sample resolves (a test needs
 on the order of `1/SD^2` draws to see a difference).  So the tests detect
 implementation errors (a wrong table, comparison, value mapping, class or
@@ -65,15 +66,18 @@ ideal distributions apart.
 - key modes alternate: even signatures use the encoded private key
   (all_in path), odd ones the decoded / prepared key;
 - every signature is verified (`hawk_verify_finish()`,
-  `e8_verify_finish()`); the first signature of each key is also verified
-  against another message, which must be rejected (a control that the
-  verifier can fail);
+  `e8_verify_finish()`) with the encoded and the decoded public key and,
+  for E8, also with the reference verifier `e8_verify_finish_ref()`; all
+  verdicts must agree (`verifier_mismatches` in `correctness.csv`, 0
+  required). The first signature of each key is also
+  verified against another message, which every verifier must reject (a
+  control that the verifier can fail);
 - attempts are counted from the signing RNG (two calls per attempt for
   both schemes) and, for E8, checked against the signer's own count;
 - threads: every tenth shard of a variant with a split sampler (HAWK
   `ref-T`, `hot64`, `hot32`; every E8 variant) runs with T = 4 on the
-  shared worker pool, i.e. 10% of those variants' signatures (Step 4 found
-  a pool race that only threaded calls could expose); upstream HAWK `ref`
+  shared worker pool, i.e. 10% of those variants' signatures (an earlier
+  pool race could only be exposed by threaded calls); upstream HAWK `ref`
   is serial;
 - deterministic: keys, messages and signing RNGs are derived from the seed
   (documented in the tool's header); keys depend only on (seed, scheme,
@@ -102,6 +106,32 @@ ideal distributions apart.
   equal the no-debug shard's, so the timed build's signatures are exactly
   the ones the debug checks passed.  The sampling tool (below) is also a
   debug build, so the block checks also ran on every sampled block.
+
+### Verifier differential
+
+`e8/tools/e8_verify_diff.c`, 46 shards of 4 keys x 50 signatures per
+degree (the same in `validate-quick` and `validate`; a small fixed run is
+part of `make test-e8`). For every candidate, the new verifier
+(`e8_verify_finish()`, 3 primes; encoded and decoded public key) and the
+reference verifier (`e8_verify_finish_ref()`, 4 primes) must agree, and so
+must their Q-norms (`e8_qnorm_completion()` against
+`e8_qnorm_completion_ref()`). Per signature (honest, ref sampler) the
+candidates are:
+
+- the signature itself (must be accepted);
+- the signature at the integer bounds N - 1 and N, where N is its Q-norm
+  (must reject, then accept);
+- the signature at the bounds of sigma_verify scaled by 0.97, 0.99, 1.01
+  and 1.03;
+- 9 one-bit flips (3 each in the salt, s0 and s1);
+- 2 random signatures (s0, s1 uniform in [-2^b, 2^b), b uniform in
+  0..15).
+
+That makes 18 candidates per signature and about 10^5 tampered or random
+ones per degree. Per key, three bad public keys (a q00 or q01 coefficient
+just outside the key generation limits, a q00 that is not auto-adjoint)
+must be rejected by `e8_decode_public_key()` and by `e8_verify_finish()`.
+The range argument the verifier relies on is in `verifier_range.md`.
 
 ### Sampling (plan item 2)
 
@@ -198,7 +228,7 @@ rejected after Holm at 10^-3; smallest p 2.94 * 10^-4 (G-test, E8 `ref`
 n = 512 components of tau 62), smallest Holm-adjusted p 1.  No impossible
 outcome.  10035 negative controls, all eligible, all rejected.  Against the
 ideal Gaussians (information): 0 of 5124 tests rejected (smallest p
-2.94 * 10^-4, the same test), as Step 5's distances predict.
+2.94 * 10^-4, the same test), as the precision audit's distances predict.
 
 | scheme | variant | n | signatures | threaded | sign / verify failures | attempts / sig | max attempts | debug signatures (failures, digest mismatches) | tests | rejected | smallest p | smallest Holm p | controls (eligible, rejected) |
 |---|---|--:|--:|--:|:-:|--:|--:|--:|--:|--:|--:|--:|--:|
@@ -319,14 +349,14 @@ blocks (E8).  No sampler or table was changed; the results above are from
 a complete rerun with the fixed tool, and the first run's other 9732 tests
 and its signatures had passed as well.
 
-## Findings for Steps 7-9
+## Findings for the timing runs
 
 - Every variant of both schemes, serial and threaded, signs correctly with
   both key forms; none is unusable.
 - Attempts per signature (no-debug run, 10^6 signatures): HAWK 1.1792 to
   1.1796 at n = 256 (every variant; at most 8 attempts), 1.000001 to
   1.000007 at n = 512 and 1024 (at most 2); E8 1.000008 to 1.000039 at
-  every n (at most 2).  Step 9's check of HAWK n = 256 at about 1.17: the
+  every n (at most 2).  The harness's check of HAWK n = 256 at about 1.17: the
   measured value is 1.1796 +- 0.0005 (one standard error), with the same
   keys for every HAWK variant.
 - The debug build gives byte-identical signatures, so it may be used for

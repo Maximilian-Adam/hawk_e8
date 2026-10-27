@@ -29,22 +29,64 @@
 #define E8_PREPARED_KEY_MAGIC   UINT32_C(0x45385052)
 
 /*
- * The public API is integer-only (make check-integer-only). Its sampler
- * uses the generated tables of the prototype signing standard deviations
- * sigma_sign = 3.592, 3.631, 3.669 (the values used by the E8 tests,
- * diagnostics and benchmarks; e8/tables/gen_tables.py), and its norm
- * bound is floor(8 n sigma_verify^2) with the default sigma_verify = 2.03,
- * 1.99, 1.95 (e8_sigma_verify_default()), precomputed here.
+ * Key generation limits on the public form (as HAWK's bits_lim00,
+ * bits_lim01 and lim11 in make_q001()): every coefficient x of an entry
+ * satisfies |x| < 2^bits, with the constant terms q00[0] and q11[0]
+ * limited apart. Per logn - 8: q00[0], q00[u] (u > 0), q01, q11[0],
+ * q11[u] (u > 0). e8_keygen() discards and regenerates a key outside
+ * them; e8_decode_public_key() rejects a public key whose q00 or q01 is
+ * outside them. They are at least one bit above the maxima observed over
+ * 10^4 keys per degree (tools/e8_keygen_limits.c), and with them the
+ * verifier's E8_VRFY_PRIMES primes are sound (docs/verifier_range.md).
  */
-static const int64_t E8_NORM_BOUND[] = {
-	8439, 16220, 31150
+static const uint8_t E8_KEYGEN_LIM_BITS[3][5] = {
+	{ 14, 12, 15, 19, 18 },
+	{ 16, 14, 16, 21, 20 },
+	{ 18, 16, 18, 24, 23 }
 };
 
 /* see hawk_e8_inner.h */
-int64_t
-e8_norm_bound_default(unsigned logn)
+void
+e8_keygen_limits_bits(unsigned logn, unsigned *bits)
 {
-	return logn >= 8 && logn <= 10 ? E8_NORM_BOUND[logn - 8] : 0;
+	for (unsigned u = 0; u < 5; u ++) {
+		bits[u] = (logn >= 8 && logn <= 10)
+			? E8_KEYGEN_LIM_BITS[logn - 8][u] : 0;
+	}
+}
+
+/*
+ * Return 1 if every coefficient of a (n values, constant term limited
+ * apart when lim0 != 0) is within the limits.
+ */
+static int
+poly_within(const int32_t *a, size_t n, unsigned lim0, unsigned lim)
+{
+	int32_t b0 = (int32_t)1 << (lim0 != 0 ? lim0 : lim);
+	int32_t b = (int32_t)1 << lim;
+	uint32_t r = 0;
+
+	r |= (uint32_t)(a[0] <= -b0) | (uint32_t)(a[0] >= b0);
+	for (size_t u = 1; u < n; u ++) {
+		r |= (uint32_t)(a[u] <= -b) | (uint32_t)(a[u] >= b);
+	}
+	return r == 0;
+}
+
+/* see hawk_e8_inner.h */
+int
+e8_keygen_limits_ok(unsigned logn, const int32_t *q00, const int32_t *q01,
+	const int32_t *q11)
+{
+	if (logn < 8 || logn > 10) {
+		return 0;
+	}
+	size_t n = (size_t)1 << logn;
+	const uint8_t *lim = E8_KEYGEN_LIM_BITS[logn - 8];
+
+	return poly_within(q00, n, lim[0], lim[1])
+		&& poly_within(q01, n, 0, lim[2])
+		&& (q11 == NULL || poly_within(q11, n, lim[3], lim[4]));
 }
 
 /*
@@ -128,21 +170,26 @@ hash_public_key(unsigned logn, uint8_t *hpub, const void *pub)
 }
 
 /*
- * The verifier divides by q00 in the NTT domain modulo each prime of
- * E8_NTT_PRIMES; a key whose q00 has a zero NTT coefficient could never
- * verify. tq is scratch space for n words.
+ * The verifier divides by q00 in the NTT domain modulo each of its
+ * E8_VRFY_PRIMES primes; a key whose q00 has a zero NTT coefficient
+ * modulo one of them could never verify. q00 is auto-adjoint, so the
+ * first n/2 NTT values are all of them. tq is scratch space for n/2
+ * words.
  */
 static int
 q00_invertible(unsigned logn, const int32_t *q00, uint32_t *tq)
 {
-	size_t n = (size_t)1 << logn;
+	size_t hn = (size_t)1 << (logn - 1);
 
-	for (unsigned u = 0; u < E8_NTT_PRIME_COUNT; u ++) {
-		e8_ntt_to_ntt(logn, tq, q00, &E8_NTT_PRIMES[u]);
-		for (size_t v = 0; v < n; v ++) {
-			if (tq[v] == 0) {
-				return 0;
-			}
+	for (unsigned u = 0; u < E8_VRFY_PRIMES; u ++) {
+		uint32_t z = 0;
+
+		e8_poly_to_ntt_autoadj_tab(logn, tq, q00, e8_ntt_tab_get(u));
+		for (size_t v = 0; v < hn; v ++) {
+			z |= (uint32_t)(tq[v] == 0);
+		}
+		if (z != 0) {
+			return 0;
 		}
 	}
 	return 1;
@@ -165,7 +212,8 @@ e8_keygen(unsigned logn, void *priv, void *pub,
 	 * Memory layout (8-byte aligned):
 	 *    f, g, F, G   n bytes each
 	 *    work         20*n bytes (Hawk_keygen temporary area), then
-	 *                 q00, q01, q10, q11 (n x int32 each)
+	 *                 q00, q01, q11 (n x int32 each) and the
+	 *                 invertibility check's scratch (n/2 words)
 	 */
 	int8_t *f = align8(tmp, tmp_len, (size_t)24 << logn);
 	if (f == NULL) {
@@ -177,8 +225,8 @@ e8_keygen(unsigned logn, void *priv, void *pub,
 	uint8_t *work = (uint8_t *)(G + n);
 	int32_t *q00 = (int32_t *)work;
 	int32_t *q01 = q00 + n;
-	int32_t *q10 = q01 + n;
-	int32_t *q11 = q10 + n;
+	int32_t *q11 = q01 + n;
+	uint32_t *tq = (uint32_t *)(q11 + n);
 	uint8_t seed[40];
 
 	for (;;) {
@@ -205,8 +253,16 @@ e8_keygen(unsigned logn, void *priv, void *pub,
 			continue;
 		}
 
-		e8_compute_qform(q00, q01, q10, q11, f, g, F, G, logn);
-		if (!q00_invertible(logn, q00, (uint32_t *)q10)) {
+		/*
+		 * The public form (q00, q01, q11; q10 = adj(q01) is not
+		 * needed), its coefficient limits and the invertibility of
+		 * q00 modulo the verifier primes; a key failing either is
+		 * discarded, as HAWK discards keys in make_q001().
+		 */
+		e8_compute_keygen_qform(q00, q01, q11, f, g, F, G, logn);
+		if (!e8_keygen_limits_ok(logn, q00, q01, q11)
+			|| !q00_invertible(logn, q00, tq))
+		{
 			continue;
 		}
 
@@ -407,6 +463,55 @@ e8_sign_finish_prepared(unsigned logn,
 		tmp, tmp_len, NULL, NULL, NULL);
 }
 
+/*
+ * Decode the encoded public key pub (E8_PUBKEY_SIZE(logn) bytes) into
+ * q00, q01 (n x int32 each) and hpub (n/16 bytes), with the checks of
+ * e8_decode_public_key(): q00 and q01 within the key generation limits,
+ * q00 auto-adjoint (q00[n/2] = 0, q00[n - u] = -q00[u]).
+ */
+static int
+decode_public_key_inner(unsigned logn, int32_t *q00, int32_t *q01,
+	uint8_t *hpub, const void *pub)
+{
+	size_t n = (size_t)1 << logn;
+	const uint8_t *buf = pub;
+	uint32_t r = 0;
+
+	for (size_t u = 0; u < n; u ++, buf += 4) {
+		q00[u] = dec_i32le(buf);
+	}
+	for (size_t u = 0; u < n; u ++, buf += 4) {
+		q01[u] = dec_i32le(buf);
+	}
+	r |= (uint32_t)q00[n >> 1];
+	for (size_t u = 1; u < (n >> 1); u ++) {
+		r |= (uint32_t)(q00[n - u] + q00[u]);
+	}
+	if (r != 0 || !e8_keygen_limits_ok(logn, q00, q01, NULL)) {
+		return 0;
+	}
+	hash_public_key(logn, hpub, pub);
+	return 1;
+}
+
+/* see hawk_e8.h */
+int
+e8_decode_public_key(unsigned logn,
+	void *pub_decoded, const void *pub, size_t pub_len)
+{
+	if (logn < 8 || logn > 10 || pub_decoded == NULL || pub == NULL
+		|| pub_len != E8_PUBKEY_SIZE(logn)
+		|| ((uintptr_t)pub_decoded & 3) != 0)
+	{
+		return 0;
+	}
+	size_t n = (size_t)1 << logn;
+	int32_t *q00 = pub_decoded;
+
+	return decode_public_key_inner(logn, q00, q00 + n,
+		(uint8_t *)(q00 + 2 * n), pub);
+}
+
 /* see hawk_e8.h */
 int
 e8_verify_finish(unsigned logn,
@@ -415,15 +520,83 @@ e8_verify_finish(unsigned logn,
 	const void *pub, size_t pub_len,
 	void *tmp, size_t tmp_len)
 {
-	uint8_t hpub[64];
+	const int32_t *q00, *q01;
+	const uint8_t *hpub;
+	uint8_t hpub_buf[64];
 
 	if (logn < 8 || logn > 10 || sig == NULL || sc_data == NULL
-		|| pub == NULL || sig_len != E8_SIG_SIZE(logn)
-		|| pub_len != E8_PUBKEY_SIZE(logn))
+		|| pub == NULL || sig_len != E8_SIG_SIZE(logn))
 	{
 		return 0;
 	}
 	size_t n = (size_t)1 << logn;
+
+	if (pub_len == (size_t)-1) {
+		/*
+		 * Decoded public key (e8_decode_public_key()).
+		 */
+		if (((uintptr_t)pub & 3) != 0) {
+			return 0;
+		}
+		q00 = pub;
+		q01 = q00 + n;
+		hpub = (const uint8_t *)(q01 + n);
+	} else {
+		/*
+		 * Encoded public key: decoded (with the limit checks) and
+		 * hashed into tmp on every call.
+		 */
+		int32_t *dq00 = align8(tmp, tmp_len, (size_t)8 << logn);
+
+		if (pub_len != E8_PUBKEY_SIZE(logn) || dq00 == NULL
+			|| !decode_public_key_inner(logn, dq00, dq00 + n,
+				hpub_buf, pub))
+		{
+			return 0;
+		}
+		q00 = dq00;
+		q01 = dq00 + n;
+		hpub = hpub_buf;
+	}
+	return e8_verify_uncompressed(logn, sig, sig_len, sc_data,
+		hpub, (size_t)1 << (logn - 4), q00, q01);
+}
+
+/*
+ * The reference verifier: the submission's e8_verify_finish() (encoded
+ * public key, decoded and hashed on every call, no key limit check),
+ * unchanged; with pub_len == (size_t)-1, pub is a decoded public key
+ * (e8_decode_public_key()) and the decoding and hashing are skipped.
+ */
+/* see hawk_e8_inner.h */
+int
+e8_verify_finish_ref(unsigned logn,
+	const void *sig, size_t sig_len,
+	const shake_context *sc_data,
+	const void *pub, size_t pub_len,
+	void *tmp, size_t tmp_len)
+{
+	uint8_t hpub[64];
+
+	if (logn < 8 || logn > 10 || sig == NULL || sc_data == NULL
+		|| pub == NULL || sig_len != E8_SIG_SIZE(logn))
+	{
+		return 0;
+	}
+	size_t n = (size_t)1 << logn;
+	if (pub_len == (size_t)-1) {
+		const int32_t *dq00 = pub;
+
+		if (((uintptr_t)pub & 3) != 0) {
+			return 0;
+		}
+		return e8_verify_uncompressed_ref(logn, sig, sig_len, sc_data,
+			dq00 + 2 * n, (size_t)1 << (logn - 4),
+			dq00, dq00 + n, NULL, NULL);
+	}
+	if (pub_len != E8_PUBKEY_SIZE(logn)) {
+		return 0;
+	}
 	int32_t *q00 = align8(tmp, tmp_len, (size_t)8 << logn);
 	if (q00 == NULL) {
 		return 0;
@@ -442,7 +615,7 @@ e8_verify_finish(unsigned logn,
 	/*
 	 * The completion-norm verifier uses only q00 and q01.
 	 */
-	return e8_verify_uncompressed(logn, sig, sig_len, sc_data,
+	return e8_verify_uncompressed_ref(logn, sig, sig_len, sc_data,
 		hpub, (size_t)1 << (logn - 4), q00, q01, NULL, NULL);
 }
 

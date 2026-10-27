@@ -1,19 +1,19 @@
 """
 Loading, statistics, bootstrap and acceptance checks of the HAWK vs E8
-comparison harness (plan.md Steps 7 and 9).  Python standard library only;
+comparison harness.  Python standard library only;
 imported by analyze.py.
 
 Inputs are run directories written by compare/run_compare.sh
 (results/compare/<flag set>/<run_id>/: env.txt, latency*.csv,
 throughput*.csv, sampler.csv, stages_*.csv) or single CSV files in the
 per-signature schema of e8/common/cmn_csv.h (for example an e8_sign_bench
-output; columns added in Step 7 may be missing and default to mode =
+output; columns added later may be missing and default to mode =
 latency); NAME.csv.gz is read like NAME.csv.  A run directory's problems
 (a step that failed or never finished per commands.txt, a missing, empty,
 header-only, unreadable or malformed CSV) are collected for the complete
 check.  Per run and key, the timing columns are kept as sorted compact
-arrays and attempts and rng_bytes as sums (Step 8: under 1 GB at Step 9's
-volume).
+arrays and attempts and rng_bytes as sums (under 1 GB at the full
+measurement volume).
 
 Statistics, per key = (flags, mode, scheme, variant, threads, logn,
 accounting) and timing column:
@@ -38,6 +38,24 @@ of the sorted values has the index floor(n U), with U ~ Beta(k, n + 1 - k)
 for the k-th order statistic (and the next order statistic for even n
 from the minimum of the n - k uniforms above it).  Throughput resamples
 each process's mean wall time from its normal approximation.
+
+Key generation and verification (rows of mode keyverify
+in keyverify.csv and keyverify_avx2.csv, kept apart from the signing keys
+above):
+
+  - verification, per (flags, scheme, variant, verifier, logn,
+    accounting): as signing (per-run median, estimate = mean of per-run
+    medians, hierarchical bootstrap CI of the E8 / HAWK ratio);
+  - key generation, per (flags, logn, scheme, variant) with scheme hawk,
+    e8 or hawk_core: restarts make it heavy-tailed and its cost to a user
+    is its expectation, so the estimate is the mean of the per-run means
+    (median of the per-run medians beside it); the E8 / HAWK ratio of
+    means has a paired bootstrap CI (runs resampled, then key indices
+    within each run, the same indices for both schemes, which drew from
+    the same paired seeds); diverged = fraction of key indices where the
+    two schemes made different numbers of RNG calls (one restarted);
+  - pub_decode: mean and median per run;
+  - sizes.csv: the sizes of every key, signature and tmp object.
 """
 
 from array import array
@@ -81,10 +99,17 @@ class LoadError(Exception):
 
 
 # The steps of compare/run_compare.sh; step S writes S.csv.  commands.txt
-# lists a run's steps ("steps:"); run directories written before Step 8
+# lists a run's steps ("steps:"); older run directories
 # have no such line and ran all of them.
 ALL_STEPS = ('latency', 'throughput', 'latency_avx2', 'sampler',
              'stages_hawk', 'stages_e8')
+# The key generation and verification steps (keyverify, keyverify_avx2 in the "steps:" line
+# of the run sets that have them) and the sizes command of every run.
+KV_STEPS = ('keyverify', 'keyverify_avx2')
+EXTRA_STEPS = KV_STEPS + ('sizes',)
+# Keyverify row kinds with a timed value, and the verifier prime counts.
+KV_KEYGEN_KINDS = ('keygen', 'keygen_core')
+VERIFIER_PRIMES = {'upstream': 2, 'fast': 3, 'ref': 4}
 
 
 def read_env(path):
@@ -116,7 +141,7 @@ def read_commands(path):
             elif ':' in line:
                 k, v = line.split(':', 1)
                 k = k.strip()
-                if k in ALL_STEPS:
+                if k in ALL_STEPS or k in EXTRA_STEPS:
                     label = k
                     exits[k] = None
                 else:
@@ -207,6 +232,21 @@ class Run:
         self.file_keys = {}     # (file, mode, proc, scheme, logn) -> set(key_index)
         self.flag_values = set()
         self.problems = []      # missing, empty or malformed inputs
+        # Key generation and verification (mode keyverify):
+        # (flags, logn, scheme, variant) -> {key_index: (core, tsc, wall,
+        # attempts, rng_bytes)} of the timed keygen / keygen_core rows
+        self.kv_keygen = {}
+        # (flags, scheme, variant, verifier, logn, accounting) -> Cell
+        self.kv_cells = {}
+        # (flags, logn, scheme, variant) -> [(core, tsc)]
+        self.kv_decode = {}
+        # (flags, logn, scheme, variant, verifier, accounting) ->
+        # [tampered checks, accepted]
+        self.kv_reject = {}
+        self.kv_failures = []   # keygen, pub_decode, warm-up rows not ok
+        self.kv_counts = {}     # csv name -> {list key: rows}
+        self.kv_lists = {}      # csv name -> {list key: expected rows}
+        self.sizes = []         # rows of sizes.csv
 
 
 def peek_run_id(path):
@@ -244,6 +284,19 @@ def load_run(path):
                 continue
             if os.path.getsize(p) == 0:
                 run.problems.append('%s is empty' % fname)
+            elif name == 'sizes.csv':
+                with open_csv(p) as f:
+                    run.sizes = list(csv.DictReader(f))
+                if not run.sizes:
+                    run.problems.append('%s has no rows' % fname)
+            elif name.endswith('_list.csv'):
+                with open_csv(p) as f:
+                    lrows = list(csv.DictReader(f))
+                if not lrows or 'rows' not in lrows[0]:
+                    run.problems.append('%s has no rows' % fname)
+                run.kv_lists[name[:-len('_list.csv')] + '.csv'] = {
+                    _kv_list_key(r): int(r['rows']) for r in lrows
+                    if r.get('rows', '').isdigit()}
             elif name == 'sampler.csv':
                 with open_csv(p) as f:
                     run.sampler = list(csv.DictReader(f))
@@ -276,6 +329,12 @@ def load_run(path):
             for s in steps:
                 if s not in run.step_exits:
                     run.problems.append('step %s never started' % s)
+            if any(s in KV_STEPS for s in steps):
+                for s in steps:
+                    if s in KV_STEPS and s + '_list.csv' not in names:
+                        run.problems.append('%s_list.csv missing' % s)
+                if 'sizes.csv' not in names:
+                    run.problems.append('sizes.csv missing')
     else:
         if os.path.getsize(path) == 0 or not is_sign_csv(path):
             raise LoadError('%s: empty or not a per-signature CSV' % path)
@@ -286,7 +345,7 @@ def load_run(path):
         except (OSError, EOFError, csv.Error) as e:
             run.problems.append('%s unreadable after some rows (%s)'
                                 % (os.path.basename(p), e))
-    for cell in run.cells.values():
+    for cell in list(run.cells.values()) + list(run.kv_cells.values()):
         cell.finish()
     if run.run_id is None:
         run.run_id = run.env.get('run_id') or os.path.basename(path)
@@ -311,7 +370,7 @@ def _load_sign_csv(run, path):
         width = len(header)
 
         def ix(name):
-            # Optional columns (added in Step 7) may be missing.
+            # Optional columns (added later) may be missing.
             return col.get(name, width)
 
         i_kind, i_run, i_scheme = col['kind'], col['run_id'], col['scheme']
@@ -323,6 +382,7 @@ def _load_sign_csv(run, path):
         i_bits, i_tech = ix('threshold_bits'), ix('technique')
         i_flags, i_mode, i_proc, i_batch = ix('flags'), ix('mode'), \
             ix('proc'), ix('batch')
+        i_verifier, i_msg = ix('verifier'), col['msg_index']
         i_metric = [(m, col[m]) for m in TIMING_METRICS]
         i_wall = col['wall_ns']
         for row in reader:
@@ -335,6 +395,15 @@ def _load_sign_csv(run, path):
                 kind = row[i_kind]
                 if run.run_id is None and row[i_run]:
                     run.run_id = row[i_run]
+                if row[i_mode] == 'keyverify':
+                    flags = row[i_flags] or env_flags or 'unknown'
+                    run.flag_values.add(flags)
+                    if run.flags is None:
+                        run.flags = flags
+                    _kv_row(run, fname, flags, kind, row, i_scheme, i_var,
+                            i_verifier, i_logn, i_acct, i_key, i_ok,
+                            i_att, i_rng, i_metric)
+                    continue
                 if kind in ('keygen', 'prepare'):
                     flags = row[i_flags] or env_flags or 'unknown'
                     run.flag_values.add(flags)
@@ -416,6 +485,66 @@ def _load_sign_csv(run, path):
         run.problems.append('%s: %d malformed rows (wrong column count or'
                             ' unreadable values; truncated?)'
                             % (fname, malformed))
+
+
+def _kv_list_key(r):
+    """The key of a keyverify --list row and of a keyverify CSV row."""
+    return (int(r['logn']), r['kind'], r['scheme'], r['variant'],
+            r.get('verifier') or '', r.get('accounting') or '')
+
+
+def _int_or_none(v):
+    return int(v) if v != '' else None
+
+
+def _kv_row(run, fname, flags, kind, row, i_scheme, i_var, i_verifier,
+            i_logn, i_acct, i_key, i_ok, i_att, i_rng, i_metric):
+    """One row of mode keyverify (see the module docstring)."""
+    scheme, variant, verifier = row[i_scheme], row[i_var], row[i_verifier]
+    logn, acct, ok = int(row[i_logn]), row[i_acct], row[i_ok]
+    lk = (logn, kind, scheme, variant, verifier, acct)
+    counts = run.kv_counts.setdefault(fname, {})
+    counts[lk] = counts.get(lk, 0) + 1
+    vals = {m: row[i] for m, i in i_metric}
+    if kind == 'verify_reject':
+        r = run.kv_reject.setdefault(
+            (flags, logn, scheme, variant, verifier, acct), [0, 0])
+        r[0] += 1
+        if ok != '0':
+            r[1] += 1
+        return
+    if ok != '1':
+        run.kv_failures.append('%s %s n=%d %s %s%s key %s' % (
+            fname, kind, 1 << logn, scheme, variant,
+            ' ' + verifier + ' ' + acct if verifier else '', row[i_key]))
+    if kind in KV_KEYGEN_KINDS:
+        if ok != '1':
+            return
+        run.kv_keygen.setdefault((flags, logn, scheme, variant), {})[
+            int(row[i_key])] = (
+            _int_or_none(vals['core_cycles']),
+            _int_or_none(vals['tsc_cycles']), _int_or_none(vals['wall_ns']),
+            int(row[i_att]), int(row[i_rng]))
+    elif kind == 'pub_decode':
+        run.kv_decode.setdefault((flags, logn, scheme, variant), []).append(
+            (_int_or_none(vals['core_cycles']),
+             _int_or_none(vals['tsc_cycles'])))
+    elif kind in ('verify', 'warmup_verify'):
+        cell = run.kv_cells.setdefault(
+            (flags, scheme, variant, verifier, logn, acct), Cell())
+        if kind == 'warmup_verify':
+            cell.warmups += 1
+            return
+        if ok != '1':
+            cell.verify_failures += 1
+            return
+        for m, v in vals.items():
+            if v == '':
+                cell.missing[m] += 1
+            else:
+                cell.add(m, int(v))
+        cell.n += 1
+        cell.keys.add(int(row[i_key]))
 
 
 def read_summary(path, cols):
@@ -623,6 +752,184 @@ def aggregate(runs):
     return keys
 
 
+# ----------------------------------------------------------------------
+# Key generation and verification
+
+class KvKey(Key):
+    """Verification timings of one (flags, scheme, variant, verifier, logn,
+    accounting) over runs; the statistics are Key's (signing's)."""
+
+    def __init__(self, key):
+        self.key = key
+        (self.flags, self.scheme, self.variant, self.verifier, self.logn,
+         self.accounting) = key
+        self.mode = 'keyverify'
+        self.threads = 1
+        self.cells = {}
+
+    def failures(self):
+        return sum(c.verify_failures for c in self.cells.values())
+
+
+def _per_run(runs, attr):
+    """{key: {run_id: value}} of a per-run keyverify dict attribute (run
+    ids made unique as in aggregate())."""
+    out = {}
+    for run in runs:
+        for k, v in getattr(run, attr).items():
+            per = out.setdefault(k, {})
+            rid = run.run_id
+            while rid in per:
+                rid += "'"
+            per[rid] = v
+    return out
+
+
+def kv_aggregate(runs):
+    """(verify, keygen, decode): verify {key: KvKey}; keygen {(flags,
+    logn, scheme, variant): {run_id: {key_index: (core, tsc, wall,
+    attempts, rng_bytes)}}}; decode {(flags, logn, scheme, variant):
+    {run_id: [(core, tsc)]}}."""
+    verify = {}
+    for k, per in _per_run(runs, 'kv_cells').items():
+        verify[k] = KvKey(k)
+        verify[k].cells = per
+    return verify, _per_run(runs, 'kv_keygen'), _per_run(runs, 'kv_decode')
+
+
+def kg_metric(*per_runs):
+    """Index of the primary metric of keygen tuples: core cycles (0) if
+    every value has it, else TSC (1)."""
+    for per in per_runs:
+        for d in per.values():
+            if any(t[0] is None for t in d.values()):
+                return 1
+    return 0
+
+
+def kg_stats(per_run, mi, idx=None):
+    """(estimate = mean of per-run means, mean of per-run medians,
+    runs, keys per run) over the key indices idx[run] (default all)."""
+    means, meds, nk = [], [], []
+    for rid in sorted(per_run):
+        d = per_run[rid]
+        ks = idx[rid] if idx is not None else sorted(d)
+        xs = [d[k][mi] for k in ks]
+        if not xs:
+            continue
+        means.append(statistics.fmean(xs))
+        meds.append(statistics.median(xs))
+        nk.append(len(xs))
+    if not means:
+        return None, None, 0, 0
+    return statistics.fmean(means), statistics.fmean(meds), len(means), \
+        min(nk)
+
+
+def kg_common(a, b):
+    """{run_id: sorted key indices present in both a and b}."""
+    out = {}
+    for rid in sorted(set(a) & set(b)):
+        ks = sorted(set(a[rid]) & set(b[rid]))
+        if ks:
+            out[rid] = ks
+    return out
+
+
+def ratio_ci_mean_paired(a, b, idx, mi, B, rng):
+    """Paired bootstrap CI of est(a) / est(b), est = mean of per-run
+    means: runs resampled, then key indices within each chosen run (the
+    same indices for a and b)."""
+    rids = sorted(idx)
+    va = {r: [a[r][k][mi] for k in idx[r]] for r in rids}
+    vb = {r: [b[r][k][mi] for k in idx[r]] for r in rids}
+    R = len(rids)
+    reps = []
+    for _ in range(B):
+        chosen = [rids[rng.randrange(R)] for _ in range(R)] if R > 1 \
+            else rids
+        ea = eb = 0.0
+        for r in chosen:
+            n = len(va[r])
+            pick = [int(rng.random() * n) for _ in range(n)]
+            xa, xb = va[r], vb[r]
+            ea += sum(xa[i] for i in pick) / n
+            eb += sum(xb[i] for i in pick) / n
+        reps.append(ea / eb)
+    return percentile_ci(reps)
+
+
+def kg_diverged(a, b, idx):
+    """Fraction of (run, key index) where a and b made different numbers
+    of RNG calls (one scheme restarted after the shared core)."""
+    tot = div = 0
+    for r, ks in idx.items():
+        for k in ks:
+            tot += 1
+            div += a[r][k][3] != b[r][k][3]
+    return div / tot if tot else None
+
+
+# (E8 variant, E8 verifier, HAWK variant): verification pairs; the first
+# is the fair pair, ref is the submission's verifier, ref-avx2 context.
+KV_VERIFY_PAIRS = (('ref', 'fast', 'ref', 'fair'),
+                   ('ref', 'ref', 'ref', 'submission'),
+                   ('ref', 'fast', 'ref-avx2', 'context'))
+KV_KEYGEN_PAIRS = (('ref', 'ref', 'fair'), ('ref', 'ref-avx2', 'context'))
+
+
+def kv_ratio_rows(verify, keygen, B, seed):
+    """E8 / HAWK ratios of key generation (ratio of means, paired
+    bootstrap) and verification (ratio of mean per-run medians,
+    hierarchical bootstrap)."""
+    rows = []
+    for (flags, logn, scheme, ev), e in sorted(keygen.items()):
+        if scheme != 'e8':
+            continue
+        for ev2, hv, pair in KV_KEYGEN_PAIRS:
+            h = keygen.get((flags, logn, 'hawk', hv))
+            if ev2 != ev or h is None:
+                continue
+            idx = kg_common(e, h)
+            if not idx:
+                continue
+            mi = kg_metric(e, h)
+            ea = kg_stats(e, mi, idx)[0]
+            ha = kg_stats(h, mi, idx)[0]
+            lo, hi = ratio_ci_mean_paired(
+                e, h, idx, mi, B, pair_seed(seed, 'keygen', flags, logn, hv))
+            rows.append({'flags': flags, 'what': 'keygen', 'pair': pair,
+                         'logn': logn, 'accounting': '', 'e8_variant': ev,
+                         'e8_verifier': '', 'hawk_variant': hv,
+                         'metric': ('core_cycles', 'tsc_cycles')[mi],
+                         'runs': len(idx), 'e8': ea, 'hawk': ha,
+                         'ratio': ea / ha, 'ci_lo': lo, 'ci_hi': hi})
+    for k, e in sorted(verify.items()):
+        flags, scheme, ev, evf, logn, acct = k
+        if scheme != 'e8':
+            continue
+        for ev2, evf2, hv, pair in KV_VERIFY_PAIRS:
+            h = verify.get((flags, 'hawk', hv, 'upstream', logn, acct))
+            if (ev2, evf2) != (ev, evf) or h is None:
+                continue
+            common = sorted(set(e.run_ids()) & set(h.run_ids()))
+            m = 'core_cycles' if e.available('core_cycles') \
+                and h.available('core_cycles') else 'tsc_cycles'
+            if not common or not (e.available(m) and h.available(m)):
+                continue
+            ea, ha = e.estimate(m, common), h.estimate(m, common)
+            lo, hi = ratio_ci_median(
+                e.run_values(m, common), h.run_values(m, common), B,
+                pair_seed(seed, 'verify', k, hv))
+            rows.append({'flags': flags, 'what': 'verify', 'pair': pair,
+                         'logn': logn, 'accounting': acct, 'e8_variant': ev,
+                         'e8_verifier': evf, 'hawk_variant': hv,
+                         'metric': m, 'runs': len(common), 'e8': ea,
+                         'hawk': ha, 'ratio': ea / ha, 'ci_lo': lo,
+                         'ci_hi': hi})
+    return rows
+
+
 def pairs_for(keys, pairs, context=False):
     """Matched (E8 key, HAWK key, fair) triples."""
     out = []
@@ -684,7 +991,7 @@ def ratio_rows(keys, B, seed):
 
 
 # ----------------------------------------------------------------------
-# Acceptance checks (plan.md Step 9)
+# Acceptance checks
 
 class Check:
     def __init__(self, name, status, detail):
@@ -764,6 +1071,75 @@ def check_complete(runs):
                  ' warm-up, keygen and prepare rows' % (len(runs), nfiles))
 
 
+def check_kv_complete(runs):
+    """keyverify CSVs: the rows per (logn, kind, scheme, variant, verifier,
+    accounting) equal the expected counts of the binary's --list
+    (keyverify_list.csv) for every keyverify CSV of every run."""
+    if not any(r.kv_counts or r.kv_lists for r in runs):
+        return Check('keyverify_complete', 'SKIP', 'no keyverify rows (run'
+                     ' set without the keyverify steps)')
+    problems, nfiles = [], 0
+    for run in runs:
+        for fname in sorted(set(run.kv_counts) | set(run.kv_lists)):
+            nfiles += 1
+            got = run.kv_counts.get(fname, {})
+            want = run.kv_lists.get(fname)
+            if want is None:
+                problems.append('%s: %s has no --list file' % (run.run_id,
+                                                               fname))
+                continue
+            for k in sorted(set(got) | set(want)):
+                if got.get(k, 0) != want.get(k, 0):
+                    problems.append('%s %s: %s rows %d, expected %d' % (
+                        run.run_id, fname, '/'.join(
+                            str(x) for x in k if x != ''),
+                        got.get(k, 0), want.get(k, 0)))
+    if problems:
+        return Check('keyverify_complete', 'FAIL', '%d problems: %s'
+                     % (len(problems), '; '.join(problems[:6])))
+    return Check('keyverify_complete', 'PASS', '%d keyverify CSV(s): every'
+                 ' row count equals the --list schedule' % nfiles)
+
+
+def check_verify_failures(runs, verify):
+    """Every timed verification returned 1; every key generation, key
+    decoding and warm-up row is ok."""
+    if not any(r.kv_counts for r in runs):
+        return Check('verify_failures', 'SKIP', 'no keyverify rows')
+    fails = sum(k.failures() for k in verify.values())
+    other = [p for r in runs for p in r.kv_failures]
+    n = sum(k.signatures() for k in verify.values())
+    if fails or other:
+        return Check('verify_failures', 'FAIL', '%d timed verifications'
+                     ' rejected, %d other rows not ok (%s)' % (
+                         fails, len(other), '; '.join(other[:4])))
+    return Check('verify_failures', 'PASS', '%d timed verifications'
+                 ' accepted; every keygen, keygen_core, pub_decode and'
+                 ' warm-up row ok' % n)
+
+
+def check_verify_reject(runs):
+    """Every tampered signature (one bit flipped in the salt, s1 and, for
+    E8, s0) is rejected by every verifier in both accounting modes."""
+    tot = acc = 0
+    bad = []
+    for run in runs:
+        for k, (n, a) in sorted(run.kv_reject.items()):
+            tot += n
+            acc += a
+            if a:
+                bad.append('%s %s n=%d %s %s %s %s: %d of %d accepted' % (
+                    run.run_id, k[0], 1 << k[1], k[2], k[3], k[4], k[5],
+                    a, n))
+    if tot == 0:
+        return Check('verify_reject', 'SKIP', 'no tampered-signature rows')
+    if acc:
+        return Check('verify_reject', 'FAIL', '%d of %d tampered signatures'
+                     ' accepted (%s)' % (acc, tot, '; '.join(bad[:4])))
+    return Check('verify_reject', 'PASS', '%d tampered signatures, every'
+                 ' one rejected by every verifier in both modes' % tot)
+
+
 def check_preflight(runs):
     """The preflight result run_compare.sh recorded in env.txt: PASS if
     every run passed it; FAIL if a non-WSL run was forced past it; SKIP
@@ -800,7 +1176,7 @@ def check_attempts(keys, validation):
     with the same signing-RNG streams, so their signatures, attempts and
     rng_bytes are identical copies: the copies must agree (n, attempts and
     rng_bytes sums per run and process), and one copy is compared with
-    Step 6 (counting the copies as independent would shrink the 5 sigma
+    the validation (counting the copies as independent would shrink the 5 sigma
     tolerance by the square root of their number)."""
     bad, differ, checked, skipped = [], [], 0, 0
     for k, a in keys.items():
@@ -831,32 +1207,36 @@ def check_attempts(keys, validation):
                      ' disagree (%s)' % (len(differ), '; '.join(differ[:4])))
     if bad:
         return Check('attempts', 'FAIL', '%d of %d keys outside 5 sigma of'
-                     ' Step 6 (%s)' % (len(bad), checked, '; '.join(bad[:6])))
+                     ' the validation (%s)' % (len(bad), checked, '; '.join(bad[:6])))
     if checked == 0:
         return Check('attempts', 'SKIP', 'no validation summary to compare')
     return Check('attempts', 'PASS', '%d keys: every run and process signed'
                  ' the same signatures (identical attempts and rng_bytes),'
-                 ' attempts per signature within 5 sigma of Step 6\'s (HAWK'
+                 ' attempts per signature within 5 sigma of the validation\'s (HAWK'
                  ' n = 256 about 1.1796, the rest about 1.0000)%s'
-                 % (checked, ', %d without a Step 6 row' % skipped
+                 % (checked, ', %d without a validation row' % skipped
                     if skipped else ''))
 
 
-def check_spread(keys, tol):
+def check_spread(keys, tol, kv_verify=None):
+    """Per-run medians (signing; with kv_verify also the verification
+    keys, at the same tolerance) within tol of their mean."""
     multi = [a for a in keys.values() if len(a.cells) >= 2]
+    multi += [a for a in (kv_verify or {}).values() if len(a.cells) >= 2]
     if not multi:
         return Check('run_spread', 'SKIP', 'one run per key: repeat the run'
-                     ' (Step 9: at least 5 process restarts)')
+                     ' (at least 5 process restarts)')
     bad = []
     for a in multi:
         m = a.primary()
-        sp = a.spread(m) if a.mode == 'latency' else None
+        sp = a.spread(m) if a.mode in ('latency', 'keyverify') else None
         if a.mode == 'throughput':
             vals = [throughput_of(c.procs) for c in a.cells.values()]
             est = statistics.fmean(vals)
             sp = (max(vals) - min(vals)) / est if est else None
         if sp is not None and sp > tol:
-            bad.append((sp, fmt_key(a.key)))
+            bad.append((sp, fmt_key(a.key) if len(a.key) == 7
+                        else fmt_kv_key(a.key)))
     bad.sort(reverse=True)
     if bad:
         return Check('run_spread', 'FAIL', '%d of %d keys with per-run'
@@ -921,6 +1301,12 @@ def check_joins(keys, precision, validation):
                         '; '.join((miss_p + miss_v + mism)[:6])))
     return Check('joins', 'PASS', 'every key has its precision_summary and'
                  ' validation_summary row; threshold_bits agree')
+
+
+def fmt_kv_key(k):
+    flags, scheme, variant, verifier, logn, acct = k
+    return '%s/keyverify %s %s %s n=%d %s' % (flags, scheme, variant,
+                                             verifier, 1 << logn, acct)
 
 
 def fmt_key(k):

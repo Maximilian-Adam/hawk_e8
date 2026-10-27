@@ -141,6 +141,7 @@ cmn_core_cycles_open(void)
 	for (unsigned u = 0; u < 10000; u ++) {
 		spin += u;
 	}
+	(void)spin;
 	if (!cmn_core_read_fd(fd, &x1)) {
 		close(fd);
 		cmn_core_mark_unavailable("read", errno);

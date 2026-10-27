@@ -14,6 +14,9 @@
 /* see bench_sign_core.h */
 const char *const bsc_scheme_name[BSC_SCHEME_COUNT] = { "hawk", "e8" };
 const char *const bsc_acct_name[BSC_ACCT_COUNT] = { "all_in", "prepared" };
+const char *const bsc_verifier_name[BSC_VERIFIER_COUNT] = {
+	"upstream", "fast", "ref"
+};
 
 const char *const bsc_build_flagset = BENCH_FLAGSET;
 const char *const bsc_build_cflags = BENCH_CFLAGS;
@@ -26,14 +29,26 @@ const char *const bsc_build_compiler = "unknown";
 /*
  * Scratch buffers, sized for the largest degree of either scheme.
  */
+/*
+ * tmp_keygen also holds bsc_keygen_core()'s f, g, F, G and the 20n-byte
+ * work area of Hawk_keygen() (24n + 7 bytes, as e8_keygen()).
+ */
+#define BSC_TMP_KEYGEN_CORE   ((24u << 10) + 7)
+
 #if BSC_HAWK_ONLY
-static uint8_t tmp_keygen[HAWK_TMPSIZE_KEYGEN(10)];
+static uint8_t tmp_keygen[HAWK_TMPSIZE_KEYGEN(10) > BSC_TMP_KEYGEN_CORE
+	? HAWK_TMPSIZE_KEYGEN(10) : BSC_TMP_KEYGEN_CORE];
 static uint8_t tmp_sign[HAWK_TMPSIZE_SIGN(10)];
-static uint8_t tmp_verify[HAWK_TMPSIZE_VERIFY(10)];
+static uint8_t tmp_verify[HAWK_TMPSIZE_VERIFY_FAST(10)];
 #else
 static uint8_t tmp_keygen[E8_TMPSIZE_KEYGEN(10)];
 static uint8_t tmp_sign[E8_TMPSIZE_SIGN(10)];
 static uint8_t tmp_verify[E8_TMPSIZE_VERIFY(10) + HAWK_TMPSIZE_VERIFY(10)];
+
+typedef char bsc_e8_buffers_check[
+	(sizeof tmp_keygen >= BSC_TMP_KEYGEN_CORE
+	&& sizeof tmp_verify >= HAWK_TMPSIZE_VERIFY_FAST(10)
+	&& BSC_PUB_DECODED_SIZE >= 2 * HAWK_DECODED_PUB_LENGTH(10)) ? 1 : -1];
 
 typedef char bsc_hawk_buffers_check[
 	(BSC_PRIV_SIZE >= HAWK_PRIVKEY_SIZE(10)
@@ -189,11 +204,23 @@ int
 bsc_keygen(unsigned scheme, unsigned logn, unsigned key_index,
 	bsc_key *key, cmn_measure *m)
 {
+	uint64_t calls, bytes;
+
+	return bsc_keygen_stream(scheme, logn, BSC_STREAM_KEYGEN + scheme,
+		key_index, key, m, &calls, &bytes);
+}
+
+/* see bench_sign_core.h */
+int
+bsc_keygen_stream(unsigned scheme, unsigned logn, unsigned stream_id,
+	unsigned index, bsc_key *key, cmn_measure *m,
+	uint64_t *rng_calls, uint64_t *rng_bytes)
+{
 	cmn_sign_rng rng;
 	cmn_pool_stamp start;
 	int ok;
 
-	bsc_rng_init(&rng, BSC_STREAM_KEYGEN + scheme, logn, key_index);
+	bsc_rng_init(&rng, stream_id, logn, index);
 	cmn_pool_measure_start(&start);
 	if (scheme == BSC_SCHEME_HAWK) {
 		ok = hawk_keygen(logn, key->priv, key->pub,
@@ -209,7 +236,149 @@ bsc_keygen(unsigned scheme, unsigned logn, unsigned key_index,
 #endif
 	}
 	cmn_pool_measure_stop(m, &start);
+	*rng_calls = rng.calls;
+	*rng_bytes = rng.bytes;
 	return ok;
+}
+
+/* see bench_sign_core.h */
+int
+bsc_keygen_core(unsigned logn, unsigned stream_id, unsigned index,
+	cmn_measure *m, uint64_t *rng_calls, uint64_t *rng_bytes)
+{
+	cmn_sign_rng rng;
+	cmn_pool_stamp start;
+	size_t n = (size_t)1 << logn;
+	int8_t *f = (int8_t *)(((uintptr_t)tmp_keygen + 7) & ~(uintptr_t)7);
+	int8_t *g = f + n;
+	int8_t *F = g + n;
+	int8_t *G = F + n;
+	uint8_t *work = (uint8_t *)(G + n);
+	uint8_t seed[40];
+	int r;
+
+	bsc_rng_init(&rng, stream_id, logn, index);
+	cmn_pool_measure_start(&start);
+	r = Hawk_keygen(logn, f, g, F, G, NULL, NULL, NULL, seed,
+		cmn_sign_rng_hawk, &rng, work, (size_t)20 << logn);
+	cmn_pool_measure_stop(m, &start);
+	*rng_calls = rng.calls;
+	*rng_bytes = rng.bytes;
+	return r == 0;
+}
+
+/* see bench_sign_core.h */
+int
+bsc_decode_pub(unsigned scheme, unsigned logn, bsc_key *key,
+	cmn_measure *m)
+{
+	cmn_pool_stamp start;
+	int ok;
+
+	cmn_pool_measure_start(&start);
+	if (scheme == BSC_SCHEME_HAWK) {
+		ok = hawk_decode_public_key(logn, (int16_t *)key->pub_decoded,
+			key->pub, HAWK_PUBKEY_SIZE(logn));
+	} else {
+#if BSC_HAWK_ONLY
+		ok = 0;
+#else
+		ok = e8_decode_public_key(logn, key->pub_decoded,
+			key->pub, E8_PUBKEY_SIZE(logn));
+#endif
+	}
+	cmn_pool_measure_stop(m, &start);
+	return ok;
+}
+
+/* see bench_sign_core.h */
+int
+bsc_verify_timed(unsigned scheme, unsigned verifier, unsigned acct,
+	unsigned logn, const bsc_key *key, const uint8_t *sig,
+	const shake_context *sc_data, cmn_measure *m)
+{
+	cmn_pool_stamp start;
+	const void *pub = key->pub;
+	size_t pub_len;
+	int ok = 0;
+
+	if (acct == BSC_ACCT_PREPARED) {
+		pub = key->pub_decoded;
+		pub_len = (size_t)-1;
+	} else {
+		pub_len = scheme == BSC_SCHEME_HAWK
+			? HAWK_PUBKEY_SIZE(logn) : BSC_PUB_SIZE;
+	}
+	if (m != NULL) {
+		cmn_pool_measure_start(&start);
+	}
+	if (scheme == BSC_SCHEME_HAWK) {
+		if (verifier == BSC_VERIFIER_UPSTREAM) {
+			ok = hawk_verify_finish(logn, sig, HAWK_SIG_SIZE(logn),
+				sc_data, pub, pub_len,
+				tmp_verify, HAWK_TMPSIZE_VERIFY_FAST(logn));
+		}
+#if !BSC_HAWK_ONLY
+	} else {
+		if (acct != BSC_ACCT_PREPARED) {
+			pub_len = E8_PUBKEY_SIZE(logn);
+		}
+		if (verifier == BSC_VERIFIER_FAST) {
+			ok = e8_verify_finish(logn, sig, E8_SIG_SIZE(logn),
+				sc_data, pub, pub_len,
+				tmp_verify, E8_TMPSIZE_VERIFY(logn));
+		} else if (verifier == BSC_VERIFIER_REF) {
+			ok = e8_verify_finish_ref(logn, sig, E8_SIG_SIZE(logn),
+				sc_data, pub, pub_len,
+				tmp_verify, E8_TMPSIZE_VERIFY(logn));
+		}
+#endif
+	}
+	if (m != NULL) {
+		cmn_pool_measure_stop(m, &start);
+	}
+	return ok;
+}
+
+/* see bench_sign_core.h */
+size_t
+bsc_sizes(unsigned logn, bsc_size *out, size_t max)
+{
+	bsc_size all[24];
+	size_t count = 0;
+
+#define BSC_SIZE(s, o, v)   do { \
+		all[count].scheme = (s); \
+		all[count].object = (o); \
+		all[count].bytes = (unsigned long)(v); \
+		count ++; \
+	} while (0)
+	BSC_SIZE("hawk", "privkey", HAWK_PRIVKEY_SIZE(logn));
+	BSC_SIZE("hawk", "privkey_prepared", HAWK_PRIVKEY_DECODED_SIZE(logn));
+	BSC_SIZE("hawk", "pubkey", HAWK_PUBKEY_SIZE(logn));
+	BSC_SIZE("hawk", "pubkey_decoded", 2 * HAWK_DECODED_PUB_LENGTH(logn));
+	BSC_SIZE("hawk", "sig", HAWK_SIG_SIZE(logn));
+	BSC_SIZE("hawk", "sig_decoded", 2 * HAWK_DECODED_SIG_LENGTH(logn));
+	BSC_SIZE("hawk", "tmp_keygen", HAWK_TMPSIZE_KEYGEN(logn));
+	BSC_SIZE("hawk", "tmp_sign", HAWK_TMPSIZE_SIGN(logn));
+	BSC_SIZE("hawk", "tmp_verify", HAWK_TMPSIZE_VERIFY(logn));
+	BSC_SIZE("hawk", "tmp_verify_fast", HAWK_TMPSIZE_VERIFY_FAST(logn));
+#if !BSC_HAWK_ONLY
+	BSC_SIZE("e8", "privkey", E8_PRIVKEY_SIZE(logn));
+	BSC_SIZE("e8", "privkey_prepared", E8_PRIVKEY_PREPARED_SIZE(logn));
+	BSC_SIZE("e8", "pubkey", E8_PUBKEY_SIZE(logn));
+	BSC_SIZE("e8", "pubkey_decoded", E8_PUBKEY_DECODED_SIZE(logn));
+	BSC_SIZE("e8", "sig", E8_SIG_SIZE(logn));
+	BSC_SIZE("e8", "tmp_keygen", E8_TMPSIZE_KEYGEN(logn));
+	BSC_SIZE("e8", "tmp_sign", E8_TMPSIZE_SIGN(logn));
+	BSC_SIZE("e8", "tmp_verify", E8_TMPSIZE_VERIFY(logn));
+#endif
+#undef BSC_SIZE
+	if (count > max) {
+		count = max;
+	}
+	memcpy(out, all, count * sizeof *out);
+	return count;
 }
 
 /* see bench_sign_core.h */
