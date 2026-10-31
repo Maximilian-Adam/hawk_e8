@@ -96,8 +96,8 @@ e8_mp_montymul(uint32_t a, uint32_t b, uint32_t p, uint32_t p0i)
 uint32_t
 e8_mp_add(uint32_t a, uint32_t b, uint32_t p)
 {
-	uint32_t d = a + b;
-	return d >= p ? d - p : d;
+	uint32_t d = a + b - p;
+	return d + (p & tbmask(d));
 }
 
 /* see hawk_e8_inner.h */
@@ -193,7 +193,7 @@ e8_ntt(unsigned logn, uint32_t *a,
 				uint32_t x1 = a[k1];
 				uint32_t x2 = e8_mp_montymul(a[k2], s, p, p0i);
 				a[k1] = e8_mp_add(x1, x2, p);
-				a[k2] = x1 >= x2 ? x1 - x2 : x1 + p - x2;
+				a[k2] = e8_mp_sub(x1, x2, p);
 			}
 			v0 += t;
 		}
@@ -222,8 +222,7 @@ e8_intt(unsigned logn, uint32_t *a,
 				uint32_t x2 = a[k2];
 
 				a[k1] = e8_mp_add(x1, x2, p);
-				a[k2] = e8_mp_montymul(
-					x1 >= x2 ? x1 - x2 : x1 + p - x2,
+				a[k2] = e8_mp_montymul(e8_mp_sub(x1, x2, p),
 					s, p, p0i);
 			}
 		}

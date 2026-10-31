@@ -244,6 +244,21 @@ object of the flag set, both schemes alike.  Recheck on the measurement
 machine's compiler.  The harness verifies every signature, so a broken
 build cannot produce a timing silently.
 
+E8's modular addition and subtraction (`e8_mp_add`, the subtractions in
+`e8_ntt` / `e8_intt` and in the signer's `mp_sub`) use HAWK's mask form
+(`d + (p & tbmask(d))`, as `mp_add` / `mp_sub` in `ng_inner.h`).  They were
+written as `x1 >= x2 ? x1 - x2 : x1 + p - x2`, which `-O2` compiles to
+`cmov` but `-O3 -march=native` (GCC 16.1, `znver5`) to a data-dependent
+branch in the NTT's scalar tail.  On the 9950X3D that made an O3native E8
+verification of a new signature mispredict about 1,000 more branches than
+one of a signature just verified (n = 256: 1,226 against 192), so the
+first E8 verifier of each signature in the keyverify rotation paid about
+40k cycles that the others did not, and per-run medians of E8 `fast`
+all-in verification split between the two levels.  The outputs are
+identical (every value is reduced, every prime below 2^31; `test-e8`
+output and every non-timing CSV column unchanged); O2 timings are
+unchanged.
+
 `build/bench-FS/bench_build_info.h` (regenerated only when its content
 changes) holds the flag-set name and the full flags.  Every object of the
 flag set depends on it, so a flag change rebuilds the set.  It is printed

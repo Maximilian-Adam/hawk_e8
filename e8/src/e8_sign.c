@@ -332,7 +332,8 @@ e8_inverse_w_ntt_prepare(e8_inverse_w_ntt_basis *basis,
 static uint32_t
 mp_sub(uint32_t a, uint32_t b, uint32_t p)
 {
-	return a >= b ? a - b : a + p - b;
+	uint32_t d = a - b;
+	return d + (p & tbmask(d));
 }
 
 static int
