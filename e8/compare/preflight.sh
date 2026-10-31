@@ -15,7 +15,9 @@
 #              counter works (its --build-info)
 #   freq       the pinned CPUs' current frequencies, read while each runs
 #              a busy loop, are within --freq-tolerance percent of each
-#              other (default 1)
+#              other (default 1) and none exceeds its scaling_max_freq by
+#              more than that (amd-pstate in active mode can report boost
+#              off while the cores still boost; passive mode does not)
 #   git        the tree is clean (git_dirty: no; tracked files only)
 #
 # The values come from env_capture.sh, run while the busy loops hold the
@@ -186,7 +188,30 @@ else
 			printf "%s %d..%d kHz, spread %.2f%%\n",
 				sp <= tol ? "ok" : "FAIL", lo, hi, sp
 		}')
-	report freq "${r%% *}" "${r#* } (tolerance $tol%): $v"
+	m=$(get max_freq_khz)
+	over=
+	if [ -n "$m" ] && [ "$m" != unavailable ]; then
+		over=$(printf '%s\n%s\n' "$m" "$v" | awk -v tol="$tol" '
+			NR == 1 { n = split($0, a, " ")
+				for (i = 1; i <= n; i ++) {
+					split(a[i], kv, "="); max[kv[1]] = kv[2]
+				}
+				next }
+			{ n = split($0, a, " ")
+				for (i = 1; i <= n; i ++) {
+					split(a[i], kv, "=")
+					if ((kv[1] in max) &&
+						kv[2] > max[kv[1]] * (1 + tol / 100))
+						printf " %s=%d>%d", kv[1], kv[2],
+							max[kv[1]]
+				}
+			}' || echo " (check failed)")
+	fi
+	if [ -n "$over" ]; then
+		report freq FAIL "above scaling_max_freq (boost still on?):$over"
+	else
+		report freq "${r%% *}" "${r#* } (tolerance $tol%): $v"
+	fi
 fi
 
 v=$(get git_dirty)

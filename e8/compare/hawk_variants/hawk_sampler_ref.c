@@ -29,9 +29,24 @@ hawkv_ref_range(const void *tables, unsigned logn, int8_t *x,
 
 	(void)logn;
 	for (size_t u = start; u < end; u += 4) {
-		uint8_t buf[40];
+		uint8_t tmp[40];
+		const uint8_t *buf;
 
-		cmn_rng_read_bytes(stream, buf, sizeof buf);
+		/*
+		 * The group's 40 bytes are decoded in place from the
+		 * stream's buffer when it holds them, and copied (as
+		 * upstream does) only when the group straddles a refill:
+		 * copying every group into a stack buffer made the table
+		 * scan's loads 4K-alias those stores for some stack
+		 * offsets.
+		 */
+		if (stream->len - stream->pos >= sizeof tmp) {
+			buf = stream->buf + stream->pos;
+			stream->pos += sizeof tmp;
+		} else {
+			cmn_rng_read_bytes(stream, tmp, sizeof tmp);
+			buf = tmp;
+		}
 		for (size_t k = 0; k < 4 && u + k < end; k ++) {
 			size_t v = u + k;
 			uint64_t lo = dec64le(buf + (k << 3));

@@ -86,7 +86,10 @@ its directory exists) the driver checks, through `env_capture.sh` taken
 while a busy loop holds each pinned CPU: boost off; governor `performance`
 on every pinned CPU; SMT off; no two pinned CPUs SMT siblings;
 `perf_event_paranoid <= 2` with a working core-cycle counter; the pinned
-CPUs' current frequencies within 1%; a clean tree.  Each condition is
+CPUs' current frequencies within 1% of each other and none more than 1%
+above its `scaling_max_freq` (amd-pstate in active mode reported boost off
+on the 9950X3D while the cores ran at 5.5-5.7 GHz; in passive mode boost
+off holds the base clock); a clean tree.  Each condition is
 `ok`, `FAIL` or `unavailable`.  A non-smoke run starts only if every
 condition is `ok`, otherwise the driver exits 3 (refused) unless `--force`
 is given; smoke runs go on.  `env.txt` and `commands.txt` record
@@ -259,6 +262,32 @@ identical (every value is reduced, every prime below 2^31; `test-e8`
 output and every non-timing CSV column unchanged); O2 timings are
 unchanged.
 
+The two constant-time table scans (E8 `ref`, `src/e8_sampler_ref.c`, and
+HAWK `ref-T`, `compare/hawk_variants/hawk_sampler_ref.c`) keep their
+scanned data out of stack buffers.  E8 `ref` used to OR the selected table
+rows into stack arrays and then compare against them; HAWK `ref-T` copied
+every group of 40 random bytes into a stack buffer, as upstream's
+`sig_gauss()` does.  When the process's random stack offset puts those
+stores at the same address modulo 4096 as the table rows the scan then
+loads (4K aliasing), the loads wait for the stores: with ASLR off and the
+stack moved in 16-byte steps (`setarch -R`, a padded environment), O3native
+E8 `ref` signing was 5.5% slower for 16 of the 256 offsets (3 of 70
+processes with ASLR on) and HAWK `ref-T` at n = 1024, T = 4 up to 3.3%
+slower for 20 of 128; O2 and the other variants did not show it.  So one
+process in about 16 measured differently, and the run medians failed
+`run_spread`.  E8 `ref` now gathers each threshold from all rows in
+registers and compares at once (the four residue classes unrolled); HAWK
+`ref-T` decodes each group in place from the stream's buffer and copies
+only a group that straddles a refill.  Both read every table entry as
+before (`test_e8_ref_ct` loop counts unchanged) and give the same outputs
+(samples, signatures, `test-e8` output, every non-timing CSV column).
+Their times changed: E8 `ref` signing at n = 256, prepared, from 265k to
+253k cycles at O2 and 192k to 160k at O3native; HAWK `ref-T` within 1%
+(slightly faster).  Over every stack offset, every variant's signing and
+verification median now stays within about 2.5% (most within 1.5%); HAWK
+`ref-T` at T = 4 keeps a smaller layout dependence (up to about 2%) that
+the caller's stack offset does not explain.
+
 `build/bench-FS/bench_build_info.h` (regenerated only when its content
 changes) holds the flag-set name and the full flags.  Every object of the
 flag set depends on it, so a flag change rebuilds the set.  It is printed
@@ -300,7 +329,8 @@ anything worth committing (the final tables, a reference summary) to
 BIN] [--cc CC] [--repo DIR]` writes `key: value` lines: `run_id`,
 `captured_utc`, `hostname`, `kernel`, `wsl`, `cpu_model`, `microcode`,
 `cpus_online`, `cpus_pinned`, `isolated_cpus`, `nohz_full`, `governor`,
-`scaling_driver`, `cur_freq_khz` (per pinned CPU), `boost`
+`scaling_driver`, `cur_freq_khz` and `max_freq_khz` (per pinned CPU),
+`amd_pstate_status`, `boost`
 (`cpufreq/boost`, `intel_pstate/no_turbo` or `amd_pstate/cpb_boost`),
 `smt_control`, `smt_active`, `thread_siblings`, `l3_id` and `l3_size` (per
 pinned CPU: which CCD and whether it has the V-cache), `perf_event_paranoid`,

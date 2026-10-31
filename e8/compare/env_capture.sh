@@ -151,6 +151,8 @@ march_native() {
 	emit governor "$(per_cpu cpufreq/scaling_governor)"
 	emit scaling_driver "$(per_cpu cpufreq/scaling_driver)"
 	emit cur_freq_khz "$(per_cpu cpufreq/scaling_cur_freq)"
+	emit max_freq_khz "$(per_cpu cpufreq/scaling_max_freq)"
+	emit amd_pstate_status "$(readf /sys/devices/system/cpu/amd_pstate/status)"
 	emit boost "$(boost)"
 	emit smt_control "$(readf /sys/devices/system/cpu/smt/control)"
 	emit smt_active "$(readf /sys/devices/system/cpu/smt/active)"

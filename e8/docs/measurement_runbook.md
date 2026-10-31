@@ -12,15 +12,26 @@ generation and verification steps also on this machine, where
 ## 1. Machine setup
 
 ```sh
-sudo cpupower frequency-set -g performance                   # every CPU
-echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost        # fixed clock
 echo off | sudo tee /sys/devices/system/cpu/smt/control        # SMT off
+echo passive | sudo tee /sys/devices/system/cpu/amd_pstate/status
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost        # fixed clock
 echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid         # user-space core cycles
 ```
 
-- If `cpufreq/boost` does not exist (amd-pstate in active mode), use
-  `echo 0 | sudo tee /sys/devices/system/cpu/amd_pstate/cpb_boost` or set
-  the governor to `performance` and boost off through `cpupower set
+- In this order: SMT first (the governor write then reports "Device or
+  resource busy" only for the offline siblings, harmlessly), then the
+  amd-pstate mode (switching it resets the governor), then governor and
+  boost.  None of it survives a reboot.
+- amd-pstate must be in `passive` mode.  In `active` mode (the Arch
+  default) on the 9950X3D with kernel 7.1, `cpufreq/boost` read 0 and
+  `scaling_max_freq` 4.3 GHz, but a pinned busy loop ran at 5.5 GHz on the
+  V-cache CCD and 5.7 GHz on the other (core / TSC 1.28-1.33).  In passive
+  mode boost off holds the base clock (core / TSC 1.00, 4.26-4.31 GHz).
+  The preflight's `freq` condition fails a CPU whose busy-loop frequency is
+  above its `scaling_max_freq`; `env.txt` records `amd_pstate_status`.
+- If `cpufreq/boost` does not exist, use `echo 0 | sudo tee
+  /sys/devices/system/cpu/amd_pstate/cpb_boost` or `cpupower set
   --turbo-boost 0`; `env_capture.sh` reads all three places.
 - Minimal background load: no desktop session (`systemctl isolate
   multi-user.target` if practical), no other jobs, network idle.
@@ -74,7 +85,7 @@ every condition is ok:
 | `smt` | `smt/control` is `off` (or `forceoff`, `notsupported`) and `smt/active` is 0 |
 | `cores` | no two pinned CPUs are SMT siblings |
 | `perf` | `perf_event_paranoid <= 2` and the binary's core-cycle counter works |
-| `freq` | the pinned CPUs' `scaling_cur_freq`, read while each runs a busy loop, within 1% (`--freq-tolerance`) |
+| `freq` | the pinned CPUs' `scaling_cur_freq`, read while each runs a busy loop, within 1% of each other (`--freq-tolerance`) and none more than 1% above its `scaling_max_freq` |
 | `git` | the tree is clean (tracked files) |
 
 Run it by hand first:
@@ -229,7 +240,13 @@ about 0.8 and 0.3 GB for the two run sets) and the analysis.  The analysis reads
 - `run_spread` FAIL: some key's run medians differ by more than 3%.  Look at
   `runs.csv` for the outlying run (a background job, a thermal event, a
   different clock in `env.txt`), fix the cause, replace that run.  Do not
-  raise the tolerance to make it pass.
+  raise the tolerance to make it pass.  If one process is slower for one
+  variant only, uniformly over its keys, suspect the process layout
+  rather than the machine: time that variant in many short processes
+  (ASLR on), then with `setarch -R` and the stack moved in 16-byte steps
+  (`PAD=$(printf '%*s' K '' | tr ' ' x) setarch -R bin/bench_compare-FS
+  ...` for K = 0, 16, ..., 4080); `harness.md`, "Builds", describes the
+  4K-aliasing cases found that way and how they were removed.
 - `core_vs_tsc` FAIL: core cycles and TSC are not proportional, so the clock
   moved (boost, a governor change, a power limit).  Check `env.txt`
   (`boost`, `governor`, `cur_freq_khz`) and repeat the run.

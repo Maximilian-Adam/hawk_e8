@@ -116,8 +116,9 @@ static inline unsigned
 e8_ref_component(const e8_ref_tables *tab, uint8_t tau, e8_ref_reader *rd)
 {
 	uint64_t perm = 0, rc = 0;
-	uint32_t shi[15], hi, slot = 0;
-	uint64_t slo[15], lo;
+	uint64_t mc[E8_REF_ROW_CLASSES];
+	uint32_t hi, slot = 0;
+	uint64_t lo;
 
 	for (unsigned j = 0; j < 256; j ++) {
 		uint64_t m = e8_ref_eq_mask(tau, j);
@@ -126,21 +127,28 @@ e8_ref_component(const e8_ref_tables *tab, uint8_t tau, e8_ref_reader *rd)
 		perm |= m & e8_ref_slot_perm[j];
 		rc |= m & e8_ref_row_class[j];
 	}
-	memset(shi, 0, sizeof shi);
-	memset(slo, 0, sizeof slo);
 	for (unsigned c = 0; c < E8_REF_ROW_CLASSES; c ++) {
-		uint64_t m = e8_ref_eq_mask((uint32_t)rc, c);
-
-		for (unsigned j = 0; j < 15; j ++) {
-			E8_REF_OP(1);
-			shi[j] |= (uint32_t)m & tab->slot_hi[c][j];
-			slo[j] |= m & tab->slot_lo[c][j];
-		}
+		mc[c] = e8_ref_eq_mask((uint32_t)rc, c);
 	}
+
+	/*
+	 * Each threshold is gathered from every row class in registers
+	 * and compared at once: staging the rows in stack arrays made
+	 * the scan's loads 4K-alias those stores for some stack offsets
+	 * (O3native, about 1 process layout in 16).
+	 */
 	e8_ref_draw(rd, &hi, &lo);
 	for (unsigned j = 0; j < 15; j ++) {
+		uint32_t shi = 0;
+		uint64_t slo = 0;
+
+		for (unsigned c = 0; c < E8_REF_ROW_CLASSES; c ++) {
+			E8_REF_OP(1);
+			shi |= (uint32_t)mc[c] & tab->slot_hi[c][j];
+			slo |= mc[c] & tab->slot_lo[c][j];
+		}
 		E8_REF_OP(2);
-		slot += e8_ref_lt(hi, lo, shi[j], slo[j]);
+		slot += e8_ref_lt(hi, lo, shi, slo);
 	}
 	return (unsigned)(perm >> (slot << 2)) & 0xF;
 }
@@ -156,25 +164,33 @@ e8_ref_coord(const e8_ref_tables *tab, int64_t center_num32,
 	uint32_t kk = (uint32_t)((center_num32 + 32) >> 3);
 	uint32_t res = kk & 3;
 	int32_t shift = (int32_t)(kk >> 2) - 1;
-	uint32_t thi[E8_REF_1D_LEN], hi, r = 0;
-	uint64_t tlo[E8_REF_1D_LEN], lo, base = 0;
+	uint64_t m0 = e8_ref_eq_mask(res, 0), m1 = e8_ref_eq_mask(res, 1);
+	uint64_t m2 = e8_ref_eq_mask(res, 2), m3 = e8_ref_eq_mask(res, 3);
+	uint64_t base = (m0 & (uint64_t)(int64_t)tab->lo_value[0])
+		| (m1 & (uint64_t)(int64_t)tab->lo_value[1])
+		| (m2 & (uint64_t)(int64_t)tab->lo_value[2])
+		| (m3 & (uint64_t)(int64_t)tab->lo_value[3]);
+	uint32_t hi, r = 0;
+	uint64_t lo;
 
-	memset(thi, 0, sizeof thi);
-	memset(tlo, 0, sizeof tlo);
-	for (unsigned c = 0; c < 4; c ++) {
-		uint64_t m = e8_ref_eq_mask(res, c);
-
-		base |= m & (uint64_t)(int64_t)tab->lo_value[c];
-		for (unsigned j = 0; j < E8_REF_1D_LEN; j ++) {
-			E8_REF_OP(3);
-			thi[j] |= (uint32_t)m & tab->hi[c][j];
-			tlo[j] |= m & tab->lo[c][j];
-		}
-	}
+	/*
+	 * Gathered in registers, as in e8_ref_component(); the four
+	 * residue classes are unrolled.
+	 */
 	e8_ref_draw(rd, &hi, &lo);
 	for (unsigned j = 0; j < E8_REF_1D_LEN; j ++) {
+		uint32_t thi = ((uint32_t)m0 & tab->hi[0][j])
+			| ((uint32_t)m1 & tab->hi[1][j])
+			| ((uint32_t)m2 & tab->hi[2][j])
+			| ((uint32_t)m3 & tab->hi[3][j]);
+		uint64_t tlo = (m0 & tab->lo[0][j]) | (m1 & tab->lo[1][j])
+			| (m2 & tab->lo[2][j]) | (m3 & tab->lo[3][j]);
+
+		for (unsigned c = 0; c < 4; c ++) {
+			E8_REF_OP(3);
+		}
 		E8_REF_OP(2);
-		r += e8_ref_lt(hi, lo, thi[j], tlo[j]);
+		r += e8_ref_lt(hi, lo, thi, tlo);
 	}
 	return shift + (int32_t)(int64_t)base + (int32_t)r;
 }
