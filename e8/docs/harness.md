@@ -42,6 +42,9 @@ make bench-compare COMPARE_FLAGSETS="O2 O3native" COMPARE_RUNS=5 \
   COMPARE_ARGS="--run-set cross-ccd --cpus $(sh e8/compare/ccd_cpus.sh cross-ccd) --name cross-ccd"
 ```
 
+Their results on the 9950X3D (tables, acceptance, every run's `env.txt`
+and `commands.txt`) are in [`measurements/`](measurements/README.md).
+
 Driver options: `--smoke`, `--run-set all|headline|cross-ccd` (below),
 `--flagsets`, `--runs R` (runs and flag sets alternate: r1/O2,
 r1/O3native, r2/O2, ...), `--keys`, `--sigs-per-key`, `--procs`, `--cpus`,
@@ -551,7 +554,8 @@ Driver: steps `keyverify` and `keyverify_avx2` in the `all` and
   and its key generation limits reject no key in practice. The
   `diverged` column is the share of key indices where this made the two
   schemes' draws differ (about 0.5% / 8.5% / 1.6% of keys at n = 256 /
-  512 / 1024 in trial runs), and each such key costs HAWK roughly twice
+  512 / 1024, measured in [`measurements/`](measurements/README.md) at both
+  flag sets), and each such key costs HAWK roughly twice
   as much. The ratio of means therefore includes a format effect, which
   can put it below 1. The `tail` column (scheme mean minus core mean)
   separates each scheme's own work after the core: E8's public form,

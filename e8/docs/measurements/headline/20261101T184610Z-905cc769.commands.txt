@@ -1,0 +1,37 @@
+run_id: 20261101T184610Z-905cc769
+flags: O2
+keys: 10
+sigs_per_key: 1000
+keygen_keys: 1000
+procs: 8
+cpus: 0,1,2,3,4,5,6,7
+threads: 1,2,4,8
+smoke: 0
+steps: keyverify keyverify_avx2 latency throughput latency_avx2 sampler stages_hawk stages_e8
+run_set: headline
+preflight: passed
+preflight_boost: ok (off)
+preflight_governor: ok (performance on 8 CPUs)
+preflight_smt: ok (control off, active 0)
+preflight_cores: ok (every pinned CPU on its own core)
+preflight_perf: ok (perf_event_paranoid 1, core cycles available)
+preflight_freq: ok (4286665..4287381 kHz, spread 0.02% (tolerance 1%): cpu0=4287328 cpu1=4287288 cpu2=4287266 cpu3=4286665 cpu4=4286677 cpu5=4286990 cpu6=4286996 cpu7=4287381)
+preflight_git: ok (clean at 35e714ccd3)
+sizes: bin/bench_compare-O2 --sizes
+  start 2026-11-01T18:46:10Z, 0 s, exit 0
+keyverify: bin/bench_compare-O2 --mode keyverify --keygen-keys 1000 --run-id 20261101T184610Z-905cc769 --keys 10 --sigs-per-key 1000 --warmup 1 --cpus 0,1,2,3,4,5,6,7 --out results/compare/O2/20261101T184610Z-905cc769/keyverify.csv
+  start 2026-11-01T18:46:10Z, 87 s, exit 0
+keyverify_avx2: bin/bench_compare_avx2-O2 --mode keyverify --keygen-keys 1000 --run-id 20261101T184610Z-905cc769 --keys 10 --sigs-per-key 1000 --warmup 1 --cpus 0,1,2,3,4,5,6,7 --out results/compare/O2/20261101T184610Z-905cc769/keyverify_avx2.csv
+  start 2026-11-01T18:47:37Z, 20 s, exit 0
+latency: bin/bench_compare-O2 --mode latency --run-id 20261101T184610Z-905cc769 --keys 10 --sigs-per-key 1000 --warmup 1 --cpus 0,1,2,3,4,5,6,7 --threads 1,2,4,8 --out results/compare/O2/20261101T184610Z-905cc769/latency.csv
+  start 2026-11-01T18:47:57Z, 228 s, exit 0
+throughput: bin/bench_compare-O2 --mode throughput --procs 8 --run-id 20261101T184610Z-905cc769 --keys 10 --sigs-per-key 1000 --warmup 1 --cpus 0,1,2,3,4,5,6,7 --out results/compare/O2/20261101T184610Z-905cc769/throughput.csv
+  start 2026-11-01T18:51:45Z, 72 s, exit 0
+latency_avx2: bin/bench_compare_avx2-O2 --mode latency --threads 1 --run-id 20261101T184610Z-905cc769 --keys 10 --sigs-per-key 1000 --warmup 1 --cpus 0,1,2,3,4,5,6,7 --out results/compare/O2/20261101T184610Z-905cc769/latency_avx2.csv
+  start 2026-11-01T18:52:57Z, 3 s, exit 0
+sampler: taskset -c 0 bin/e8_sampler_bench-O2 --variant-matrix --threads 1 --trials 2000
+  start 2026-11-01T18:53:00Z, 2 s, exit 0
+stages_hawk: taskset -c 0 bin/hawk_sign_profile_bench-O2 --trials 1000 --stage-csv results/compare/O2/20261101T184610Z-905cc769/stages_hawk.csv
+  start 2026-11-01T18:53:02Z, 14 s, exit 0
+stages_e8: taskset -c 0 bin/e8_sign_profile_bench-O2 --variant ref --threads 1 --trials 1000 --stage-csv results/compare/O2/20261101T184610Z-905cc769/stages_e8.csv
+  start 2026-11-01T18:53:16Z, 31 s, exit 0

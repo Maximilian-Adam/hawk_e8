@@ -151,29 +151,26 @@ python3 -I compare/analysis/analyze.py --out-dir results/compare/analysis/headli
 
 ## 5. Expected run time
 
-Measured on WSL (one full-volume run of each run set, O2, pinned): per run
-and flag set, headline 8.8 min (latency 6.2, throughput 1.9, AVX2, sampler
-and stages 0.7) and cross-CCD 7.9 min.  WSL's cores ran boosted (core /
-TSC about 1.3), the measurement runs at the base clock, so expect about
-1.3x.  The key generation and verification steps took 67 + 16 s per run
-and flag set on this machine with boost on, so about 1.8 min with boost
-off:
+Measured on the 9950X3D (boost off, base clock;
+[`measurements/README.md`](measurements/README.md)):
 
-| run set | runs x flag sets | per run (expected) | total (expected) |
+| run set | runs x flag sets | per run (O2 / O3native) | total with analysis |
 | --- | --- | --- | --- |
 | smoke | 1 x 2 | seconds | under a minute |
-| headline | 5 x 2 | about 13.3 min | about 2.2 h |
-| cross-CCD | 5 x 2 | about 10.3 min | about 1.7 h |
+| headline | 5 x 2 | 7.6 / 6.1 min | 72 min |
+| cross-CCD | 5 x 2 | 4.7 / 3.4 min | about 42 min |
 
-Plan for 4.5 hours.  The analysis of each run set takes about 2 minutes and
-under 1 GB of memory.  Start the runs inside `tmux` or `screen` (or with
-`nohup`), so that a dropped session does not stop them, and do not touch
-the repository while they run: the driver is a shell script read as it
-runs, and the preflight checks a clean tree only at the start of each
-run.  The first run of each flag set finishes after about 12 minutes:
-check its `commands.txt` (every step `exit 0`) before leaving it.
-Its first steps, `keyverify` and `keyverify_avx2`, finish after about
-2 minutes.
+Of a headline O2 run, `keyverify` takes about 1.5 min and `latency` about
+3.8 min.  `make validate` beforehand took 39 minutes on the same machine.
+Plan for 2.5 hours including validation.  The analysis of each run set
+takes 1.5-3.5 minutes and under 1 GB of memory.  Start the runs inside
+`tmux` or `screen` (or with `setsid nohup`), so that a dropped session does
+not stop them, and do not touch the repository while they run: the driver
+is a shell script read as it runs, and the preflight checks a clean tree
+only at the start of each run.  The first headline run finishes after
+about 8 minutes: check its `commands.txt` (every step `exit 0`) before
+leaving it.  Its first steps, `keyverify` and `keyverify_avx2`, finish
+after about 2 minutes.
 
 ## 6. Acceptance
 
@@ -202,8 +199,10 @@ Then read `tables.md` as a reviewer would: the ratio CIs (`ratios.csv`,
 and the cross-CCD Table 4b against the headline Table 4 at `T <= 8`.
 For Tables 8-10 (`keyverify_ratios.csv`, `keyverify_summary.csv`), check
 the `diverged` column and the O3native E8 `fast` all-in rows (all-in
-minus prepared was twice O2's at n = 1024 in a trial run); `harness.md`,
-"Key generation and verification", explains both.
+minus prepared was twice O2's at n = 1024 while E8's modular arithmetic
+compiled to branches, `harness.md`, "Builds"; measured since, 79k against
+87k cycles); `harness.md`, "Key generation and verification", explains
+both.
 
 ## 7. What to copy back
 

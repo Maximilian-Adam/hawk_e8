@@ -19,7 +19,9 @@ longer available, so they are replaced, not reproduced:
   (`e8_verify_finish_ref()`): 4 NTT primes, twiddles and the NTT of
   `Delta` rebuilt on every call, one Fermat inversion per coefficient, a
   `double` bound. Timed against HAWK in the same harness, it is again
-  6.0-6.6x HAWK (trial runs), so the old figure is accounted for. The
+  6.0-7.0x HAWK at O2 and 8.1-9.0x at O3native (Table 9 in
+  [`measurements/`](measurements/README.md)), so the old figure is
+  accounted for. The
   fair figure is E8 `fast` (`e8_verify_finish()`), which uses HAWK's
   verifier techniques and the minimum sound number of primes (below).
   Table 9 shows both, with `ref` as context.

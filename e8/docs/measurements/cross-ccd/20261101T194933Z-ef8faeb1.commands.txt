@@ -1,0 +1,23 @@
+run_id: 20261101T194933Z-ef8faeb1
+flags: O2
+keys: 10
+sigs_per_key: 1000
+keygen_keys: 1000
+procs: 4
+cpus: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+threads: 1,2,4,8,16
+smoke: 0
+steps: latency
+run_set: cross-ccd
+preflight: passed
+preflight_boost: ok (off)
+preflight_governor: ok (performance on 16 CPUs)
+preflight_smt: ok (control off, active 0)
+preflight_cores: ok (every pinned CPU on its own core)
+preflight_perf: ok (perf_event_paranoid 1, core cycles available)
+preflight_freq: ok (4257477..4271159 kHz, spread 0.32% (tolerance 1%): cpu0=4263414 cpu1=4265388 cpu2=4269102 cpu3=4269107 cpu4=4268147 cpu5=4264242 cpu6=4266612 cpu7=4270203 cpu8=4265344 cpu9=4257477 cpu10=4264239 cpu11=4271159 cpu12=4258046 cpu13=4270600 cpu14=4264603 cpu15=4260451)
+preflight_git: ok (clean at 35e714ccd3)
+sizes: bin/bench_compare-O2 --sizes
+  start 2026-11-01T19:49:33Z, 0 s, exit 0
+latency: bin/bench_compare-O2 --mode latency --run-id 20261101T194933Z-ef8faeb1 --keys 10 --sigs-per-key 1000 --warmup 1 --cpus 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 --threads 1,2,4,8,16 --out results/compare/O2/20261101T194933Z-ef8faeb1/latency.csv
+  start 2026-11-01T19:49:33Z, 279 s, exit 0

@@ -85,7 +85,8 @@ e8/
               (precision_audit.md, precision_summary.csv), the validation
               (validation.md, validation_summary.csv), the verifier's
               3-prime range argument (verifier_range.md), the key
-              generation and verification data (keygen_verify_data.md)
+              generation and verification data (keygen_verify_data.md),
+              the bare-metal measurements (measurements/)
 ```
 
 Dependencies run one way: `src/` may use `common/` and `tables/`;
@@ -120,7 +121,9 @@ make bench-compare       # one harness run at full volume (flag set O2;
 
 Bare-metal measurements: machine setup, CPU lists, preflight, the exact
 commands of both run sets, run time, acceptance and what to copy back are
-in [`docs/measurement_runbook.md`](docs/measurement_runbook.md). Key generation and
+in [`docs/measurement_runbook.md`](docs/measurement_runbook.md); the measured
+results (tables, acceptance, environment of every run) are in
+[`docs/measurements/`](docs/measurements/README.md). Key generation and
 verification timing: [`docs/harness.md`](docs/harness.md), "Key
 generation and verification"; the verifier's range argument:
 [`docs/verifier_range.md`](docs/verifier_range.md); the data the key
