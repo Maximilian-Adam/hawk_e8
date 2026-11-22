@@ -196,6 +196,17 @@ paper-tables:
 		echo "paper-tables: preview.tex compiles at the LNCS text width without overfull boxes (results/paper_tables/preview.pdf)"; \
 	else echo "paper-tables: pdflatex not installed, compile check skipped"; fi
 
+# Small-degree experiments for the Galois key recovery attack on
+# HAWK-E8-CM (tools/galois_attack.py, see docs/galois_attack.md; paper
+# Sec. 5.4): the cocycle lattice class certificate, the descent lattice and
+# the tau-tower key recovery, from public keys at n = 8, 16, 32 (about 15
+# seconds); galois_attack.csv in results/galois_attack/. Fails if a
+# prediction fails. GALOIS_ARGS selects more, for example
+#   GALOIS_ARGS="--n 64 --keys 2 --hawk"   (a few minutes per key)
+GALOIS_ARGS = --n 8,16,32 --keys 5 --hawk
+galois-attack:
+	python3 -I tools/galois_attack.py $(GALOIS_ARGS) --quiet --out-dir results/galois_attack
+
 # Precision audit (tools/precision_audit.py, see docs/precision_audit.md):
 # self-tests, including the exact 1D moments against the C moments of
 # test_e8_tables and test_hawk_variants, then the audit of every variant's

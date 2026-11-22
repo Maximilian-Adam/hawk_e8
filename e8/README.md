@@ -47,7 +47,9 @@ e8/
               implemented distributions) and validate.py (the driver);
               e8_keygen_limits.c (coefficient ranges of the
               public form over many keys) and e8_verify_diff.c (the
-              verifier against the reference verifier)
+              verifier against the reference verifier); galois_attack.py
+              (the Galois key recovery attack at small degree,
+              docs/galois_attack.md)
   compare/    HAWK vs E8 benchmarks
     bench_compare.c          the comparison harness (docs/harness.md):
                              every configuration interleaved, latency and
@@ -88,7 +90,8 @@ e8/
               (validation.md, validation_summary.csv), the verifier's
               3-prime range argument (verifier_range.md), the key
               generation and verification data (keygen_verify_data.md),
-              the bare-metal measurements (measurements/)
+              the bare-metal measurements (measurements/), the Galois
+              key recovery attack experiments (galois_attack.md)
 ```
 
 Dependencies run one way: `src/` may use `common/` and `tables/`;
@@ -122,6 +125,8 @@ make bench-compare       # one harness run at full volume (flag set O2;
 make paper-tables        # the paper's tables from docs/measurements/ into
                          # results/paper_tables/; with pdflatex, fail if
                          # one overflows the LNCS text width
+make galois-attack       # the Galois key recovery attack at n = 8, 16, 32
+                         # (docs/galois_attack.md; GALOIS_ARGS for n = 64)
 ```
 
 Bare-metal measurements: machine setup, CPU lists, preflight, the exact
@@ -158,6 +163,7 @@ results/
   diagnostics/        e8-histograms, e8-rejection-summary,
                       e8-validation-summary, the sigma sweeps
   precision/          precision-audit
+  galois_attack/      galois-attack
   validation/         validate
   validation-quick/   validate-quick
   distribution-tests/ tools/distribution_tests.py run on its own
