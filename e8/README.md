@@ -64,7 +64,9 @@ e8/
     ccd_cpus.sh              the run sets' CPU lists from the L3 topology
     analysis/                analyze.py (+ compare_data.py,
                              compare_tables.py): statistics, bootstrap
-                             ratios, acceptance checks, comparison tables
+                             ratios, acceptance checks, comparison tables;
+                             paper_tables.py: the paper's tables from the
+                             committed measurement outputs
     e8_sign_bench.c          HAWK vs E8 signing, every sampler variant,
                              all_in and prepared accounting, one block at a
                              time
@@ -117,13 +119,18 @@ make bench-compare-smoke # the harness on every configuration of both
 make bench-compare       # one harness run at full volume (flag set O2;
                          # COMPARE_FLAGSETS, COMPARE_RUNS, COMPARE_ARGS;
                          # --run-set headline|cross-ccd, --cpus, --force)
+make paper-tables        # the paper's tables from docs/measurements/ into
+                         # results/paper_tables/; with pdflatex, fail if
+                         # one overflows the LNCS text width
 ```
 
 Bare-metal measurements: machine setup, CPU lists, preflight, the exact
 commands of both run sets, run time, acceptance and what to copy back are
 in [`docs/measurement_runbook.md`](docs/measurement_runbook.md); the measured
 results (tables, acceptance, environment of every run) are in
-[`docs/measurements/`](docs/measurements/README.md). Key generation and
+[`docs/measurements/`](docs/measurements/README.md); the paper's tables are
+generated from them by `make paper-tables` ([`docs/harness.md`](docs/harness.md),
+"Paper tables"). Key generation and
 verification timing: [`docs/harness.md`](docs/harness.md), "Key
 generation and verification"; the verifier's range argument:
 [`docs/verifier_range.md`](docs/verifier_range.md); the data the key

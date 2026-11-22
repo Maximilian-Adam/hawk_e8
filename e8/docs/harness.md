@@ -560,3 +560,85 @@ Driver: steps `keyverify` and `keyverify_avx2` in the `all` and
   can put it below 1. The `tail` column (scheme mean minus core mean)
   separates each scheme's own work after the core: E8's public form,
   limits and 3-prime invertibility check against HAWK's encoding.
+
+## Paper tables
+
+`make paper-tables` runs `compare/analysis/paper_tables.py` (standard
+library) on the committed outputs of the bare-metal measurements in
+[`measurements/`](measurements/README.md) (both run sets' `summary.csv`,
+`ratios.csv`, `keyverify_summary.csv`, `keyverify_ratios.csv`,
+`tables.md` and `acceptance.txt`; the raw CSVs are not needed) and
+writes the paper's tables to `results/paper_tables/` (gitignored: they
+are a pure function of committed files, byte-identical on every run).
+If `pdflatex` is installed it then compiles `preview.tex` at the LNCS
+text width (12.2 cm, 10 pt) and fails on a LaTeX error, a warning or an
+overfull box; `preview.pdf` lands beside the tables, the auxiliary files
+in `build/paper_tables/`.
+
+| file | contents |
+| --- | --- |
+| `tab_*.tex` | one `table` float each (`[tbp]`, caption, label, `booktabs` rules) |
+| `macros.tex` | `\HAWK` and `\EightCM` (E8-CM) with `\providecommand`, so the paper's own definitions win |
+| `tables.md` | the same tables in Markdown |
+| `preview.tex`, `preview.pdf` | every table on its own page, for the compile check; not part of the paper |
+
+The paper copies `macros.tex` and the `tab_*.tex` files, inputs
+`macros` once and each table where it belongs; the tables need
+`booktabs`, `amssymb` (`\checkmark`) and `cleveref` (captions cite each
+other and the paper's `tab:precision`).
+
+| label | contents | status |
+| --- | --- | --- |
+| `tab:cmp-ref` | signing on one core, HAWK `ref` vs E8 `ref` (78-bit, constant-time scan): kcycles, ratio, random bytes, eq. (6), attempts in the caption | fair, headline |
+| `tab:cmp-hot` | the same for the `hot64` and `hot32` pairs | fair |
+| `tab:cmp-sampler` | samplers alone: cycles and random bytes per 8 coordinates, every variant | fair within a width and technique |
+| `tab:cmp-parallel` | parallel latency, E8/HAWK wall-clock ratio at T = 1, 2, 4, 8, total-CPU ratio at T = 8 | fair |
+| `tab:cmp-parallel-abs` | the wall-clock cycles behind `tab:cmp-parallel` | fair |
+| `tab:cmp-parallel-ccd` | cross-CCD run set: T = 1, 8, 16, total CPU at T = 16, with its known asymmetry | fair within its run set |
+| `tab:cmp-throughput` | throughput per core, P = 8 single-thread signer processes (`ref`, `hot64`, `hot32`) | fair |
+| `tab:cmp-stages` | stage profile of both `ref` signers (profiling builds), stages grouped into common categories | fair (timers included) |
+| `tab:cmp-avx2` | upstream HAWK AVX2 signing and verification against HAWK `ref` and E8 | context only |
+| `tab:cmp-keygen` | key generation: mean, median, tail after the shared core, ratio, HAWK's restart rate (`diverged`) | fair; AVX2 rows context |
+| `tab:cmp-verify` | verification: HAWK, E8 `fast`, E8 `ref` (the submission's verifier), all-in and prepared, primes | fair; E8 `ref` context |
+| `tab:cmp-sizes` | sizes of every key, signature and `tmp` object | no timing |
+
+A claim about the lattice rests only on rows marked fair; context rows
+say so in their captions (with a dagger in mixed tables).
+
+Conventions:
+
+- **Layout**: both flag sets side by side in every timing table except
+  the stage profile, which stacks them (too wide otherwise). `O2` is
+  `-O2`, `O3native` is `-O3 -march=native -fno-strict-aliasing`; the
+  signing tables' captions define them, the others refer there.
+- **Units**: thousands of core cycles with one decimal; key generation
+  in millions with two decimals, its tail in thousands; throughput in
+  signatures per second per core; sizes in bytes. The parallel tables
+  use wall-clock (TSC) cycles for latency and summed core cycles for
+  total CPU.
+- **Ratios**: E8 / HAWK (in the throughput table above 1 favours E8), two
+  decimals, rounded from the estimates rather than the analysis's
+  four-decimal ratio, so that a stored `...5` is not rounded twice
+  (O3native `ref` all-in at n = 1024: 836,791.4 / 468,793.5 = 1.78499,
+  printed 1.78; `ratios.csv` stores 1.7850). Each caption states the
+  largest 95% bootstrap CI half-width of its table; the CIs themselves
+  are in `measurements/*/ratios.csv` and `keyverify_ratios.csv`.
+- **Precision**: the threshold width is in the variant name (`ref` 78,
+  `hot64` 64, `hot32` 32 bits); the signing tables mark per scheme
+  whether eq. (6) of the HAWK specification holds; SD and RD values stay
+  in the paper's `tab:precision`.
+- **Checks** (any failure exits with status 2 and names the value):
+  every value is looked up by its full key, so a missing configuration is
+  an error, not an empty cell; values that cannot depend on the flag set
+  (attempts, random bytes, sampler bytes, threshold bits, eq. (6), key
+  generation `diverged`) must agree between the flag sets; threshold bits
+  and techniques must match the variant names; every ratio must equal e8
+  / hawk of its estimates and lie in its CI; the stage categories must
+  cover every profiled stage and sum to the total; the key generation
+  tail must agree with the analysis's; the signature sizes must equal the
+  signed ones; both run sets' acceptance must be all PASS (the cross-CCD
+  run set may SKIP only the keyverify checks, which it has no data for).
+- **Computed caption facts**: the run count, the attempts range, the CI
+  half-widths, the cross-CCD `T <= 8` agreement with the headline runs,
+  the TSC / core agreement at T = 1, the throughput process count and the
+  public-key decoding range come from the inputs, not typed in.

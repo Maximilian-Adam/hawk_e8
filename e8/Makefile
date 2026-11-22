@@ -172,6 +172,28 @@ tables: build
 			|| { echo "tables: $$f differs from the generator output"; exit 1; }; \
 	done; echo "tables: committed tables match the generator"
 
+# The paper's comparison tables (compare/analysis/paper_tables.py, see
+# docs/harness.md, "Paper tables"), generated from the committed
+# measurement outputs in docs/measurements/ into results/paper_tables/
+# (not committed; the paper copies the tab_*.tex files); then, if pdflatex
+# is installed, compile preview.tex at the LNCS text width (auxiliary
+# files in build/paper_tables/, preview.pdf beside the tables) and fail on
+# a LaTeX error, a warning or an overfull box.
+paper-tables:
+	@mkdir -p build/paper_tables
+	python3 -I compare/analysis/paper_tables.py --measurements docs/measurements --out results/paper_tables
+	@if command -v pdflatex > /dev/null; then \
+		aux=$$(pwd)/build/paper_tables; cd results/paper_tables && for i in 1 2; do \
+			pdflatex -interaction=nonstopmode -halt-on-error -output-directory "$$aux" preview.tex > /dev/null \
+				|| { echo "paper-tables: preview.tex does not compile (build/paper_tables/preview.log)"; exit 1; }; \
+		done; \
+		if grep -q 'Overfull\|LaTeX Warning' "$$aux/preview.log"; then \
+			echo "paper-tables: preview.tex has overfull boxes or warnings:"; \
+			grep 'Overfull\|LaTeX Warning' "$$aux/preview.log"; exit 1; \
+		fi; cp "$$aux/preview.pdf" .; \
+		echo "paper-tables: preview.tex compiles at the LNCS text width without overfull boxes (results/paper_tables/preview.pdf)"; \
+	else echo "paper-tables: pdflatex not installed, compile check skipped"; fi
+
 # Precision audit (tools/precision_audit.py, see docs/precision_audit.md):
 # self-tests, including the exact 1D moments against the C moments of
 # test_e8_tables and test_hawk_variants, then the audit of every variant's

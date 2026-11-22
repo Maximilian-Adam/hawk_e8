@@ -7,6 +7,8 @@ run sets, `headline` and `cross-ccd`, each 5 runs of both flag sets.  These
 are the committed small outputs of their analyses; the raw per-signature
 CSVs are archived outside git (two tarballs, one per run set, from which
 the analysis reproduces these files byte for byte).
+The paper's tables are generated from these files by `make paper-tables`
+([`../harness.md`](../harness.md), "Paper tables").
 
 | directory | contents |
 | --- | --- |
