@@ -14,7 +14,8 @@ outputs alone (byte-identical reruns), and the paper copies it.
 Writes one LaTeX fragment per table (tab_*.tex: a table float with
 booktabs rules, no other package beyond amssymb's \\checkmark), the
 macros they use (macros.tex, \\providecommand only), preview.tex (an
-LNCS-width document that inputs them all, for the compile check) and
+document at the LNCS text width and llncs's 9 pt \\footnotesize that
+inputs them all, for the compile check) and
 tables.md (the same tables in Markdown).  Layout: both flag sets side
 by side, thousands of cycles, E8/HAWK ratios to two decimals with the
 largest 95% CI half-width of the table stated in its caption, threshold
@@ -36,10 +37,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 FLAGS = ('O2', 'O3native')
 FLAG_TEX = {'O2': '\\texttt{O2}', 'O3native': '\\texttt{O3native}'}
-FLAGS_NOTE = ('Flag sets, the same for both schemes and every object:'
-              ' \\texttt{O2} is \\texttt{-O2} (as upstream \\HAWK{}),'
-              ' \\texttt{O3native} is \\texttt{-O3 -march=native'
-              ' -fno-strict-aliasing}.')
 # Technique of each variant (the sampler table checks it).
 TECHNIQUE = {'ref': 'ct full scan', 'ref-T': 'ct full scan',
              'hot64': 'vt hot table', 'hot32': 'vt hot table'}
@@ -338,7 +335,8 @@ DETEX = (
     (r'\\cite\[([^\]]*)\]\{([^{}]*)\}', r'[\2, \1]'),
     (r'\$\\times\$', 'x'), (r'\\times', 'x'), (r'\\le\b', '<='),
     (r'\\ge\b', '>='), (r'\\pm', '+-'), (r'\\approx', '~'),
-    (r'\\dagger', '+'), (r'\\,', ' '), (r'\\%', '%'), (r'\{,\}', ','),
+    (r'\\rlap\{([^{}]*)\}', r'\1'),
+    (r'\\dagger', '+'), (r'\\ast', '*'), (r'\\,', ' '), (r'\\%', '%'), (r'\{,\}', ','),
     (r'\\ldots', '...'), (r'~', ' '), (r'--', '-'),
     (r'\^\{([^{}]*)\}', r'^\1'), (r'\$', ''), (r'\\_', '_'),
     (r'\\&', '&'), (r'\\\\', ' '), (r'\\ ', ' '), (r'\{\}', ''),
@@ -399,13 +397,6 @@ def runs_text(d, rs='headline'):
     return d.runs[rs][0]
 
 
-def setup_text(d):
-    return ('one pinned core of the V-cache CCD at the base clock (boost'
-            ' and SMT off), core cycles; per configuration %s runs of 10'
-            ' keys $\\times$ 1{,}000 signatures, the median of each run'
-            ' and the mean of the %s medians' % (runs_text(d), runs_text(d)))
-
-
 def attempts(row):
     return '%.3f' % float(row['attempts_per_sig'])
 
@@ -413,9 +404,6 @@ def attempts(row):
 def table_signing(d, pairs, name, label, title, headline):
     lead = ['$n$', 'acct']
     lead_align = 'rl'
-    if not headline:
-        lead = ['variant'] + lead
-        lead_align = 'l' + lead_align
     lead += ['eq.\\,(6)']
     lead_align += 'c'
     groups = [('', len(lead))]
@@ -427,7 +415,10 @@ def table_signing(d, pairs, name, label, title, headline):
               groups + [(FLAG_TEX[f] + ' (kcycles)', 3) for f in FLAGS], cols)
     att_note = {}
     for ev, hv in pairs:
-        t.rule()
+        if headline:
+            t.rule()
+        else:
+            t.section('%s, %s-bit thresholds' % (pair_tex(ev, hv), ev[3:]))
         for logn in LOGNS:
             for ai, acct in enumerate(ACCTS):
                 h = [d.s(f, 'latency', 'hawk', hv, 1, logn, acct)
@@ -450,11 +441,7 @@ def table_signing(d, pairs, name, label, title, headline):
                 eb = d.same('random bytes', [grouped(x['rng_bytes_per_sig'])
                                              for x in e])
                 first = ai == 0
-                cells = []
-                if not headline:
-                    cells.append(var_tex(ev) if first and logn == LOGNS[0]
-                                 else '')
-                cells += [n_of(logn) if first else '', ACCT_TEX[acct],
+                cells = [n_of(logn) if first else '', ACCT_TEX[acct],
                           ok if first else '', hb, eb]
                 for i, f in enumerate(FLAGS):
                     r = d.r(f, 'latency', ev, hv, 1, logn, acct,
@@ -465,28 +452,20 @@ def table_signing(d, pairs, name, label, title, headline):
                               kc(e[i]['core_cycles_est']), t.ratio(r)]
                 t.row(cells)
     common = (
-        'kcycles: thousands of cycles per signature, %s. ratio:'
-        ' \\EightCM{}/\\HAWK{}; every 95\\%% bootstrap CI half-width is'
-        ' at most %s. all-in: from the encoded private key; prep.: from'
-        ' the prepared key (\\HAWK{} decoded, \\EightCM{} prepared basis).'
-        ' eq.\\,(6): whether \\HAWK{}/\\EightCM{} meets eq.\\,(6) of the'
-        ' \\HAWK{} specification (SD and RD values in \\cref{tab:precision}).'
-        ' random bytes: drawn per signature, attempts included. Signing'
-        ' attempts per signature: \\HAWK{} %.3f to %.3f at $n=256$, at most'
-        ' %.3f above; \\EightCM{} at most %.3f. %s'
-        % (setup_text(d), t.ci_text(), min(att_note[('hawk', 8)]),
+        'kcycles: thousands of core cycles per signature on one core,'
+        ' %s runs (setup, accounting and estimator in \\cref{sec:method}).'
+        ' ratio:'
+        ' \\EightCM{}/\\HAWK{}; every 95\\%% bootstrap CI half-width is at'
+        ' most %s. eq.\\,(6): whether \\HAWK{}/\\EightCM{} meets eq.\\,(6)'
+        ' of the \\HAWK{} specification (\\cref{tab:precision}). random'
+        ' bytes: drawn per signature, attempts included. Attempts per'
+        ' signature: \\HAWK{} %.3f to %.3f at $n=256$, at most %.3f above;'
+        ' \\EightCM{} at most %.3f.'
+        % (runs_text(d), t.ci_text(), min(att_note[('hawk', 8)]),
            max(att_note[('hawk', 8)]),
            max(att_note[('hawk', 9)] + att_note[('hawk', 10)]),
-           max(v for k, l in att_note.items() if k[0] == 'e8' for v in l),
-           FLAGS_NOTE))
-    if headline:
-        t.caption = ('%s. Both samplers use 78-bit thresholds and a'
-                     ' constant-time full table scan. %s' % (title, common))
-    else:
-        t.caption = ('%s. Within a pair both samplers use the same'
-                     ' threshold width (\\texttt{hot64}: 64 bits,'
-                     ' \\texttt{hot32}: 32 bits) and the same variable-time'
-                     ' hot-table technique. %s' % (title, common))
+           max(v for k, l in att_note.items() if k[0] == 'e8' for v in l)))
+    t.caption = '%s. %s' % (title, common)
     return t
 
 
@@ -532,14 +511,13 @@ def table_sampler(d):
         t.row(cells)
     t.caption = (
         'The samplers alone on one core: cycles and random bytes per 8'
-        ' coordinates ($2n$ coordinates per call), at $n = 256$, $512$,'
-        ' $1024$. Median per call over the trials of each run, mean over %s'
-        ' runs; random bytes include the 40-byte seed per call.'
-        ' \\texttt{ref}: constant-time full table scan; \\texttt{hot64},'
-        ' \\texttt{hot32}: variable-time hot-table early exit; bits:'
-        ' threshold width. Flag sets as in \\cref{tab:cmp-ref}. \\HAWK{} \\texttt{ref-T} is \\HAWK{}\'s \\texttt{ref}'
-        ' split into the per-worker streams of \\EightCM{}\'s sampler (the'
-        ' \\HAWK{} half of the parallel pairs).' % runs_text(d))
+        ' coordinates ($2n$ coordinates per call; the 40-byte seed'
+        ' included), median per call, mean over %s runs. bits: threshold'
+        ' width; \\texttt{ref}: constant-time full table scan;'
+        ' \\texttt{hot64}, \\texttt{hot32}: variable-time hot table.'
+        ' \\HAWK{} \\texttt{ref-T}: \\HAWK{}\'s \\texttt{ref} on'
+        ' \\EightCM{}\'s per-worker stream split (the \\HAWK{} half of the'
+        ' parallel pairs).' % runs_text(d))
     return t
 
 
@@ -556,16 +534,14 @@ def pair_tex(ev, hv):
 
 
 def table_parallel(d):
-    cols = ['pair', '$n$', 'acct'] + (t_heads(HEAD_T) + ['CPU']) * 2
+    cols = ['$n$', 'acct'] + (t_heads(HEAD_T) + ['CPU']) * 2
     t = Table('tab_parallel', 'tab:cmp-parallel', '',
-              'lrl' + 'rrrrr' * 2, two_flag_groups(3, 5), cols)
+              'rl' + 'rrrrr' * 2, two_flag_groups(2, 5), cols)
     for ev, hv in PARALLEL_PAIRS:
-        t.rule()
+        t.section(pair_tex(ev, hv))
         for logn in LOGNS:
             for ai, acct in enumerate(ACCTS):
-                cells = [pair_tex(ev, hv) if logn == LOGNS[0] and ai == 0
-                         else '', n_of(logn) if ai == 0 else '',
-                         ACCT_TEX[acct]]
+                cells = [n_of(logn) if ai == 0 else '', ACCT_TEX[acct]]
                 for f in FLAGS:
                     for T in HEAD_T:
                         cells.append(t.ratio(d.r(f, 'latency', ev, hv, T,
@@ -574,35 +550,29 @@ def table_parallel(d):
                                              acct, 'core_cycles')))
                 t.row(cells)
     t.caption = (
-        'Parallel signing latency, \\EightCM{}/\\HAWK{}, with both schemes'
-        ' on the same worker pool, the same per-worker stream split and $T$'
-        ' threads on $T$ pinned cores of the V-cache CCD (SMT and boost'
-        ' off). Columns $T{=}1$ to $8$: ratio of the wall-clock (TSC)'
-        ' cycles of the signing call with $T$ threads; CPU: ratio of the'
-        ' core cycles summed over the caller and the workers (total CPU per'
-        ' signature) at $T = 8$. Flag sets as in \\cref{tab:cmp-ref}.'
-        ' \\HAWK{} \\texttt{ref-T} is \\HAWK{}\'s 78-bit constant-time'
-        ' sampler on those streams. %s runs of 10 keys $\\times$ 1{,}000'
-        ' signatures per configuration, mean of the run medians; every 95\\%%'
-        ' CI half-width is at most %s. Cycles in \\cref{tab:cmp-parallel-abs}.'
-        % (runs_text(d), t.ci_text()))
+        'Parallel signing latency, \\EightCM{}/\\HAWK{}, both schemes on'
+        ' the same worker pool and stream split with $T$ threads on $T$'
+        ' cores: ratio of wall-clock (TSC) cycles at $T{=}1$ to $8$, and'
+        ' CPU, the ratio of core cycles summed over all threads (total CPU'
+        ' per signature) at $T=8$. \\HAWK{} \\texttt{ref-T}: \\HAWK{}\'s'
+        ' \\texttt{ref} on the worker streams. Every 95\\%% CI half-width is'
+        ' at most %s; cycles in \\cref{tab:cmp-parallel-abs}.'
+        % t.ci_text())
     return t
 
 
 def table_parallel_abs(d):
-    cols = ['pair', '$n$', 'acct', 'scheme'] + \
-        ['$T=%d$' % T for T in HEAD_T] * 2
+    cols = ['$n$', 'acct', 'scheme'] + t_heads(HEAD_T) * 2
     t = Table('tab_parallel_abs', 'tab:cmp-parallel-abs', '',
-              'lrll' + 'rrrr' * 2, two_flag_groups(4, 4, ' (kcycles)'), cols)
+              'rll' + 'rrrr' * 2, two_flag_groups(3, 4, ' (kcycles)'), cols)
     for ev, hv in PARALLEL_PAIRS:
-        t.rule()
+        t.section(pair_tex(ev, hv))
         for logn in LOGNS:
             for ai, acct in enumerate(ACCTS):
                 for si, (scheme, var) in enumerate((('hawk', hv),
                                                     ('e8', ev))):
                     top = ai == 0 and si == 0
-                    cells = [pair_tex(ev, hv) if top and logn == LOGNS[0]
-                             else '', n_of(logn) if top else '',
+                    cells = [n_of(logn) if top else '',
                              ACCT_TEX[acct] if si == 0 else '',
                              '\\HAWK{}' if scheme == 'hawk'
                              else '\\EightCM{}']
@@ -615,25 +585,22 @@ def table_parallel_abs(d):
                     - 1) for r in d.summary.values()
                 if r['mode'] == 'latency' and r['threads'] == '1')
     t.caption = (
-        'Parallel signing latency: thousands of wall-clock (TSC) cycles per'
-        ' signature with $T$ threads, under the conditions of'
-        ' \\cref{tab:cmp-parallel}. At $T=1$ the TSC and core-cycle counts'
-        ' of every configuration agree within %.1f\\%% (base clock).'
+        'Thousands of wall-clock (TSC) cycles per signature with $T$'
+        ' threads, behind \\cref{tab:cmp-parallel}. At $T=1$ the TSC and'
+        ' core-cycle counts of every configuration agree within %.1f\\%%.'
         % (100 * worst))
     return t
 
 
 def table_parallel_ccd(d):
-    cols = ['pair', '$n$', 'acct'] + (t_heads(CCD_T) + ['CPU']) * 2
+    cols = ['$n$', 'acct'] + (t_heads(CCD_T) + ['CPU']) * 2
     t = Table('tab_parallel_ccd', 'tab:cmp-parallel-ccd', '',
-              'lrl' + 'rrrr' * 2, two_flag_groups(3, 4), cols)
+              'rl' + 'rrrr' * 2, two_flag_groups(2, 4), cols)
     for ev, hv in PARALLEL_PAIRS:
-        t.rule()
+        t.section(pair_tex(ev, hv))
         for logn in LOGNS:
             for ai, acct in enumerate(ACCTS):
-                cells = [pair_tex(ev, hv) if logn == LOGNS[0] and ai == 0
-                         else '', n_of(logn) if ai == 0 else '',
-                         ACCT_TEX[acct]]
+                cells = [n_of(logn) if ai == 0 else '', ACCT_TEX[acct]]
                 for f in FLAGS:
                     for T in CCD_T:
                         cells.append(t.ratio(d.r(f, 'latency', ev, hv, T,
@@ -653,22 +620,18 @@ def table_parallel_ccd(d):
         worst = max(worst, abs(float(row['tsc_cycles_est'])
                                / float(h['tsc_cycles_est']) - 1))
     t.caption = (
-        'Parallel signing latency across both CCDs, \\EightCM{}/\\HAWK{}, a'
-        ' separate run set: latency only, on the 16 cores of both CCDs (SMT'
-        ' off, the same clock on both), the V-cache CCD\'s 8 cores first,'
-        ' so $T \\le 8$ runs on the V-cache CCD (its wall-clock cycles agree'
-        ' with the headline runs within %.2f\\%%) and $T=16$ spans both CCDs'
-        ' (split L3, V-cache on one CCD only, cross-CCD transfers). Fair'
-        ' within the run set: same process, interleaving, pinning, pool,'
-        ' stream split, build, keys and messages for both schemes. Known'
-        ' asymmetry: \\EightCM{}\'s sampler workers write 32-bit outputs'
-        ' ($8n$ bytes per call), \\HAWK{}\'s 8-bit outputs ($2n$ bytes), so'
-        ' at $T=16$ \\EightCM{} moves more data between the CCDs (an'
-        ' implementation property, not the lattice\'s). Columns as in'
-        ' \\cref{tab:cmp-parallel}, CPU at $T=16$; %s runs per flag set;'
-        ' every 95\\%% CI'
-        ' half-width is at most %s.'
-        % (100 * worst, runs_text(d, 'cross-ccd'), t.ci_text()))
+        'Parallel signing latency across both CCDs, \\EightCM{}/\\HAWK{}: a'
+        ' separate run set (%s runs per flag set) on all 16 cores, the'
+        ' V-cache CCD\'s 8 first, so $T \\le 8$ runs there (wall-clock'
+        ' cycles within %.2f\\%% of the headline runs) and $T=16$ spans'
+        ' both CCDs (split L3, V-cache on one CCD only). Fair within the'
+        ' run set, and never combined with the headline tables. Known'
+        ' asymmetry: \\EightCM{}\'s sampler workers write $8n$ bytes per'
+        ' call, \\HAWK{}\'s $2n$, so at $T=16$ \\EightCM{} moves more data'
+        ' between the CCDs (an implementation property, not the'
+        ' lattice\'s). Columns as in \\cref{tab:cmp-parallel}, CPU at'
+        ' $T=16$; every 95\\%% CI half-width is at most %s.'
+        % (runs_text(d, 'cross-ccd'), 100 * worst, t.ci_text()))
     return t
 
 
@@ -676,36 +639,44 @@ THROUGHPUT_PAIRS = (('ref', 'ref'), ('hot64', 'hot64'), ('hot32', 'hot32'))
 
 
 def table_throughput(d):
-    cols = ['pair', '$n$', 'acct'] + ['\\HAWK{}', '\\EightCM{}', 'ratio'] * 2
-    t = Table('tab_throughput', 'tab:cmp-throughput', '', 'lrl' + 'rrr' * 2,
-              two_flag_groups(3, 3, ' (sig/s/core)'), cols)
+    cols = ['$n$', 'acct'] + ['\\HAWK{}', '\\EightCM{}', 'ratio'] * 2
+    t = Table('tab_throughput', 'tab:cmp-throughput', '', 'rl' + 'rrr' * 2,
+              two_flag_groups(2, 3, ' (sig/s/core)'), cols)
     procs = set()
+    ahead = []
     for ev, hv in THROUGHPUT_PAIRS:
-        t.rule()
+        t.section(pair_tex(ev, hv))
         for logn in LOGNS:
             for ai, acct in enumerate(ACCTS):
-                cells = [pair_tex(ev, hv) if logn == LOGNS[0] and ai == 0
-                         else '', n_of(logn) if ai == 0 else '',
-                         ACCT_TEX[acct]]
+                cells = [n_of(logn) if ai == 0 else '', ACCT_TEX[acct]]
                 for f in FLAGS:
                     h = d.s(f, 'throughput', 'hawk', hv, 1, logn, acct)
                     e = d.s(f, 'throughput', 'e8', ev, 1, logn, acct)
                     procs |= {h['procs'], e['procs']}
+                    r = d.r(f, 'throughput', ev, hv, 1, logn, acct,
+                            'sigs_per_s_per_core')
+                    cell = t.ratio(r)
+                    if float(r['e8']) > float(r['hawk']):
+                        cell += '\\rlap{$^\\ast$}'
+                        ahead.append(r)
                     cells += [grouped(h['sigs_per_s_per_core']),
-                              grouped(e['sigs_per_s_per_core']),
-                              t.ratio(d.r(f, 'throughput', ev, hv, 1, logn,
-                                          acct, 'sigs_per_s_per_core'))]
+                              grouped(e['sigs_per_s_per_core']), cell]
                 t.row(cells)
     if len(procs) != 1:
         fail('throughput rows with different process counts %s' % procs)
+    star = ''
+    if ahead:
+        star = ' $^\\ast$\\EightCM{} ahead: ' + '; '.join(
+            '%.3f, 95\\%% CI [%.3f, %.3f]' % (
+                float(r['e8']) / float(r['hawk']), float(r['ci_lo']),
+                float(r['ci_hi'])) for r in ahead) + '.'
     t.caption = (
-        'Throughput per core: $P = %s$ independent single-thread signer'
-        ' processes, one per pinned core of the V-cache CCD, running the'
-        ' same schedule at the same time. Signatures per second of signing'
-        ' time per process, mean over the processes and the %s runs; ratio'
-        ' \\EightCM{}/\\HAWK{} (above 1 favours \\EightCM{}); every 95\\%%'
-        ' CI half-width is at most %s.'
-        % (procs.pop(), runs_text(d), t.ci_text()))
+        'Throughput per core: $P = %s$ single-thread signer processes, one'
+        ' per core, running at once. Signatures per second of signing time,'
+        ' mean over the processes and the %s runs; ratio'
+        ' \\EightCM{}/\\HAWK{} (above 1 favours \\EightCM{}), every 95\\%%'
+        ' CI half-width at most %s.%s'
+        % (procs.pop(), runs_text(d), t.ci_text(), star))
     return t
 
 
@@ -761,14 +732,12 @@ def table_stages(d):
                          % (f, scheme, n_of(logn), parts, total))
     t.caption = (
         'Where the signing time goes: stage profile of both \\texttt{ref}'
-        ' signers on one core, all-in, in thousands of TSC cycles per'
-        ' accepted signature (profiling builds: the per-stage timers are'
-        ' included, so the totals exceed \\cref{tab:cmp-ref}), mean over %s'
-        ' runs; flag sets as in \\cref{tab:cmp-ref}. \\HAWK{}: upstream'
-        ' \\HAWK{} \\texttt{ref}; its reconstruction computes $s_1$ and its'
-        ' norm checks include the symmetry break. \\EightCM{}: key preparation is the prepared basis, the'
-        ' sampler is the $E_8$ block sampler and reconstruction computes'
-        ' $s$.' % runs_text(d))
+        ' signers on one core, all-in, thousands of TSC cycles per'
+        ' signature, mean over %s runs (profiling builds: the timers are'
+        ' included, so the totals exceed \\cref{tab:cmp-ref}). \\HAWK{}:'
+        ' reconstruction computes $s_1$, norm checks include'
+        ' \\textsf{sym-break}. \\EightCM{}: key preparation builds the'
+        ' prepared basis, reconstruction computes $s$.' % runs_text(d))
     return t
 
 
@@ -806,33 +775,31 @@ def table_avx2(d):
             t.row(cells)
     t.caption = (
         'Implementation context, not a fair pair: upstream \\HAWK{}\'s AVX2'
-        ' implementation (AVX2) against its portable \\texttt{ref}'
-        ' (\\HAWK{}) and \\EightCM{} (\\texttt{ref} signer, fast verifier),'
-        ' which has no AVX2 path; no claim about the lattice rests on this'
-        ' table. Thousands of core cycles on one core, same harness, build'
-        ' flags and runs as \\cref{tab:cmp-ref,tab:cmp-verify}. ratio:'
-        ' \\EightCM{}/AVX2; every 95\\%% CI half-width is at most %s. Key'
-        ' generation in'
+        ' build (AVX2) against its portable \\texttt{ref} (\\HAWK{}) and'
+        ' \\EightCM{} (\\texttt{ref} signer, fast verifier), which has no'
+        ' AVX2 path. Thousands of core cycles on one core, same runs as'
+        ' \\cref{tab:cmp-ref,tab:cmp-verify}; ratio \\EightCM{}/AVX2, every'
+        ' 95\\%% CI half-width at most %s. Key generation in'
         ' \\cref{tab:cmp-keygen}.' % t.ci_text())
     return t
 
 
 def table_keygen(d):
-    cols = ['$n$', 'scheme'] + ['mean', 'median', 'tail\\,(k)', 'ratio'] * 2 + \
+    cols = ['scheme'] + ['mean', 'median', 'tail', 'ratio'] * 2 + \
         ['diverged']
-    t = Table('tab_keygen', 'tab:cmp-keygen', '', 'rl' + 'rrrr' * 2 + 'r',
-              two_flag_groups(2, 4, ' (Mcycles)') + [('', 1)], cols)
+    t = Table('tab_keygen', 'tab:cmp-keygen', '', 'l' + 'rrrr' * 2 + 'r',
+              two_flag_groups(1, 4, ' (Mcycles)') + [('', 1)], cols)
     md = {f: {(r['n'], r['scheme'], r['variant']): r
               for r in md_table(d.md, '8', f, d.md_path)} for f in FLAGS}
     rows = (('\\HAWK{}', 'hawk', 'ref'), ('\\EightCM{}', 'e8', 'ref'),
             ('core', 'hawk_core', 'ref'),
-            ('\\HAWK{} AVX2$^\\dagger$', 'hawk', 'ref-avx2'),
-            ('core AVX2$^\\dagger$', 'hawk_core', 'ref-avx2'))
+            ('AVX2$^\\dagger$', 'hawk', 'ref-avx2'),
+            ('AVX2 core$^\\dagger$', 'hawk_core', 'ref-avx2'))
     counts = set()
     for logn in LOGNS:
-        t.rule()
+        t.section('$n=%s$' % n_of(logn))
         for ri, (label, scheme, var) in enumerate(rows):
-            cells = [n_of(logn) if ri == 0 else '', label]
+            cells = [label]
             for f in FLAGS:
                 row = d.k(f, 'keygen', scheme, var, '', logn, '')
                 core = d.k(f, 'keygen', 'hawk_core', var, '', logn, '')
@@ -866,43 +833,40 @@ def table_keygen(d):
         fail('key generation rows with different counts %s' % counts)
     runs, count = counts.pop()
     t.caption = (
-        'Key generation on one core: millions of core cycles per key, each'
-        ' scheme\'s public key generation call (retries included), paired'
-        ' seeds, %s runs of %s keys per row. mean: mean over the runs of'
-        ' the per-run means (key generation restarts, so its expected cost'
-        ' is the mean); median: mean of the per-run medians; ratio:'
-        ' \\EightCM{}/\\HAWK{} of the means (\\EightCM{}/\\HAWK{} AVX2 on'
-        ' the AVX2 row), every 95\\%% paired-bootstrap CI half-width at'
-        ' most %s. core: \\HAWK{}\'s NTRU key generation core alone, which'
-        ' both schemes call; tail: mean minus the core\'s on the same keys,'
-        ' in thousands of cycles'
-        ' (\\HAWK{}: public-key encoding; \\EightCM{}: its public form, key'
-        ' generation limits and invertibility check over 3 primes).'
-        ' diverged: share of keys on which \\HAWK{} restarted after the'
-        ' core because its compressed public-key encoding failed, which'
-        ' \\EightCM{}\'s uncompressed key never does; this key-format effect'
-        ' is why the ratio is below 1 at $n = 512$ and $1024$.'
-        ' $^\\dagger$Implementation context, not a fair pair (\\EightCM{} has'
-        ' no AVX2 path).' % (runs, grouped(int(count) // int(runs)), t.ci_text()))
+        'Key generation on one core: millions of core cycles per key, %s'
+        ' runs of %s keys on paired seeds. mean: mean of the per-run means'
+        ' (restarts make the cost heavy-tailed, so the mean is the expected'
+        ' cost); median: mean of the per-run medians; ratio:'
+        ' \\EightCM{}/\\HAWK{} of the means (\\EightCM{}/AVX2 on the AVX2'
+        ' row), every 95\\%% paired-bootstrap CI half-width at most %s.'
+        ' core: \\HAWK{}\'s NTRU key generation core, which both schemes'
+        ' call; tail: mean minus core on the same keys, in thousands of'
+        ' cycles (\\HAWK{}: public-key encoding; \\EightCM{}: public form,'
+        ' limits and invertibility over 3 primes). diverged: keys on which'
+        ' \\HAWK{} restarted after the core because its compressed public'
+        ' key failed to encode, which \\EightCM{}\'s uncompressed key never'
+        ' does; hence the ratio below 1 at $n = 512$ and $1024$.'
+        ' $^\\dagger$Implementation context (\\EightCM{} has no AVX2 path).'
+        % (runs, grouped(int(count) // int(runs)), t.ci_text()))
     return t
 
 
 def table_verify(d):
-    cols = ['$n$', 'verifier', 'primes'] + \
+    cols = ['verifier', 'primes'] + \
         ['all-in', 'prep.', 'all-in', 'prep.'] * 2
-    groups = [('', 3)]
+    groups = [('', 2)]
     for f in FLAGS:
         groups += [(FLAG_TEX[f] + ' kcycles', 2), ('ratio', 2)]
-    t = Table('tab_verify', 'tab:cmp-verify', '', 'rlr' + 'rrrr' * 2,
+    t = Table('tab_verify', 'tab:cmp-verify', '', 'lr' + 'rrrr' * 2,
               groups, cols)
     rows = (('\\HAWK{}', 'hawk', 'upstream', '2'),
             ('\\EightCM{} fast', 'e8', 'fast', '3'),
             ('\\EightCM{} ref$^\\dagger$', 'e8', 'ref', '4'))
     dec = {'hawk': [], 'e8': []}
     for logn in LOGNS:
-        t.rule()
+        t.section('$n=%s$' % n_of(logn))
         for ri, (label, scheme, vf, primes) in enumerate(rows):
-            cells = [n_of(logn) if ri == 0 else '', label, primes]
+            cells = [label, primes]
             for f in FLAGS:
                 vals, rats = [], []
                 for acct in ACCTS:
@@ -920,16 +884,14 @@ def table_verify(d):
     t.caption = (
         'Verification on one core: thousands of core cycles per signature'
         ' and \\EightCM{}/\\HAWK{} ratios (every 95\\%% CI half-width at most'
-        ' %s), %s runs of 10 keys $\\times$ 1{,}000 signatures. all-in:'
-        ' encoded signature and public key; prep.: the public key decoded'
-        ' once outside the timed call (decoding costs \\HAWK{} %s to %s and'
-        ' \\EightCM{} %s to %s kcycles). primes: NTT primes of the norm'
-        ' check, each scheme the minimum its own range argument proves'
-        ' sound; the third is a cost of the larger \\EightCM{} public form.'
-        ' fast: \\EightCM{}\'s verifier with \\HAWK{}\'s techniques.'
-        ' $^\\dagger$ref: the verifier of the submitted version (twiddles'
-        ' rebuilt per call, one inversion per coefficient, floating-point'
-        ' bound), context only.'
+        ' %s), %s runs of 10 keys $\\times$ 1{,}000 signatures. prep.: the'
+        ' public key decoded outside the timed call (decoding costs'
+        ' \\HAWK{} %s to %s and \\EightCM{} %s to %s kcycles). primes: NTT'
+        ' primes of the norm check, the minimum each scheme\'s range'
+        ' argument proves sound (\\cref{prop:range}). fast: \\EightCM{}\'s'
+        ' verifier with \\HAWK{}\'s techniques. $^\\dagger$ref: the'
+        ' verifier of an earlier version (tables rebuilt per call, one'
+        ' inversion per coefficient, floating-point bound), context only.'
         % (t.ci_text(), runs_text(d), kc(min(dec['hawk'])),
            kc(max(dec['hawk'])), kc(min(dec['e8'])), kc(max(dec['e8']))))
     return t
@@ -989,12 +951,13 @@ def build(d):
     t1 = table_signing(
         d, (('ref', 'ref'),), 'tab_ref', 'tab:cmp-ref',
         'Signing on one core at the as-specified precision: \\HAWK{}'
-        ' \\texttt{ref} against \\EightCM{} \\texttt{ref}', True)
+        ' \\texttt{ref} against \\EightCM{} \\texttt{ref} (78-bit'
+        ' thresholds, constant-time full table scan)', True)
     t2 = table_signing(
         d, (('hot64', 'hot64'), ('hot32', 'hot32')), 'tab_hot',
-        'tab:cmp-hot', 'Signing on one core with the same faster sampler'
-        ' technique in both schemes: the \\texttt{hot64} and \\texttt{hot32}'
-        ' pairs', False)
+        'tab:cmp-hot', 'Signing on one core with the same variable-time'
+        ' hot-table sampler in both schemes, at 64 bits (\\texttt{hot64})'
+        ' and 32 bits (\\texttt{hot32})', False)
     return [t1, t2, table_sampler(d), table_parallel(d),
             table_parallel_abs(d), table_parallel_ccd(d),
             table_throughput(d), table_stages(d), table_avx2(d),
@@ -1009,18 +972,24 @@ MACROS = r"""% Macros of the generated comparison tables (paper_tables.py); each
 """
 
 PREVIEW_HEAD = r"""%% Compile check of the generated tables at the LNCS text width
-%% (12.2 cm, 10 pt); not part of the paper.
+%% (12.2 cm, 10 pt) and font sizes: llncs sets \footnotesize to \small
+%% (9 pt), so the preview does too.  Not part of the paper.
 \documentclass[10pt]{article}
 \usepackage[T1]{fontenc}
 \usepackage{amsmath,amssymb,booktabs}
+\newtheorem{proposition}{Proposition}
 \usepackage[paperwidth=16cm,paperheight=26cm,textwidth=122mm,textheight=193mm]{geometry}
 \usepackage{hyperref}
 \usepackage{cleveref}
 \input{macros}
+\let\footnotesize\small
 \begin{document}
-%% The paper's precision table, which the signing tables cite.
+%% Placeholders for the paper's labels that the captions cite.
+\section{Placeholder for the paper's methodology}\label{sec:method}
 \begin{table}[h]\caption{Placeholder for the paper's precision table}
 \label{tab:precision}\end{table}
+\begin{proposition}[Placeholder for the paper's range proposition]
+\label{prop:range}\end{proposition}
 """
 
 

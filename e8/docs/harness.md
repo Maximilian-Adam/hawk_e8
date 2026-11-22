@@ -571,8 +571,9 @@ library) on the committed outputs of the bare-metal measurements in
 writes the paper's tables to `results/paper_tables/` (gitignored: they
 are a pure function of committed files, byte-identical on every run).
 If `pdflatex` is installed it then compiles `preview.tex` at the LNCS
-text width (12.2 cm, 10 pt) and fails on a LaTeX error, a warning or an
-overfull box; `preview.pdf` lands beside the tables, the auxiliary files
+text width (12.2 cm, 10 pt) and font sizes (`llncs` sets `\footnotesize`,
+which the tables use, to `\small`, 9 pt, and so does the preview) and
+fails on a LaTeX error, a warning or an overfull box; `preview.pdf` lands beside the tables, the auxiliary files
 in `build/paper_tables/`.
 
 | file | contents |
@@ -584,8 +585,11 @@ in `build/paper_tables/`.
 
 The paper copies `macros.tex` and the `tab_*.tex` files, inputs
 `macros` once and each table where it belongs; the tables need
-`booktabs`, `amssymb` (`\checkmark`) and `cleveref` (captions cite each
-other and the paper's `tab:precision`).
+`booktabs`, `amssymb` (`\checkmark`) and `cleveref`.  The captions cite
+each other and three labels of the paper, `sec:method` (the setup,
+accounting and estimator, which the captions do not repeat),
+`tab:precision` and `prop:range` (the verifier's prime count); the
+preview defines placeholders for them.
 
 | label | contents | status |
 | --- | --- | --- |
@@ -610,13 +614,18 @@ Conventions:
 - **Layout**: both flag sets side by side in every timing table except
   the stage profile, which stacks them (too wide otherwise). `O2` is
   `-O2`, `O3native` is `-O3 -march=native -fno-strict-aliasing`; the
-  signing tables' captions define them, the others refer there.
+  paper's methodology section (`sec:method`) defines them.
 - **Units**: thousands of core cycles with one decimal; key generation
   in millions with two decimals, its tail in thousands; throughput in
   signatures per second per core; sizes in bytes. The parallel tables
   use wall-clock (TSC) cycles for latency and summed core cycles for
   total CPU.
-- **Ratios**: E8 / HAWK (in the throughput table above 1 favours E8), two
+- **Grouping**: a pair (`ref-T`/`ref`, `hot64`, `hot32`) or a degree
+  (key generation, verification) heads its block as a full-width row
+  instead of a column, which keeps the tables within the width at 9 pt.
+- **Ratios**: E8 / HAWK (in the throughput table above 1 favours E8,
+  and a row where E8 is ahead is starred, with its ratio to three
+  decimals and its CI in the caption), two
   decimals, rounded from the estimates rather than the analysis's
   four-decimal ratio, so that a stored `...5` is not rounded twice
   (O3native `ref` all-in at n = 1024: 836,791.4 / 468,793.5 = 1.78499,
