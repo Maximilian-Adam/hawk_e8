@@ -177,10 +177,12 @@ tables: build
 # measurement outputs in docs/measurements/ into results/paper_tables/
 # (not committed; the paper copies the tab_*.tex files); then, if pdflatex
 # is installed, compile preview.tex at the LNCS text width (auxiliary
-# files in build/paper_tables/, preview.pdf beside the tables) and fail on
+# files in build/paper_tables/, emptied first so that pdflatex, which looks
+# in its output directory first, cannot read stale inputs there; preview.pdf
+# beside the tables) and fail on
 # a LaTeX error, a warning or an overfull box.
 paper-tables:
-	@mkdir -p build/paper_tables
+	@rm -rf build/paper_tables && mkdir -p build/paper_tables
 	python3 -I compare/analysis/paper_tables.py --measurements docs/measurements --out results/paper_tables
 	@if command -v pdflatex > /dev/null; then \
 		aux=$$(pwd)/build/paper_tables; cd results/paper_tables && for i in 1 2; do \
