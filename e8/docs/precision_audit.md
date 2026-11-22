@@ -149,8 +149,7 @@ distribution is reported in `precision_audit.csv`, with a `log2` form.
 | order minimising the loss factor, HAWK-512 / HAWK-1024 | 37286 / 4181 | 37286 / 4181 |
 
 The audit reproduces the spec's figures.  The minimising orders are exactly
-the spec's, which confirms `lambda` = 128 and 256 (`2^(logn - 2)`, as in
-the aux script `generate_C_tables.py`).  The spec's 1.07 and 1.17 are the
+the spec's, which confirms `lambda` = 128 and 256 (`2^(logn - 2)`).  The spec's 1.07 and 1.17 are the
 audit's 1.0602 and 1.1674 rounded up to two decimals.  For HAWK-256 (not in
 the spec's text) the per-coefficient `R_513 - 1` is `2^-78.30`, which
 also meets the spec's criterion.  The aux script also checks

@@ -1,4 +1,8 @@
-# HAWK and Experimental E8 Signing Comparison
+# Timing accounting and the per-signature CSV schema
+
+This document defines what the benchmarks time and what every column of
+their CSV output means. The results themselves are in
+[`measurements/`](measurements/README.md).
 
 The comparison harness of record is `e8/compare/bench_compare.c`:
 interleaved schedule, latency and throughput modes, pinning,
@@ -201,8 +205,9 @@ flags and the compiler.  `--logn L` restricts the run to one degree,
 `--variant NAME` (repeatable) to the named variants and `--threads LIST` to
 the given thread counts; `--list` prints every variant of both schemes.
 
-Results under this accounting are to be measured on bare-metal Linux
-(`measurement_runbook.md`); WSL runs are smoke tests only.
+The results under this accounting were measured on bare-metal Linux
+([`measurement_runbook.md`](measurement_runbook.md); results in
+[`measurements/`](measurements/README.md)); WSL runs are smoke tests only.
 
 ## Submission accounting (paper-v1-submission)
 

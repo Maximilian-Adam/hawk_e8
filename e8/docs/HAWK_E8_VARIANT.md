@@ -1,12 +1,19 @@
-# Experimental HAWK-E8-CM Variant
+# HAWK-E8-CM: design and implementation notes
 
-This document describes the current experimental E8 path in this repository.
-It is research code only.  It is not standard HAWK with a replacement sampler,
-and it is not production cryptographic code.
+This is the detailed reference for the E8 variant: the lattice and public
+form, the sampler and its variants, how randomness is drawn, signing,
+verification, key formats, tests and diagnostics. For an overview, the build
+commands and the list of documents, start with the [README](../README.md).
 
-The ordinary HAWK implementation, public API, compressed signature format, and
-original tests remain unchanged.  E8 code is enabled only for E8-specific
-reference targets with `HAWK_ENABLE_E8_EXPERIMENTAL=1`.
+HAWK-E8-CM is research code, not production cryptography. It is also not
+standard HAWK with a different sampler: the public form changes (see below).
+In the paper's fair comparison it is slower than HAWK, and the recent Galois
+key recovery attack on HAWK applies to it too
+([`galois_attack.md`](galois_attack.md)).
+
+Upstream HAWK's implementation, API, compressed formats and tests are
+unchanged. The E8 code is compiled only into E8 targets, with
+`HAWK_ENABLE_E8_EXPERIMENTAL=1`.
 
 ## Implemented Shape
 
@@ -226,8 +233,9 @@ its timers run on every block inside the timed call; only
 `e8_sign_sampler_core()` takes its per-attempt sampler timestamps only when a
 trace is requested.
 
-Cache lookup and publication are protected by a pthread mutex, so concurrent
-cache warm-up cannot corrupt the cache.  Full sampler and signing calls are
+The runtime table builder used by tests and tools (`e8_sampler_runtime.c`)
+caches its tables per `sigma_sign` behind a pthread mutex, so concurrent
+warm-up cannot corrupt the cache; the signing path does not use it.  Full sampler and signing calls are
 not reentrant across application threads because the worker pool, thread/RNG
 controls, and profiling state are process-global; applications must serialize
 those calls.  This does not affect the sampler's internal block parallelism.
@@ -411,7 +419,7 @@ hawk-spec.pdf, section 6.5) per draw, per coordinate or block, and per
 signature.  Method, results and findings: `docs/precision_audit.md`;
 per-variant summary (joined onto the harness timing rows):
 `docs/precision_summary.csv`.  In short, the SD at equal width is within
-about 2 bits between the schemes (78 bits: about 2^-66 per signature), and
+about 1.1 bits between the schemes (78 bits: about 2^-66 per signature), and
 HAWK `ref` reproduces the spec's figures.  With HAWK's rounding rule the
 order-513 divergence is set by the floored deficit of the extreme entries,
 about `2^-B P(tail)` per draw, so it tracks the threshold width and the hot
@@ -624,7 +632,7 @@ hm = SHAKE256(message || hpub)                                  once per call
 for attempt = 0, 2, 4, ...:
     salt = SHAKE256(hm || K || enc32le(attempt) || rng(salt_len))
     h    = SHAKE256(hm || salt)                                 2n bits
-    t    = B h mod 2;  z <- E8 sampler on 2R^2 + t              rng(32)
+    t    = B h mod 2;  z <- E8 sampler on 2R^2 + t              rng(40)
     reject if ||P_n z||^2 > bound;  w = B^-1 z;  symmetry break
     s    = (h - w) / 2;  reject if s does not fit int16;  encode
 ```
@@ -632,17 +640,14 @@ for attempt = 0, 2, 4, ...:
 `K` is `kgseed` for an encoded key and `f || g` (2n bytes) for a prepared key,
 the same rule as HAWK's encoded/decoded split, and the attempt counter
 advances by 2 as in HAWK.  The RNG is called exactly twice per attempt in both
-schemes (salt, then sampler seed: 32 bytes for E8, 40 bytes for HAWK); the E8
-sampler derives its per-block or per-worker SHAKE streams from that seed, also
-with the worker pool enabled.  Attempts can therefore be counted identically
-for both schemes as `rng_calls / 2`.  The public API uses the prototype
-`sigma_sign` and default `sigma_verify` values below and caps attempts
-internally at 65,536 (HAWK loops until success).
-
-One difference remains: HAWK's sampler SHAKE instances also absorb
-`hm || K || enc32le(attempt + 1)` before the RNG seed, so its samples stay
-key- and message-bound even with a poor RNG; the E8 sampler is seeded from the
-RNG only.
+schemes: the salt, then a 40-byte sampler seed.  Attempts can therefore be
+counted identically for both schemes as `rng_calls / 2`.  The E8 sampler
+derives its per-worker SHAKE streams from that seed and from the prefix
+`hm || K || enc32le(attempt + 1)`, as HAWK's sampler does, so its samples
+stay bound to the key and message even with a poor RNG (see "Sampler
+Contract").  The public API uses the prototype `sigma_sign` and default
+`sigma_verify` values below and caps attempts at 65,536 (HAWK loops until
+success).
 
 The older internal `e8_sign_sampler_*` functions keep their behaviour: they
 take raw `f, g, F, G` (and optionally prepared bases) and a caller-supplied
@@ -688,9 +693,9 @@ n=512:  sigma_sign = 3.631, sigma_verify = 1.99
 n=1024: sigma_sign = 3.669, sigma_verify = 1.95
 ```
 
-`max_attempts` defaults to `1000` in the sampler-backed signing tests and CSV
-diagnostics.  These are prototype integration values, after some degree of tuning, but are not final parameter
-claims.
+`max_attempts` is 1000 in the sampler-backed signing tests and the CSV
+diagnostics.  These are prototype values, tuned for this study; they are not
+proposed parameter sets.
 
 The verifier threshold helper is:
 
@@ -797,12 +802,9 @@ Sampler timing:
 make -C e8 sampler-bench
 ```
 
-or for a proper comparison with checks disabled:
-```sh
-make -C e8 clean
-make -C e8 sampler-bench CFLAGS='-O2 -DHAWK_E8_DEBUG_CHECKS=0'
-```
-
+The default build keeps the debug checks on, so for timing use the
+benchmark build instead (`make -C e8 bench-builds`, then
+`e8/bin/e8_sampler_bench-O2` or `-O3native`; see the README).  The target
 writes `e8/results/bench/e8_sampler_bench.csv` with ordinary HAWK
 sampler rows and selected E8 sampler rows.  In-path sampler profiling is off
 by default, so the `profile_*` columns are empty; `make -C e8
@@ -848,9 +850,9 @@ with the selected per-logn thread count; `--variant NAME` (repeatable) and
 `--list` prints the variants.
 `profile-sign-bench` builds the same benchmark with `HAWK_E8_PROFILE_SIGN=1`
 and prints per-stage E8 signing timings (including key preparation and salt
-derivation) to the terminal.  For optimization timing, build with
-`CFLAGS='-O2 -DHAWK_E8_DEBUG_CHECKS=0'`; debug-check builds deliberately retain schoolbook
-cross-checks for the reconstructed signer coefficients.  The final symmetric
+derivation) to the terminal.  For timing, use the benchmark build (`bin/e8_sign_bench-O2` or
+`-O3native` from `make -C e8 bench-builds`): the default build deliberately
+keeps the schoolbook cross-checks of the reconstructed signer coefficients.  The final symmetric
 HAWK/E8 accounting, methods, and reproduction commands are recorded in
 `e8/docs/perf_comparison_final.md`.
 
@@ -921,7 +923,11 @@ statistical proof of sampler distribution.
   formats.
 - No side-channel hardening.
 - No full qROM-style unforgeability proof or complete HAWK security reduction for the modified public-form class.
-- Only the HAWK-style publicly computable isometry/orbit structure is analysed; a complete automorphism-aware cryptanalysis of the E8 preconditioned public-form class remains to be done.
+- The recent Galois key recovery attack on HAWK carries over to HAWK-E8-CM
+  at the same heuristic cost; only its provable half-dimension reduction is
+  open for E8's cocycle lattice (paper Sec. 5.4, `galois_attack.md`).  Other
+  automorphism-aware cryptanalysis of the E8 public-form class has not been
+  done.
 - The E8 verifier uses the completion-of-squares norm; tests compare it with
   the expanded direct norm and with the reference verifier.  Compact
   public-key reconstruction from compressed E8 public data is not
